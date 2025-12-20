@@ -1,0 +1,132 @@
+name: 🐛 Bug report
+description: Report a bug or problem in the project
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the form below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem description
+      description: A clear and concise description of the problem
+      placeholder: Describe what went wrong...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reproduce the problem
+      placeholder: |
+        1. Go to '...'
+        2. Run '...'
+        3. Scroll to '...'
+        4. See the error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen
+      placeholder: Describe the expected behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: A clear and concise description of what actually happened
+      placeholder: Describe the actual behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / errors
+      description: If you have logs or error messages, paste them here (e.g. `journalctl -u asc`)
+      render: shell
+      placeholder: |
+        ```
+        Paste logs here
+        ```
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - API (gRPC/REST)
+        - CLI
+        - App management (Docker & native)
+        - Package manager
+        - MCP server
+        - Monitoring
+        - Backups
+        - SFTP
+        - Databases
+        - Consoles (WebSocket/SSH)
+        - Scheduler
+        - Updater
+        - Configuration
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How severe is this problem?
+      options:
+        - Critical (application does not work)
+        - High (core functionality broken)
+        - Medium (partial functionality broken)
+        - Low (minor impact)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Which version of asc are you running? (output of `asc --version`)
+      placeholder: e.g. v0.0.1 or commit hash
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: On which OS did the problem occur?
+      placeholder: e.g. Ubuntu 24.04, Debian 12
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Additional information about the environment
+      placeholder: |
+        - Docker version: ...
+        - Rust version: ...
+        - Other relevant details...
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other information that might be useful
+      placeholder: Screenshots, links, related issues, etc.

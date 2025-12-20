@@ -1,0 +1,93 @@
+# 🛠️ Taskfile — команды разработки, сборки и релиза asc-daemon
+# https://taskfile.dev · установка: go install github.com/go-task/task/v3/cmd/task@latest
+version: '3'
+
+vars:
+  TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
+
+tasks:
+  default:
+    desc: 📋 Список всех команд
+    cmds:
+      - task --list
+
+  # ── 🧑‍💻 Разработка ────────────────────────────────────────────────
+
+  dev:
+    desc: 🚀 Запустить демон локально (debug, подробные логи)
+    cmds:
+      - RUST_LOG=debug cargo run --bin asc -- serve
+
+  dev:cli:
+    desc: 💻 Выполнить CLI-команду против локального демона (task dev:cli -- status)
+    cmds:
+      - cargo run --bin asc -- {{.CLI_ARGS}}
+
+  dev:updater:
+    desc: 🔄 Запустить asc-updater локально (task dev:updater -- status)
+    cmds:
+      - cargo run --bin asc-updater -- {{.CLI_ARGS}}
+
+  proto:
+    desc: 📜 Сгенерировать Rust-код из proto-контрактов (prost/tonic)
+    cmds:
+      - cargo build   # build.rs компилирует proto/ через protox (protoc не нужен)
+
+  # ── ✅ Качество ───────────────────────────────────────────────────
+
+  lint:
+    desc: 🔍 Clippy + проверка форматирования
+    cmds:
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - cargo fmt --all -- --check
+
+  fmt:
+    desc: 🎨 Отформатировать код
+    cmds:
+      - cargo fmt --all
+
+  test:
+    desc: 🧪 Тесты
+    cmds:
+      - cargo test --all
+
+  check:
+    desc: ✅ Полная проверка перед коммитом (lint + test)
+    cmds:
+      - task: lint
+      - task: test
+
+  # ── 📦 Сборка и релиз ─────────────────────────────────────────────
+
+  build:
+    desc: 📦 Релизная сборка под текущую платформу (asc + asc-updater)
+    cmds:
+      - cargo build --release
+
+  build:cross:
+    desc: 🧬 Кросс-компиляция под все поддерживаемые архитектуры (нужен cross)
+    cmds:
+      - for: { var: TARGETS }
+        cmd: cross build --release --target {{.ITEM}}
+
+  install:local:
+    desc: 🔧 Установить собранные бинарники в /usr/local/bin (нужен sudo)
+    deps: [build]
+    cmds:
+      - sudo install -m 755 target/release/asc /usr/local/bin/asc
+      - sudo install -m 755 target/release/asc-updater /usr/local/bin/asc-updater
+
+  # ── 🚀 Продакшен ──────────────────────────────────────────────────
+
+  prod:service:
+    desc: 🚀 Установить и запустить как systemd-сервис (нужен sudo)
+    deps: [install:local]
+    cmds:
+      - sudo asc service install
+      - sudo systemctl enable --now asc
+
+  prod:status:
+    desc: 📊 Статус продакшен-сервиса
+    cmds:
+      - systemctl status asc --no-pager
+      - asc status

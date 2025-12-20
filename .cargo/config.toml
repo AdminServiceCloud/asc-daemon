@@ -1,0 +1,5 @@
+# 🐧 asc-daemon собирается только под Linux (см. AGENTS.md).
+# На Windows-машинах разработки cargo по умолчанию целится в Linux:
+# check/clippy работают локально, а build/test выполняются в WSL или CI.
+[build]
+target = "x86_64-unknown-linux-gnu"

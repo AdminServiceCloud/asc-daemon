@@ -1,0 +1,213 @@
+// asc-daemon API contracts — the source of truth.
+// The AdminService.Cloud platform links these files (buf dependency) and
+// generates its clients from them; the daemon generates its Rust code from
+// the same files (prost/tonic). Changes must stay backward-compatible:
+// add optional fields, never remove or renumber existing ones.
+syntax = "proto3";
+
+package asc.daemon.v1;
+
+// Daemon-level information.
+service DaemonService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  // Daemon version, e.g. "0.1.0".
+  string version = 1;
+  uint32 apps_total = 2;
+  uint32 apps_running = 3;
+}
+
+// App lifecycle management. The REST transport exposes the same operations
+// (see docs/api.md for the route mapping); both share one service layer.
+service AppService {
+  rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+  rpc GetApp(GetAppRequest) returns (GetAppResponse);
+  // Install from the configured registries: "name" or "name@version".
+  rpc InstallApp(InstallAppRequest) returns (InstallAppResponse);
+  rpc StartApp(StartAppRequest) returns (StartAppResponse);
+  rpc StopApp(StopAppRequest) returns (StopAppResponse);
+  rpc RestartApp(RestartAppRequest) returns (RestartAppResponse);
+  rpc GetAppLogs(GetAppLogsRequest) returns (GetAppLogsResponse);
+  // Removes the app and all its data. Irreversible.
+  rpc RemoveApp(RemoveAppRequest) returns (RemoveAppResponse);
+  // Temporary one-time token required to open a WebSocket console session
+  // (DMN-007). The platform requests it automatically after checking the
+  // caller's permissions; short TTL, bound to one app and session type.
+  rpc IssueConsoleToken(IssueConsoleTokenRequest) returns (IssueConsoleTokenResponse);
+}
+
+enum AppState {
+  APP_STATE_UNSPECIFIED = 0;
+  APP_STATE_RUNNING = 1;
+  APP_STATE_STOPPED = 2;
+}
+
+message App {
+  string id = 1;
+  string name = 2;
+  // Runtime kind: docker | systemd | process.
+  string kind = 3;
+  AppState state = 4;
+  string version = 5;
+  // Package origin: "<source>:<git url>".
+  string source = 6;
+  // Owning Linux user name.
+  string owner = 7;
+}
+
+message ListAppsRequest {}
+
+message ListAppsResponse {
+  repeated App apps = 1;
+}
+
+message GetAppRequest {
+  string id = 1;
+}
+
+message GetAppResponse {
+  App app = 1;
+}
+
+message InstallAppRequest {
+  // "name" or "name@version" (version = git tag of the package repo).
+  string spec = 1;
+}
+
+message InstallAppResponse {
+  string id = 1;
+  string version = 2;
+}
+
+message StartAppRequest {
+  string id = 1;
+}
+
+message StartAppResponse {
+  // True when the app was already running (idempotent call).
+  bool already_running = 1;
+}
+
+message StopAppRequest {
+  string id = 1;
+}
+
+message StopAppResponse {
+  bool already_stopped = 1;
+}
+
+message RestartAppRequest {
+  string id = 1;
+}
+
+message RestartAppResponse {}
+
+message GetAppLogsRequest {
+  string id = 1;
+  // Number of trailing lines; 0 means the server default (100).
+  uint32 tail = 2;
+}
+
+message GetAppLogsResponse {
+  string logs = 1;
+}
+
+message RemoveAppRequest {
+  string id = 1;
+}
+
+message RemoveAppResponse {}
+
+enum ConsoleSessionType {
+  CONSOLE_SESSION_TYPE_UNSPECIFIED = 0;
+  // Read-only log stream.
+  CONSOLE_SESSION_TYPE_LOGS = 1;
+  // Interactive attach (stdin/stdout).
+  CONSOLE_SESSION_TYPE_ATTACH = 2;
+}
+
+message IssueConsoleTokenRequest {
+  string app_id = 1;
+  ConsoleSessionType session = 2;
+}
+
+message IssueConsoleTokenResponse {
+  string token = 1;
+  // Unix seconds when the token expires (~30s TTL, single use).
+  int64 expires_at = 2;
+}
+
+// System monitoring (DMN-006). The daemon samples metrics in the background
+// (config `[monitor]`, default every 10s) into an in-memory ring buffer;
+// these calls read from that buffer. REST mirror: GET /v1/metrics and
+// GET /v1/metrics/history?limit=N.
+service MonitorService {
+  // Latest sample. Fails with UNAVAILABLE right after startup until the
+  // first sample lands (typically < 1s).
+  rpc GetSystemMetrics(GetSystemMetricsRequest) returns (GetSystemMetricsResponse);
+  // Recent samples, oldest first.
+  rpc GetMetricsHistory(GetMetricsHistoryRequest) returns (GetMetricsHistoryResponse);
+}
+
+message SystemMetrics {
+  // Unix seconds when the sample was taken.
+  int64 timestamp = 1;
+  // Busy CPU share since the previous sample, 0-100. Absent on the very
+  // first sample (usage is a delta of two readings).
+  optional double cpu_usage_percent = 2;
+  uint32 cpu_cores = 3;
+  double load1 = 4;
+  double load5 = 5;
+  double load15 = 6;
+  // Memory sizes in bytes; used = total - available.
+  uint64 mem_total = 7;
+  uint64 mem_used = 8;
+  uint64 mem_available = 9;
+  uint64 swap_total = 10;
+  uint64 swap_used = 11;
+  uint64 uptime_secs = 12;
+  repeated DiskMetrics disks = 13;
+  repeated NetworkMetrics network = 14;
+}
+
+// One mounted real filesystem; sizes in bytes.
+message DiskMetrics {
+  string mount = 1;
+  string filesystem = 2;
+  uint64 total = 3;
+  uint64 used = 4;
+  // What unprivileged users can allocate (statvfs f_bavail).
+  uint64 available = 5;
+}
+
+// One network interface (loopback excluded). Byte/error counters are
+// cumulative since boot; per-second rates are deltas between samples.
+message NetworkMetrics {
+  string interface = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+  uint64 rx_errors = 4;
+  uint64 tx_errors = 5;
+  // Absent on the first sample.
+  optional double rx_bytes_per_sec = 6;
+  optional double tx_bytes_per_sec = 7;
+}
+
+message GetSystemMetricsRequest {}
+
+message GetSystemMetricsResponse {
+  SystemMetrics metrics = 1;
+}
+
+message GetMetricsHistoryRequest {
+  // Maximum number of most recent samples; 0 = the whole buffer.
+  uint32 limit = 1;
+}
+
+message GetMetricsHistoryResponse {
+  repeated SystemMetrics samples = 1;
+}

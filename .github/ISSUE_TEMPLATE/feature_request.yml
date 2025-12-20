@@ -1,0 +1,103 @@
+name: ✨ Feature request
+description: Suggest a new feature or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Please fill out the form below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature description
+      description: A clear and concise description of the proposed feature
+      placeholder: Describe what you would like to see...
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem this feature solves
+      description: Describe the problem or need this feature addresses
+      placeholder: |
+        e.g. "I need ... because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe how you envision this feature working
+      placeholder: |
+        Describe how the feature should work...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you considered any alternative solutions?
+      placeholder: |
+        Describe alternative approaches you considered...
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component does this feature relate to?
+      options:
+        - API (gRPC/REST)
+        - CLI
+        - App management (Docker & native)
+        - Package manager
+        - MCP server
+        - Monitoring
+        - Backups
+        - SFTP
+        - Databases
+        - Consoles (WebSocket/SSH)
+        - Scheduler
+        - Updater
+        - Configuration
+        - Architecture
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How important is this feature to you?
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+        - Nice to have
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Willingness to contribute
+      options:
+        - label: I am willing to implement this feature myself
+          required: false
+        - label: I am willing to help with testing
+          required: false
+        - label: I am willing to help with documentation
+          required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other information that might be useful
+      placeholder: Use cases, links, related issues, etc.

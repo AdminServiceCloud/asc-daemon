@@ -1,0 +1,77 @@
+name: 📝 Documentation improvement
+description: Suggest an improvement to the documentation
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the documentation!
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe what should be improved in the documentation
+      placeholder: Describe the problem or suggestion...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: Documentation type
+      description: Which part of the documentation is affected?
+      options:
+        - Repository README
+        - Overview (docs/README.md)
+        - API (docs/api.md)
+        - App management (docs/app-management.md)
+        - Package manager (docs/package-manager.md)
+        - MCP server (docs/mcp-server.md)
+        - Monitoring (docs/monitoring.md)
+        - Backups (docs/backups.md)
+        - SFTP (docs/sftp.md)
+        - Databases (docs/database.md)
+        - Consoles (docs/console.md)
+        - Scheduler (docs/scheduler.md)
+        - Updater (docs/updater.md)
+        - Code comments
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: Where is the problematic documentation? (file, section, URL)
+      placeholder: e.g. docs/api.md, "Tokens" section
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current state
+      description: Describe the current state of the documentation
+      placeholder: What it currently says or what is missing...
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed improvement
+      description: Describe how the improved documentation should look
+      placeholder: What should be written or added...
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Willingness to contribute
+      options:
+        - label: I am willing to make the documentation changes myself
+          required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other information that might be useful

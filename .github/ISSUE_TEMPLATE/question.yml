@@ -1,0 +1,60 @@
+name: ❓ Question
+description: Ask a question about the project
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for your question! Please fill out the form below.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State your question clearly
+      placeholder: Describe your question...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Provide context for your question
+      placeholder: |
+        - What are you trying to do?
+        - What have you already tried?
+        - Are there any related issues?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: Which category does your question fall into?
+      options:
+        - Installation & setup
+        - API usage
+        - CLI commands
+        - Docker integration
+        - Configuration
+        - Development
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Which version of asc are you running? (output of `asc --version`)
+      placeholder: e.g. v0.0.1 or commit hash
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other information that might be useful
+      placeholder: Screenshots, logs, code examples, etc.

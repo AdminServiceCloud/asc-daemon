@@ -1,0 +1,56 @@
+# 🚀 Release: кросс-сборка под все архитектуры и публикация GitHub Release — на тег v*
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: 📦 Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build (release)
+        run: cross build --release --target ${{ matrix.target }}
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          tar -C target/${{ matrix.target }}/release -czf dist/asc-${{ github.ref_name }}-${{ matrix.target }}.tar.gz asc asc-updater
+          sha256sum dist/*.tar.gz > dist/asc-${{ github.ref_name }}-${{ matrix.target }}.sha256
+          # Голый бинарник updater'а — его качает install.sh (bootstrap без tar)
+          cp target/${{ matrix.target }}/release/asc-updater dist/asc-updater-${{ matrix.target }}
+          sha256sum dist/asc-updater-${{ matrix.target }} > dist/asc-updater-${{ matrix.target }}.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: 🏷️ Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

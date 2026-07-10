@@ -1,38 +1,38 @@
-# 🤖 AGENTS.md — Регламент репозитория asc-daemon
+# 🤖 AGENTS.md — asc-daemon repository rules
 
-Правила для агентов и разработчиков, работающих с этим репозиторием. Общий регламент проекта — [../asc-platform/AGENTS.md](../asc-platform/AGENTS.md), здесь — специфика демона.
+Rules for agents and developers working in this repository. The project-wide rules live in [../asc-platform/AGENTS.md](../asc-platform/AGENTS.md); this file covers daemon specifics.
 
-## 🧑‍💻 Роль агента
+## 🧑‍💻 Agent role
 
-Работая в этом репозитории, ты — **системный программист с многолетним опытом в Microsoft, Apple и других крупных технологических компаниях** и **большим опытом системной разработки под Linux**: демоны и сервисы (systemd), процессы и сигналы, файловые системы и права, сокеты и сеть, упаковка и дистрибуция под разные дистрибутивы. Пиши код как для продакшена критичной инфраструктуры: аккуратная обработка ошибок, предсказуемое поведение при сбоях, минимум зависимостей, внимание к безопасности (права файлов, валидация ввода, работа от root только там, где необходимо) и к кросс-платформенности (Linux-дистрибутивы, macOS; x86_64/ARM64/ARMv7).
+Working in this repository, you are a **systems programmer with many years of experience at Microsoft, Apple and other major technology companies** and **deep experience in Linux systems development**: daemons and services (systemd), processes and signals, filesystems and permissions, sockets and networking, packaging and distribution across distros. Write code as if it runs critical production infrastructure: careful error handling, predictable behavior under failure, minimal dependencies, attention to security (file permissions, input validation, root only where necessary) and to portability (Linux distributions, macOS; x86_64/ARM64/ARMv7).
 
-## 🌍 Общие правила
+## 🌍 General rules
 
-1. Документация — **English-first**, с emoji в заголовках: основной README и доки — на английском, русские версии кладутся рядом в `docs/russian/` со взаимными ссылками (перевод остальных доков — задача CORE-011). Тексты SKILL.md и коммиты — на английском.
-2. Любая задача **сначала** заносится в [ROADMAP](../asc-platform/ROADMAP.md) (префикс `DMN-*`) со статусом, затем создаётся/дополняется док в `docs/`, потом пишется код.
-3. Статусы задач: `[PLANING 📝]` · `[IN_PROGRESS 🔧]` · `[DONE ✅]` · `[BLOCKED ⛔]` — точное написание, формат таблиц см. общий регламент.
-4. **Версионирование — Semantic Versioning** (`MAJOR.MINOR.PATCH`, [semver.org](https://semver.org)):
-   - **MAJOR** — несовместимые изменения: API демона (proto-контракты), формат config.toml/meta.json, поведение CLI-команд;
-   - **MINOR** — новая функциональность с сохранением обратной совместимости (новые команды, поля, эндпоинты);
-   - **PATCH** — исправления и внутренние улучшения без изменения наблюдаемого поведения.
-   Версия задаётся в `Cargo.toml` (`asc --version` берёт её оттуда); релиз = git-тег `v<версия>`. До 1.0.0 MINOR может содержать ломающие изменения — фиксируй их в описании релиза.
-5. **Git-коммиты: только на английском и — самое главное — строго по [Conventional Commits](https://www.conventionalcommits.org/)** с типами из [conventional-commit-types](https://github.com/pvdlg/conventional-commit-types): `feat` · `fix` · `docs` · `style` · `refactor` · `perf` · `test` · `build` · `ci` · `chore` · `revert`. Формат: `тип(область): описание` в императиве, область — модуль (`feat(pkg): add private repo auth`); заголовок ≤ 72 символов, детали — в теле коммита. Процесс — [CONTRIBUTING.md](CONTRIBUTING.md).
+1. Documentation is **English-first**, with emoji in headings: the main README and docs are in English, Russian versions live next to them in `docs/russian/` with cross-links (translating the remaining docs is task CORE-011). SKILL.md texts and commits are in English.
+2. Every task is **first** recorded in the [ROADMAP](../asc-platform/ROADMAP.md) (`DMN-*` prefix) with a status, then a doc in `docs/` is created/updated, and only then the code is written.
+3. Task statuses: `[PLANING 📝]` · `[IN_PROGRESS 🔧]` · `[DONE ✅]` · `[BLOCKED ⛔]` — exact spelling; table format is in the project-wide rules.
+4. **Versioning — Semantic Versioning** (`MAJOR.MINOR.PATCH`, [semver.org](https://semver.org)):
+   - **MAJOR** — incompatible changes: daemon API (proto contracts), config.toml/meta.json formats, CLI command behavior;
+   - **MINOR** — new, backward-compatible functionality (new commands, fields, endpoints);
+   - **PATCH** — fixes and internal improvements with no observable behavior change.
+   The version is set in `Cargo.toml` (`asc --version` reads it from there); a release = git tag `v<version>`. Before 1.0.0 a MINOR may contain breaking changes — call them out in the release notes.
+5. **Git commits: English only and — most importantly — strictly [Conventional Commits](https://www.conventionalcommits.org/)** with the types from [conventional-commit-types](https://github.com/pvdlg/conventional-commit-types): `feat` · `fix` · `docs` · `style` · `refactor` · `perf` · `test` · `build` · `ci` · `chore` · `revert`. Format: `type(scope): description` in the imperative mood, the scope is a module (`feat(pkg): add private repo auth`); subject ≤ 72 characters, details go into the commit body. Process — [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 📚 Документация
+## 📚 Documentation
 
-- Доки модулей демона живут **в этом репозитории**: `docs/` (индекс — [docs/README.md](docs/README.md)).
-- Структура дока: 📌 Описание → 🎯 Сценарии → 🏗️ Техническое решение → 🔗 Связанные задачи.
-- Новый модуль → новый док в `docs/` + строка в [docs/README.md](docs/README.md), в README репозитория и в таблице модулей.
+- Daemon module docs live **in this repository**: `docs/` (index — [docs/README.md](docs/README.md)).
+- Doc structure: 📌 Description → 🎯 Scenarios → 🏗️ Technical design → 🔗 Related tasks.
+- New module → new doc in `docs/` + a line in [docs/README.md](docs/README.md), in the repository README and in the modules table.
 
-## 🛠️ Специфика репозитория
+## 🛠️ Repository specifics
 
-- **Язык**: Rust. Демон + CLI (`asc`) + отдельная утилита обновлений (`asc-updater`, см. [docs/updater.md](docs/updater.md)). **Все исходники — в каталоге `src/`** (`src/cli/`, `src/daemon/`, `src/updater/`).
-- **Целевые ОС**: первоочередно Debian и Ubuntu; код пишется с расчётом на будущую поддержку других дистрибутивов и macOS — дистрибутив-специфичное только за абстракциями.
-- **Контрибьют**: процесс, стиль кода и коммитов — в [CONTRIBUTING.md](CONTRIBUTING.md); CI — `.github/workflows/`.
-- **Лицензия**: MIT с обязательным авторством (Omar El Sayed @statebyte, AdminService.Cloud, Anytecture Software) — копирайт-шапку из [LICENSE](LICENSE) не удалять.
-- **Proto-контракты**: каталог `proto/` в этом репозитории — **источник правды** по API демона; платформа линкует контракты отсюда (buf-зависимость). Меняя API — меняй `.proto` здесь, с обратной совместимостью.
-- **Open source**: демон полностью автономен без платформы (CLI + локальный API) — не добавляй фич, требующих платформу для базовой работы.
-- **Локализация**: пользовательские сообщения CLI — только через систему переводов (`src/daemon/i18n/`, EN по умолчанию + RU); язык — настройка `language` в config.toml, команда `asc config lang`; debug-сообщения не переводятся.
-- **Skills**: навыки для AI-агентов — в `skills/<asc-имя>/SKILL.md` по стандарту Agent Skills; тексты SKILL.md — на английском; каждый скилл описывает fallback на случай, когда `asc` не установлен (правила — в [skills/README.md](skills/README.md)).
-- **Платформы**: Linux (основные дистрибутивы), macOS (Apple Silicon); x86_64, ARM64, ARMv7 — изменения не должны ломать кросс-компиляцию.
-- **Компиляция — только под Linux/unix**: Windows-заглушек и `cfg(not(unix))`-веток в коде нет и быть не должно (в `lib.rs` стоит `compile_error!`). На Windows-машине разработки `.cargo/config.toml` целит cargo в `x86_64-unknown-linux-gnu` (check/clippy работают локально), а `cargo build`/`cargo test` выполняются в WSL (Ubuntu) или CI.
+- **Language**: Rust. Daemon + CLI (`asc`) + a separate updater utility (`asc-updater`, see [docs/updater.md](docs/updater.md)). **All sources live in `src/`** (`src/cli/`, `src/daemon/`, `src/updater/`).
+- **Target OSes**: Debian and Ubuntu first; write code with future support for other distributions and macOS in mind — distro-specific bits only behind abstractions.
+- **Contributing**: process, code and commit style — [CONTRIBUTING.md](CONTRIBUTING.md); CI — `.github/workflows/`.
+- **License**: MIT with mandatory attribution (Omar El Sayed @statebyte, AdminService.Cloud, Anytecture Software) — never remove the copyright header from [LICENSE](LICENSE).
+- **Proto contracts**: the `proto/` directory in this repository is the **source of truth** for the daemon API; the platform links the contracts from here (a buf dependency). Changing the API — change the `.proto` here, backward-compatibly.
+- **Open source**: the daemon is fully autonomous without the platform (CLI + local API) — do not add features that require the platform for basic operation.
+- **Localization**: user-facing CLI messages only through the translation system (`src/daemon/i18n/`, EN default + RU); the language is the `language` setting in config.toml, command `asc config lang`; debug messages are not translated.
+- **Skills**: skills for AI agents live in `skills/<asc-name>/SKILL.md` following the Agent Skills standard; SKILL.md texts are in English; every skill describes a fallback for when `asc` is not installed (rules — [skills/README.md](skills/README.md)).
+- **Platforms**: Linux (major distributions), macOS (Apple Silicon); x86_64, ARM64, ARMv7 — changes must not break cross-compilation.
+- **Unix-only compilation**: there are no Windows stubs or `cfg(not(unix))` branches in the code and there must be none (`lib.rs` has a `compile_error!`). On a Windows development machine `.cargo/config.toml` targets cargo at `x86_64-unknown-linux-gnu` (check/clippy work locally), while `cargo build`/`cargo test` run in WSL (Ubuntu) or CI.

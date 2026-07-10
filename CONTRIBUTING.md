@@ -29,13 +29,62 @@ asc-daemon/
 └── Taskfile.yml    # 🛠️ development commands
 ```
 
+## 🌿 Branch model
+
+| Branch | Channel | Purpose |
+|--------|---------|---------|
+| `main` | **stable** | Releases only: `dev` is merged here at release time and tagged `v<version>`. No direct pushes or PRs. |
+| `dev`  | **beta**   | Integration branch — **all contributions land here**. The beta update channel builds from it. |
+
+**Every PR targets `dev`.** PRs opened against `main` will be retargeted or closed. Feature branches are created from `dev` and named `feat/…`, `fix/…`, `docs/…` (matching the commit types).
+
 ## 🔀 Change workflow
 
-1. **Find or create a task** in the [ROADMAP](../asc-platform/ROADMAP.md) (`DMN-*` prefix). Every piece of work starts with a task and a doc in `docs/` — see [AGENTS.md](AGENTS.md).
-2. Fork/branch off `main`: `feat/dmn-003-package-manager`, `fix/…`, `docs/…`.
+1. **Find or create a task** in the [ROADMAP](../asc-platform/ROADMAP.md) (`DMN-*` prefix) and/or a GitHub Issue. Every piece of work starts with a task and a doc in `docs/` — see [AGENTS.md](AGENTS.md).
+2. Fork and branch off `dev`: `feat/dmn-003-package-manager`, `fix/…`, `docs/…`.
 3. Write code and tests. Before committing — `task check` (clippy with no warnings + fmt + tests).
-4. Open a Pull Request using the template. CI must be green.
+4. Open a Pull Request **to `dev`** using the template. CI must be green.
 5. Review → merge. Squash-merge; the PR title follows Conventional Commits.
+
+## 🧭 From clone to your first PR (based on an Issue)
+
+```bash
+# 0. Pick an Issue to work on (or open one first and wait for a 👍) — say it is #42.
+#    Fork the repository on GitHub (the "Fork" button), then:
+
+# 1. Clone your fork and wire up the upstream remote
+git clone git@github.com:<your-login>/asc-daemon.git
+cd asc-daemon
+git remote add upstream git@github.com:AdminServiceCloud/asc-daemon.git
+
+# 2. Start from the freshest dev (never from main)
+git fetch upstream
+git switch dev
+git reset --hard upstream/dev
+
+# 3. Create a feature branch for the issue
+git switch -c fix/dmn-021-console-reconnect
+
+# 4. Code + tests, then verify everything locally
+task check
+
+# 5. Commit: English, Conventional Commits, reference the issue
+git add -A
+git commit -m "fix(console): reconnect attach session after daemon restart (#42)"
+
+# 6. Stay current with dev while you work (rebase, do not merge)
+git fetch upstream
+git rebase upstream/dev
+
+# 7. Push the branch to your fork and open a PR against dev
+git push -u origin fix/dmn-021-console-reconnect
+# On GitHub: "Compare & pull request" → base repository: AdminServiceCloud/asc-daemon, base: dev
+# In the PR description add "Closes #42" so the issue closes on merge.
+# Or with the GitHub CLI:
+gh pr create --base dev --fill
+```
+
+After review feedback: push new commits to the same branch — the PR updates automatically (they are squashed on merge).
 
 ## 📏 Code rules
 

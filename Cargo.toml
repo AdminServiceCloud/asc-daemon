@@ -53,7 +53,7 @@ libc = "0.2"
 futures-util = "0.3"
 http-body-util = "0.1"
 tempfile = "3"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 tower = { version = "0.4", features = ["util"] }
 
 [profile.release]

@@ -19,7 +19,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
@@ -117,7 +117,7 @@ fn load_app(
 
 async fn close_with_error(mut socket: WebSocket, message: &str) -> anyhow::Result<()> {
     socket
-        .send(Message::Text(format!("error: {message}")))
+        .send(Message::Text(format!("error: {message}").into()))
         .await
         .ok();
     socket.close().await.ok();
@@ -139,9 +139,9 @@ async fn stream_docker_logs(
     loop {
         tokio::select! {
             line = log_stream.next() => match line {
-                Some(Ok(line)) => socket.send(Message::Text(line)).await?,
+                Some(Ok(line)) => socket.send(Message::Text(line.into())).await?,
                 Some(Err(err)) => {
-                    socket.send(Message::Text(format!("error: {err:#}"))).await.ok();
+                    socket.send(Message::Text(format!("error: {err:#}").into())).await.ok();
                     break;
                 }
                 None => break, // container stopped / log stream ended
@@ -183,21 +183,21 @@ async fn attach_docker(
         Err(err) => return close_with_error(socket, &format!("{err:#}")).await,
     };
     for chunk in std::mem::take(&mut client.replay) {
-        socket.send(Message::Binary(chunk)).await?;
+        socket.send(Message::Binary(chunk.into())).await?;
     }
     loop {
         tokio::select! {
             output = client.rx.recv() => match output {
-                Ok(chunk) => socket.send(Message::Binary(chunk)).await?,
+                Ok(chunk) => socket.send(Message::Binary(chunk.into())).await?,
                 // This client fell behind the fan-out and lost the oldest
                 // chunks; the live stream continues.
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break, // app stopped
             },
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Binary(data))) => client.session.send_stdin(data).await?,
+                Some(Ok(Message::Binary(data))) => client.session.send_stdin(data.to_vec()).await?,
                 Some(Ok(Message::Text(text))) => {
-                    client.session.send_stdin(text.into_bytes()).await?
+                    client.session.send_stdin(text.as_bytes().to_vec()).await?
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
@@ -232,12 +232,12 @@ async fn stream_subprocess_logs(
     loop {
         tokio::select! {
             line = out_lines.next_line() => match line? {
-                Some(line) => socket.send(Message::Text(line)).await?,
+                Some(line) => socket.send(Message::Text(line.into())).await?,
                 None => break, // log source finished
             },
             line = err_lines.next_line() => {
                 if let Some(line) = line? {
-                    socket.send(Message::Text(line)).await?;
+                    socket.send(Message::Text(line.into())).await?;
                 }
             }
             msg = socket.recv() => match msg {

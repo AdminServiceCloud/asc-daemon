@@ -11,13 +11,15 @@ use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use bollard::Docker;
-use bollard::container::{
-    AttachContainerOptions, AttachContainerResults, Config as ContainerConfig,
-    CreateContainerOptions, LogsOptions, RemoveContainerOptions, StartContainerOptions,
-    StatsOptions, StopContainerOptions,
-};
+use bollard::container::AttachContainerResults;
 use bollard::errors::Error as BollardError;
-use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
+use bollard::models::{
+    ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+};
+use bollard::query_parameters::{
+    AttachContainerOptions, CreateContainerOptions, LogsOptions, RemoveContainerOptions,
+    StartContainerOptions, StatsOptions, StopContainerOptions,
+};
 use futures_util::{Stream, StreamExt};
 
 use crate::daemon::config::DockerConfig;
@@ -74,7 +76,7 @@ pub fn start(cfg: &DockerConfig, container: &str) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
         match docker
-            .start_container(container, None::<StartContainerOptions<String>>)
+            .start_container(container, None::<StartContainerOptions>)
             .await
         {
             Ok(()) => Ok(()),
@@ -89,7 +91,8 @@ pub fn stop(cfg: &DockerConfig, container: &str) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
         let opts = StopContainerOptions {
-            t: STOP_TIMEOUT_SECS,
+            t: Some(STOP_TIMEOUT_SECS as i32),
+            ..Default::default()
         };
         match docker.stop_container(container, Some(opts)).await {
             Ok(()) => Ok(()),
@@ -151,11 +154,18 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<(u64, u
         let mut stream = docker.stats(container, Some(opts));
         match stream.next().await {
             Some(Ok(stats)) => {
-                let Some(memory) = stats.memory_stats.usage else {
+                let Some(memory) = stats.memory_stats.and_then(|m| m.usage) else {
                     return Ok(None);
                 };
                 // Engine reports CPU time in nanoseconds.
-                let cpu_micros = stats.cpu_stats.cpu_usage.total_usage / 1_000;
+                let Some(cpu_micros) = stats
+                    .cpu_stats
+                    .and_then(|c| c.cpu_usage)
+                    .and_then(|u| u.total_usage)
+                    .map(|n| n / 1_000)
+                else {
+                    return Ok(None);
+                };
                 Ok(Some((cpu_micros, memory)))
             }
             Some(Err(e)) if status_of(&e) == Some(404) => Ok(None),
@@ -169,7 +179,7 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<(u64, u
 pub fn logs_tail(cfg: &DockerConfig, container: &str, tail: usize) -> Result<String> {
     block_on(async {
         let docker = connect(cfg)?;
-        let opts = LogsOptions::<String> {
+        let opts = LogsOptions {
             stdout: true,
             stderr: true,
             follow: false,
@@ -211,11 +221,11 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
 
-        let mut exposed_ports: HashMap<String, HashMap<(), ()>> = HashMap::new();
+        let mut exposed_ports: Vec<String> = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         for port in &spec.ports {
             let key = format!("{port}/tcp");
-            exposed_ports.insert(key.clone(), HashMap::new());
+            exposed_ports.push(key.clone());
             port_bindings.insert(
                 key,
                 Some(vec![PortBinding {
@@ -237,7 +247,7 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             ..Default::default()
         };
 
-        let config = ContainerConfig {
+        let config = ContainerCreateBody {
             image: Some(spec.image.to_string()),
             env: (!spec.env.is_empty()).then(|| spec.env.clone()),
             exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
@@ -248,8 +258,8 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
         docker
             .create_container(
                 Some(CreateContainerOptions {
-                    name: spec.name.to_string(),
-                    platform: None,
+                    name: Some(spec.name.to_string()),
+                    ..Default::default()
                 }),
                 config,
             )
@@ -269,7 +279,7 @@ pub async fn logs_follow(
     tail: usize,
 ) -> Result<impl Stream<Item = Result<String>> + Send> {
     let docker = connect(cfg)?;
-    let opts = LogsOptions::<String> {
+    let opts = LogsOptions {
         follow: true,
         stdout: true,
         stderr: true,
@@ -294,12 +304,12 @@ pub async fn logs_follow(
 /// Interactive attach: bidirectional stdin/stdout to a running container.
 pub async fn attach(cfg: &DockerConfig, container: &str) -> Result<AttachContainerResults> {
     let docker = connect(cfg)?;
-    let opts = AttachContainerOptions::<String> {
-        stdin: Some(true),
-        stdout: Some(true),
-        stderr: Some(true),
-        stream: Some(true),
-        logs: Some(false),
+    let opts = AttachContainerOptions {
+        stdin: true,
+        stdout: true,
+        stderr: true,
+        stream: true,
+        logs: false,
         detach_keys: None,
     };
     docker

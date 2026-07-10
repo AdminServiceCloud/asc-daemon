@@ -44,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [build-dependencies]
 # protox компилирует .proto без внешнего protoc — сборка герметична
 protox = "0.7"
-tonic-build = "0.12"
+tonic-build = "0.14"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

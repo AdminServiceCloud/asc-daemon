@@ -34,7 +34,7 @@ jobs:
           # Голый бинарник updater'а — его качает install.sh (bootstrap без tar)
           cp target/${{ matrix.target }}/release/asc-updater dist/asc-updater-${{ matrix.target }}
           sha256sum dist/asc-updater-${{ matrix.target }} > dist/asc-updater-${{ matrix.target }}.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/*

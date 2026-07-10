@@ -73,7 +73,11 @@ fn install_from_file_registry() {
     )
     .unwrap();
     // Safe: this is the only test in this binary touching the environment.
+    // The user list and the index cache are pointed into the tempdir too,
+    // keeping the test hermetic (no reads of ~/.config, no writes to ~/.cache).
     unsafe { std::env::set_var("ASC_SOURCES", &sources_path) };
+    unsafe { std::env::set_var("ASC_USER_SOURCES", ws.path().join("user-sources.toml")) };
+    unsafe { std::env::set_var("XDG_CACHE_HOME", ws.path().join("cache")) };
 
     let mut config = Config::default();
     config.daemon.data_dir = ws.path().join("data");
@@ -128,4 +132,47 @@ fn install_from_file_registry() {
     // Unknown packages fail with the "not found" error, not a panic/partial state.
     assert!(pkg::install(&config, &ctx, "ghost").is_err());
     assert!(!store.app_dir("ghost").unwrap().exists());
+
+    // ── Upgrade: a new tag in the package repository ─────────────────────
+    fs::write(
+        repo.join("asc.yaml"),
+        "name: demo\nversion: 2.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "v2"]);
+    git(&repo, &["tag", "v2.0.0"]);
+
+    // Explicitly pinned version: no registry index refresh required.
+    match pkg::upgrade(&config, &ctx, "demo@2.0.0").unwrap() {
+        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+            assert_eq!(id, "demo");
+            assert_eq!(from.as_deref(), Some("v1.0.0"));
+            assert_eq!(to, "v2.0.0");
+        }
+        other => panic!("expected an upgrade, got {other:?}"),
+    }
+    let meta = store.get("demo").unwrap().expect("meta.json must exist");
+    assert_eq!(meta.version.as_deref(), Some("v2.0.0"));
+    assert_eq!(meta.owner.uid, 1000, "owner survives the upgrade");
+    assert!(app_dir.join("repository/asc.yaml").exists());
+    assert!(!app_dir.join("repository.new").exists(), "no leftovers");
+    assert!(!app_dir.join("repository.old").exists(), "no leftovers");
+
+    // The same version again reports up-to-date instead of recloning.
+    match pkg::upgrade(&config, &ctx, "demo@2.0.0").unwrap() {
+        pkg::UpgradeOutcome::UpToDate { version, .. } => assert_eq!(version, "v2.0.0"),
+        other => panic!("expected up-to-date, got {other:?}"),
+    }
+
+    // A missing tag fails before touching the installed repository.
+    assert!(pkg::upgrade(&config, &ctx, "demo@9.9.9").is_err());
+    assert_eq!(
+        store.get("demo").unwrap().unwrap().version.as_deref(),
+        Some("v2.0.0")
+    );
+    assert!(app_dir.join("repository/asc.yaml").exists());
+
+    // Upgrading an unknown app fails cleanly.
+    assert!(pkg::upgrade(&config, &ctx, "ghost").is_err());
 }

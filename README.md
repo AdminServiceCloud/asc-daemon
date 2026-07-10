@@ -97,8 +97,6 @@ The roadmap for the whole project is kept in the **asc-platform** repository:
 - [🎯 ROADMAP](../asc-platform/ROADMAP.md) — daemon tasks use the `DMN-*` prefix
 - [🤝 Development process](../asc-platform/AGENTS.md)
 
-> ⚠️ The `old/` directory holds earlier work and is kept for reference only.
-
 ## 🤝 Contributing
 
 Contribution rules are in [CONTRIBUTING.md](CONTRIBUTING.md); CI and releases run on GitHub Actions (`.github/workflows/`).

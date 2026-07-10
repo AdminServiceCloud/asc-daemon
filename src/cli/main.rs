@@ -3,10 +3,12 @@
 
 use clap::{Parser, Subcommand};
 
+use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
     AppManager, AppStats, AppStatus, Outcome, RuntimeState, UserContext,
 };
 use asc_daemon::daemon::config::Config;
+use asc_daemon::daemon::docker;
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2, tf3};
 use asc_daemon::daemon::monitor;
 use asc_daemon::daemon::pkg::{self, RegistryClient, SourceList};
@@ -49,6 +51,10 @@ enum Command {
     },
     /// Install an app from a registry: <name> or <name>@<version>
     Install { spec: String },
+    /// Attach to an app's console: live output + stdin (Docker apps)
+    Attach { id: String },
+    /// Upgrade an app to a new version: <name> (latest) or <name>@<version>
+    Upgrade { spec: String },
     /// Search packages in the configured registries
     Search { query: String },
     /// Refresh registry indexes (bypass the cache)
@@ -58,6 +64,11 @@ enum Command {
     Source {
         #[command(subcommand)]
         action: SourceAction,
+    },
+    /// Manage git authorization for private package repositories
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
     },
     /// Manage daemon configuration
     Config {
@@ -93,6 +104,26 @@ enum SourceAction {
 }
 
 #[derive(Subcommand)]
+enum AuthAction {
+    /// Save credentials for a git host or prefix (e.g. github.com/myorg)
+    Add {
+        /// Host, host/prefix or a repository URL
+        target: String,
+        /// Access token for https repositories
+        #[arg(long)]
+        token: Option<String>,
+        /// SSH key for git@/ssh repositories; omit the path to pick
+        /// interactively from ~/.ssh
+        #[arg(long, num_args = 0..=1)]
+        ssh_key: Option<Option<std::path::PathBuf>>,
+    },
+    /// List configured credentials (methods only, never secrets)
+    List,
+    /// Remove credentials for a host or prefix
+    Remove { target: String },
+}
+
+#[derive(Subcommand)]
 enum AppAction {
     /// List apps (root sees all users' apps, grouped by owner)
     List,
@@ -102,6 +133,14 @@ enum AppAction {
     },
     /// Install an app from a registry (same as top-level `asc install`)
     Install {
+        spec: String,
+    },
+    /// Attach to the app's console (same as top-level `asc attach`)
+    Attach {
+        id: String,
+    },
+    /// Upgrade the app to a new version (same as top-level `asc upgrade`)
+    Upgrade {
         spec: String,
     },
     Start {
@@ -181,6 +220,8 @@ fn run() -> anyhow::Result<()> {
         Command::Stats { sort } => stats_cmd(sort, &config),
         Command::App { action } => app_cmd(action, &config),
         Command::Install { spec } => install_cmd(&spec, &config),
+        Command::Attach { id } => attach_cmd(&id, &config),
+        Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
         Command::Search { query } => search_cmd(&query, &config),
         Command::Update => {
             RegistryClient::new(&config)?.update()?;
@@ -188,6 +229,7 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Source { action } => source_cmd(action),
+        Command::Auth { action } => auth_cmd(action),
         Command::Config { action } => config_cmd(action, config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
     }
@@ -211,9 +253,176 @@ fn autoupdate_cmd(action: &str) -> anyhow::Result<()> {
 
 fn install_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
     let ctx = UserContext::current();
-    let report = pkg::install(config, &ctx, spec)?;
+    let report = match pkg::install(config, &ctx, spec) {
+        Ok(report) => report,
+        // Private repository: offer to set up auth right here, then retry.
+        Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec)?,
+        Err(err) => return Err(err),
+    };
     println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
     println!("{}", tf(Msg::PkgStartHint, &report.id));
+    Ok(())
+}
+
+fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::auth::{GitAuth, Method, normalize};
+    let mut auth = GitAuth::load()?;
+    match action {
+        AuthAction::Add {
+            target,
+            token,
+            ssh_key,
+        } => {
+            let method = match (token, ssh_key) {
+                (Some(token), None) => Method::Token { token },
+                (None, Some(Some(key))) => Method::SshKey { key },
+                (None, Some(None)) => Method::SshKey {
+                    key: pick_ssh_key(&target)?,
+                },
+                _ => anyhow::bail!(t(Msg::AuthNeedMethod)),
+            };
+            let saved = auth.add(&target, method)?;
+            let (pattern, label) = (saved.pattern.clone(), saved.method.label());
+            auth.save()?;
+            println!("{}", tf2(Msg::AuthSaved, pattern, label));
+        }
+        AuthAction::List => {
+            let all = auth.list();
+            if all.is_empty() {
+                println!("{}", t(Msg::AuthEmpty));
+            } else {
+                let name_w = all.iter().map(|(c, _)| c.pattern.len()).max().unwrap_or(4);
+                for (cred, scope) in all {
+                    println!(
+                        "{:<name_w$}  {:<6}  {}",
+                        cred.pattern,
+                        scope.label(),
+                        cred.method.label()
+                    );
+                }
+            }
+        }
+        AuthAction::Remove { target } => {
+            auth.remove(&target)?;
+            auth.save()?;
+            println!("{}", tf(Msg::AuthRemoved, normalize(&target)));
+        }
+    }
+    Ok(())
+}
+
+/// Interactive SSH key selection from `~/.ssh` — the choice is saved by the
+/// caller, so next time no prompt is needed.
+fn pick_ssh_key(target: &str) -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+    use asc_daemon::daemon::pkg::auth;
+    let home = std::env::var_os("HOME").context("cannot determine home directory ($HOME)")?;
+    let keys = auth::list_ssh_keys(&std::path::PathBuf::from(home).join(".ssh"));
+    if keys.is_empty() {
+        anyhow::bail!(t(Msg::AuthNoKeys));
+    }
+    println!("{}", tf(Msg::AuthPromptKey, target));
+    for (i, key) in keys.iter().enumerate() {
+        println!("  {}) {}", i + 1, key.display());
+    }
+    let choice = read_line("> ")?;
+    let index: usize = choice
+        .parse()
+        .ok()
+        .filter(|n| (1..=keys.len()).contains(n))
+        .ok_or_else(|| anyhow::anyhow!(t(Msg::AuthInvalidChoice)))?;
+    Ok(keys[index - 1].clone())
+}
+
+fn read_line(prompt: &str) -> anyhow::Result<String> {
+    use std::io::Write;
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// When `err` says the repository is private and stdin is a terminal, ask
+/// for permission to configure authorization on the spot (token for https,
+/// SSH key selection for git@/ssh) and save it. `true` = saved, retry.
+fn offer_auth_setup(err: &anyhow::Error) -> bool {
+    use asc_daemon::daemon::pkg::auth::{self, AuthRequired, GitAuth, Method};
+    use asc_daemon::daemon::pkg::sources::Scope;
+
+    let Some(required) = err.downcast_ref::<AuthRequired>() else {
+        return false;
+    };
+    // Non-interactive callers get the structured error with the hint.
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return false;
+    }
+    let flow = || -> anyhow::Result<bool> {
+        let url = &required.url;
+        let host = auth::normalize(url)
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if host.is_empty() {
+            return Ok(false);
+        }
+        let answer = read_line(&tf2(Msg::AuthPromptConfigure, url, &host))?;
+        if !matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
+            return Ok(false);
+        }
+        let method = if auth::is_ssh_url(url) {
+            Method::SshKey {
+                key: pick_ssh_key(&host)?,
+            }
+        } else {
+            let store_path = match Scope::current() {
+                Scope::System => GitAuth::system_path(),
+                Scope::User => GitAuth::user_path()?,
+            };
+            let token = read_line(&tf2(Msg::AuthPromptToken, &host, store_path.display()))?;
+            if token.is_empty() {
+                return Ok(false);
+            }
+            Method::Token { token }
+        };
+        let mut store = GitAuth::load()?;
+        let saved = store.add(&host, method)?;
+        let confirmation = tf2(Msg::AuthSaved, saved.pattern.clone(), saved.method.label());
+        store.save()?;
+        println!("{confirmation}");
+        println!("{}", t(Msg::AuthRetrying));
+        Ok(true)
+    };
+    match flow() {
+        Ok(configured) => configured,
+        Err(flow_err) => {
+            eprintln!("asc: {flow_err:#}");
+            false
+        }
+    }
+}
+
+fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
+    let ctx = UserContext::current();
+    let outcome = match pkg::upgrade(config, &ctx, spec) {
+        Ok(outcome) => outcome,
+        // Private repository: offer to set up auth right here, then retry.
+        Err(err) if offer_auth_setup(&err) => pkg::upgrade(config, &ctx, spec)?,
+        Err(err) => return Err(err),
+    };
+    match outcome {
+        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+            println!(
+                "{}",
+                tf3(Msg::PkgUpgraded, &id, from.as_deref().unwrap_or("-"), to)
+            );
+        }
+        pkg::UpgradeOutcome::UpToDate { id, version } => {
+            println!("{}", tf2(Msg::PkgUpToDate, &id, version));
+        }
+    }
     Ok(())
 }
 
@@ -289,6 +498,8 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
         AppAction::Install { spec } => install_cmd(&spec, config)?,
+        AppAction::Attach { id } => attach_cmd(&id, config)?,
+        AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
         AppAction::Start { id } => match manager.start(&ctx, &id)? {
             Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
@@ -315,6 +526,66 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             }
             manager.remove(&ctx, &id)?;
             println!("{}", tf(Msg::AppRemoved, &id));
+        }
+    }
+    Ok(())
+}
+
+/// `asc attach` — interactive app console in the terminal: the app's output
+/// goes to stdout, the terminal's stdin goes to the app. Talks straight to
+/// the Engine API (standalone, no running daemon needed); Docker fans the
+/// output out to every attached client, so the CLI and browser tabs coexist.
+fn attach_cmd(id: &str, config: &Config) -> anyhow::Result<()> {
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+    let status = manager.status(&ctx, id)?;
+    let Runtime::Docker { container } = &status.meta.runtime else {
+        anyhow::bail!(tf2(Msg::AttachDockerOnly, id, status.meta.runtime.kind()));
+    };
+    if status.state != RuntimeState::Running {
+        anyhow::bail!(tf2(Msg::AttachStartFirst, id, id));
+    }
+    // The hint goes to stderr so piped stdout stays pure app output.
+    eprintln!("{}", tf(Msg::AttachHint, id));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(attach_loop(&config.docker, container));
+    // tokio's stdin reads on the blocking pool; a plain drop of the runtime
+    // would wait for the pending read (i.e. for the user to press Enter).
+    runtime.shutdown_background();
+    result
+}
+
+async fn attach_loop(
+    cfg: &asc_daemon::daemon::config::DockerConfig,
+    container: &str,
+) -> anyhow::Result<()> {
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut attach = docker::attach(cfg, container).await?;
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut buf = [0u8; 4096];
+    loop {
+        tokio::select! {
+            output = attach.output.next() => match output {
+                Some(Ok(chunk)) => {
+                    stdout.write_all(&chunk.into_bytes()).await?;
+                    stdout.flush().await?;
+                }
+                Some(Err(err)) => anyhow::bail!("docker attach: {err}"),
+                None => break, // app stopped
+            },
+            read = stdin.read(&mut buf) => {
+                let n = read?;
+                if n == 0 {
+                    break; // stdin closed (Ctrl+D / piped input finished)
+                }
+                attach.input.write_all(&buf[..n]).await?;
+            }
         }
     }
     Ok(())

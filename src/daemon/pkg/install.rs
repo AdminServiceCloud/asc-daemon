@@ -26,13 +26,13 @@ pub struct InstallReport {
 }
 
 /// Remove a directory unless `disarm` was called — cleanup for failed installs.
-struct RemoveOnDrop {
-    path: PathBuf,
-    armed: bool,
+pub(super) struct RemoveOnDrop {
+    pub(super) path: PathBuf,
+    pub(super) armed: bool,
 }
 
 impl RemoveOnDrop {
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -75,15 +75,9 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
     let manifest_dir = manifest_dir(&repo_dir, resolved.entry.source.path.as_deref())?;
     let manifest = Manifest::load(&manifest_dir)?;
 
-    // Root policy (DMN-003): regular users may be limited to Docker apps.
     // The app type is only known after reading the manifest; the cleanup
     // guard removes the cloned repository on this failure path too.
-    if !ctx.is_root
-        && config.policy.user_install == crate::daemon::config::UserInstall::Docker
-        && manifest.app_type != AppType::Docker
-    {
-        bail!(tf(Msg::PkgPolicyDockerOnly, name));
-    }
+    enforce_install_policy(config, ctx, &manifest, name)?;
 
     for sub in ["config", "data"] {
         fs::create_dir_all(app_dir.join(sub))
@@ -117,8 +111,24 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
     })
 }
 
+/// Root policy (DMN-003): regular users may be limited to Docker apps.
+pub(super) fn enforce_install_policy(
+    config: &Config,
+    ctx: &UserContext,
+    manifest: &Manifest,
+    name: &str,
+) -> Result<()> {
+    if !ctx.is_root
+        && config.policy.user_install == crate::daemon::config::UserInstall::Docker
+        && manifest.app_type != AppType::Docker
+    {
+        bail!(tf(Msg::PkgPolicyDockerOnly, name));
+    }
+    Ok(())
+}
+
 /// `name@1.2.0` → (`name`, Some(`1.2.0`)).
-fn parse_spec(spec: &str) -> (&str, Option<&str>) {
+pub(super) fn parse_spec(spec: &str) -> (&str, Option<&str>) {
     match spec.split_once('@') {
         Some((name, version)) if !version.is_empty() => (name, Some(version)),
         _ => (spec, None),
@@ -128,7 +138,11 @@ fn parse_spec(spec: &str) -> (&str, Option<&str>) {
 /// Clone the package repository; versions are git tags. Returns the tag that
 /// was actually checked out (tries `1.2.0`, then `v1.2.0`), or `None` when
 /// no version was requested and the default branch HEAD was cloned.
-fn clone_repository(git_url: &str, version: Option<&str>, dest: &Path) -> Result<Option<String>> {
+pub(super) fn clone_repository(
+    git_url: &str,
+    version: Option<&str>,
+    dest: &Path,
+) -> Result<Option<String>> {
     match version {
         Some(tag) => {
             let candidates = [tag.to_string(), format!("v{tag}")];
@@ -137,9 +151,14 @@ fn clone_repository(git_url: &str, version: Option<&str>, dest: &Path) -> Result
                 match git_clone(git_url, Some(candidate), dest) {
                     Ok(()) => return Ok(Some(candidate.clone())),
                     Err(err) => {
-                        last_err = format!("{err:#}");
                         // A failed clone may leave a partial directory behind.
                         let _ = fs::remove_dir_all(dest);
+                        // Missing auth fails for every tag spelling alike:
+                        // surface the typed error for the interactive flow.
+                        if err.downcast_ref::<super::auth::AuthRequired>().is_some() {
+                            return Err(err);
+                        }
+                        last_err = format!("{err:#}");
                     }
                 }
             }
@@ -161,22 +180,41 @@ fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
     let dest_str = dest.to_string_lossy();
     args.push(&dest_str);
 
-    let out = match Command::new("git").args(&args).output() {
+    // Credentials for private repositories (DMN-003). An unreadable auth
+    // file must not block installs from public repositories.
+    let auth = match super::auth::GitAuth::load() {
+        Ok(auth) => Some(auth),
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "cannot read git credentials, cloning without auth");
+            None
+        }
+    };
+    let credential = auth.as_ref().and_then(|a| a.lookup(git_url));
+    let mut cmd = Command::new("git");
+    cmd.args(&args);
+    let _askpass = super::auth::configure_git(&mut cmd, credential.map(|c| &c.method))?;
+
+    let out = match cmd.output() {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(t(Msg::ErrGitNotFound)),
         Err(e) => return Err(e).context("cannot run git"),
     };
     if !out.status.success() {
-        bail!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Only when no credential matched: with one configured, a plain
+        // error (with the real git message) beats an offer to reconfigure.
+        if credential.is_none() && super::auth::is_auth_failure(&stderr) {
+            return Err(anyhow::Error::new(super::auth::AuthRequired {
+                url: git_url.to_string(),
+            }));
+        }
+        bail!("git clone failed: {}", stderr.trim());
     }
     Ok(())
 }
 
 /// Manifest directory inside the repository (monorepo packages set `path`).
-fn manifest_dir(repo_dir: &Path, sub: Option<&str>) -> Result<PathBuf> {
+pub(super) fn manifest_dir(repo_dir: &Path, sub: Option<&str>) -> Result<PathBuf> {
     match sub {
         None => Ok(repo_dir.to_path_buf()),
         Some(sub) => {
@@ -197,7 +235,7 @@ fn manifest_dir(repo_dir: &Path, sub: Option<&str>) -> Result<PathBuf> {
 }
 
 /// Prepare the runtime described by the manifest and return its meta form.
-fn provision(
+pub(super) fn provision(
     manifest: &Manifest,
     id: &str,
     app_dir: &Path,

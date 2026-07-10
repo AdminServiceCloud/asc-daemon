@@ -6,7 +6,9 @@
 //! short TTL, single use, bound to one app and session type.
 //!
 //! Docker apps stream through the Engine API; systemd/process apps stream
-//! from a follow-mode subprocess.
+//! from a follow-mode subprocess. Attach sessions are multi-client: all
+//! connections of one app share a single source through the console hub
+//! (see `console::hub`), so several tabs see the same live output.
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -19,7 +21,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use super::ApiState;
@@ -81,7 +84,9 @@ async fn handle(socket: WebSocket, state: Arc<ApiState>, grant: ConsoleGrant, ta
             },
         },
         SessionType::Attach => match &meta.runtime {
-            Runtime::Docker { container } => attach_docker(socket, docker_cfg, container).await,
+            Runtime::Docker { container } => {
+                attach_docker(socket, &state, &grant.app_id, container).await
+            }
             other => {
                 close_with_error(
                     socket,
@@ -155,31 +160,45 @@ async fn stream_docker_logs(
     Ok(())
 }
 
-/// Docker attach (bidirectional): client frames → stdin, container → binary frames.
+/// Docker attach (bidirectional): client frames → stdin, container → binary
+/// frames. All clients of one app share a source through the console hub:
+/// this connection joins it, replays recent output, then follows live.
 async fn attach_docker(
     mut socket: WebSocket,
-    cfg: &DockerConfig,
+    state: &ApiState,
+    app_id: &str,
     container: &str,
 ) -> anyhow::Result<()> {
-    let mut attach = match docker::attach(cfg, container).await {
-        Ok(attach) => attach,
+    let cfg = &state.config.docker;
+    let connect = async {
+        let attach = docker::attach(cfg, container).await?;
+        let output = attach.output.map(|item| {
+            item.map(|chunk| chunk.into_bytes().to_vec())
+                .map_err(|e| anyhow::anyhow!("docker attach: {e}"))
+        });
+        Ok((output, attach.input))
+    };
+    let mut client = match state.attach_hub.subscribe(app_id, connect).await {
+        Ok(client) => client,
         Err(err) => return close_with_error(socket, &format!("{err:#}")).await,
     };
+    for chunk in std::mem::take(&mut client.replay) {
+        socket.send(Message::Binary(chunk)).await?;
+    }
     loop {
         tokio::select! {
-            output = attach.output.next() => match output {
-                Some(Ok(chunk)) => {
-                    socket.send(Message::Binary(chunk.into_bytes().to_vec())).await?;
-                }
-                Some(Err(err)) => {
-                    socket.send(Message::Text(format!("error: {err:#}"))).await.ok();
-                    break;
-                }
-                None => break,
+            output = client.rx.recv() => match output {
+                Ok(chunk) => socket.send(Message::Binary(chunk)).await?,
+                // This client fell behind the fan-out and lost the oldest
+                // chunks; the live stream continues.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break, // app stopped
             },
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Binary(data))) => attach.input.write_all(&data).await?,
-                Some(Ok(Message::Text(text))) => attach.input.write_all(text.as_bytes()).await?,
+                Some(Ok(Message::Binary(data))) => client.session.send_stdin(data).await?,
+                Some(Ok(Message::Text(text))) => {
+                    client.session.send_stdin(text.into_bytes()).await?
+                }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
                 Some(Err(err)) => {

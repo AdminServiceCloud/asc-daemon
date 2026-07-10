@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::Digest;
 use tracing::{debug, warn};
 
 use super::sources::{Source, SourceList};
@@ -198,10 +199,7 @@ impl RegistryClient {
 
     /// Read a registry file through the cache.
     fn fetch(&self, source: &Source, rel: &str, force: bool) -> Result<String> {
-        let cache_file = self
-            .cache_dir
-            .join(&source.name)
-            .join(rel.replace('/', "__"));
+        let cache_file = source_cache_dir(&self.cache_dir, source).join(rel.replace('/', "__"));
         if !force && let Ok(meta) = fs::metadata(&cache_file) {
             let fresh = meta
                 .modified()
@@ -223,6 +221,18 @@ impl RegistryClient {
     }
 }
 
+/// Cache subdirectory of one source: its name plus a URL fingerprint.
+/// The name alone is not enough — a source re-added under the same name
+/// with a different URL must not serve stale indexes from the old location
+/// until the TTL runs out.
+fn source_cache_dir(cache_dir: &Path, source: &Source) -> PathBuf {
+    let digest = sha2::Sha256::digest(source.url.as_bytes());
+    cache_dir.join(format!(
+        "{}-{:02x}{:02x}{:02x}{:02x}",
+        source.name, digest[0], digest[1], digest[2], digest[3]
+    ))
+}
+
 fn fetch_uncached(base_url: &str, rel: &str) -> Result<String> {
     if let Some(path) = base_url.strip_prefix("file://") {
         let path = PathBuf::from(path).join(rel);
@@ -236,4 +246,29 @@ fn fetch_uncached(base_url: &str, rel: &str) -> Result<String> {
 /// Convenience: build a `file://` source URL from a local directory (tests, dev).
 pub fn file_source_url(dir: &Path) -> String {
     format!("file://{}", dir.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_dir_depends_on_source_url() {
+        let cache = Path::new("/cache");
+        let source = |url: &str| Source {
+            name: "local".into(),
+            url: url.into(),
+        };
+        let a = source_cache_dir(cache, &source("file:///tmp/one"));
+        let b = source_cache_dir(cache, &source("file:///tmp/two"));
+        assert_ne!(a, b, "same name, different URL must not share a cache");
+        assert!(a.starts_with("/cache"));
+        assert!(
+            a.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("local-")
+        );
+    }
 }

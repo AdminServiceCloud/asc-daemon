@@ -34,6 +34,8 @@ pub struct ApiState {
     pub config: Config,
     pub manager: AppManager,
     pub console_tokens: ConsoleTokens,
+    /// Shared attach sessions: one source per app, many console clients.
+    pub attach_hub: crate::daemon::console::hub::AttachHub,
     /// System metrics ring buffer, filled by the daemon's sampler task.
     pub monitor: Arc<Monitor>,
     /// Bearer token required on every request.
@@ -58,6 +60,7 @@ impl ApiState {
             manager: AppManager::new(&config),
             config,
             console_tokens: ConsoleTokens::default(),
+            attach_hub: Default::default(),
             monitor,
             token,
         })

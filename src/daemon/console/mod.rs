@@ -3,7 +3,9 @@
 //! Docker containers stream through the Engine API (see
 //! [`crate::daemon::docker`]); systemd units and plain processes stream from
 //! a follow-mode subprocess produced here. The WebSocket transport lives in
-//! `api::ws`.
+//! `api::ws`; shared multi-client attach sessions live in [`hub`].
+
+pub mod hub;
 
 use std::path::Path;
 

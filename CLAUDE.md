@@ -8,4 +8,5 @@
 - 🦀 Доки модулей демона — в этом репозитории: [docs/](docs/README.md). Любая задача — сначала в roadmap + док, потом код.
 - 📜 Proto-контракты API демона — в `proto/` этого репозитория (источник правды, платформа линкует отсюда).
 - 🌍 Документация — **English-first**, с emoji: основной README/доки на английском, русские версии — в `docs/russian/` (перевод остальных доков — CORE-011).
-- 📦 Версия — **Semantic Versioning** (`MAJOR.MINOR.PATCH`) в `Cargo.toml`, релиз = тег `v<версия>`; **все git-коммиты — на английском** (детали — в [AGENTS.md](AGENTS.md)).
+- 📦 Версия — **Semantic Versioning** (`MAJOR.MINOR.PATCH`) в `Cargo.toml`, релиз = тег `v<версия>`.
+- ✍️ **Коммиты — на английском и строго по [Conventional Commits](https://github.com/pvdlg/conventional-commit-types)** (`feat`/`fix`/`docs`/`refactor`/`perf`/`test`/`build`/`ci`/`chore`/`revert`, формат `тип(область): описание`) — детали в [AGENTS.md](AGENTS.md).

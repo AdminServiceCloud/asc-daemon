@@ -99,7 +99,7 @@ Roadmap всего проекта ведётся в репозитории **asc
 
 ## 🤝 Контрибьют
 
-Правила участия — в [CONTRIBUTING.md](../../CONTRIBUTING.md); CI и релизы — GitHub Actions (`.github/workflows/`).
+Правила участия — в [CONTRIBUTING.md](CONTRIBUTING.md) ([English](../../CONTRIBUTING.md)); CI и релизы — GitHub Actions (`.github/workflows/`).
 
 ## 📄 Лицензия
 

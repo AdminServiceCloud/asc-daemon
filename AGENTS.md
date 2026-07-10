@@ -16,7 +16,7 @@
    - **MINOR** — новая функциональность с сохранением обратной совместимости (новые команды, поля, эндпоинты);
    - **PATCH** — исправления и внутренние улучшения без изменения наблюдаемого поведения.
    Версия задаётся в `Cargo.toml` (`asc --version` берёт её оттуда); релиз = git-тег `v<версия>`. До 1.0.0 MINOR может содержать ломающие изменения — фиксируй их в описании релиза.
-5. **Все git-коммиты — только на английском**, в императиве (`Add ...`, `Fix ...`, `Release ...`); заголовок ≤ 72 символов, детали — в теле коммита. Стиль и процесс — [CONTRIBUTING.md](CONTRIBUTING.md).
+5. **Git-коммиты: только на английском и — самое главное — строго по [Conventional Commits](https://www.conventionalcommits.org/)** с типами из [conventional-commit-types](https://github.com/pvdlg/conventional-commit-types): `feat` · `fix` · `docs` · `style` · `refactor` · `perf` · `test` · `build` · `ci` · `chore` · `revert`. Формат: `тип(область): описание` в императиве, область — модуль (`feat(pkg): add private repo auth`); заголовок ≤ 72 символов, детали — в теле коммита. Процесс — [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📚 Документация
 

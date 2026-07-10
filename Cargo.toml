@@ -36,7 +36,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util"] }
-toml = "0.8"
+toml = "1.1"
 tonic = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

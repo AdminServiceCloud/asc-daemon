@@ -28,7 +28,7 @@ bollard = { version = "0.17", default-features = false }
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3"
-prost = "0.13"
+prost = "0.14"
 sha2 = "0.11"
 tar = "0.4"
 serde = { version = "1", features = ["derive"] }

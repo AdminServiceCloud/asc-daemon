@@ -12,10 +12,12 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::install::{
-    RemoveOnDrop, clone_repository, enforce_install_policy, manifest_dir, parse_spec, provision,
+    RemoveOnDrop, clone_repository, enforce_install_policy, load_quota, manifest_dir, parse_spec,
+    provision,
 };
 use super::manifest::Manifest;
 use super::registry::RegistryClient;
+use super::settings::{SettingValues, SettingsFile};
 use crate::daemon::apps::meta::Runtime;
 use crate::daemon::apps::{AppManager, RuntimeState, UserContext};
 use crate::daemon::config::Config;
@@ -85,6 +87,8 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     let new_manifest_dir = manifest_dir(&new_dir, resolved.entry.source.path.as_deref())?;
     let manifest = Manifest::load(&new_manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, id)?;
+    let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
+    let quota = load_quota(settings.as_ref())?;
 
     // Point of no return: swap the repository, keeping the old one around
     // until the new runtime is provisioned.
@@ -107,6 +111,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         &app_dir,
         &manifest_dir(&repo_dir, manifest_sub)?,
         &config.docker,
+        quota.as_ref(),
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -118,10 +123,23 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     };
     let _ = fs::remove_dir_all(&old_dir);
 
+    // New settings keys get their defaults; values the user chose survive.
+    if let Some(settings) = &settings
+        && !settings.settings.is_empty()
+    {
+        let config_dir = app_dir.join("config");
+        let mut values = SettingValues::load(&config_dir).unwrap_or_default();
+        values.merge_defaults(&settings.settings);
+        if let Err(err) = values.save(&config_dir) {
+            warn!(app = id, error = %format!("{err:#}"), "cannot refresh setting defaults");
+        }
+    }
+
     let from = meta.version.clone();
     let mut meta = meta;
     meta.name = manifest.title.clone().unwrap_or_else(|| id.to_string());
     meta.version = Some(cloned_tag.clone());
+    meta.quota = quota;
     meta.runtime = runtime;
     store.save(&meta)?;
     info!(app = id, from = %from.as_deref().unwrap_or("-"), to = %cloned_tag, "app upgraded");
@@ -161,13 +179,9 @@ fn rollback(
     let restore = manifest_dir(repo_dir, manifest_sub)
         .and_then(|dir| Manifest::load(&dir))
         .and_then(|manifest| {
-            provision(
-                &manifest,
-                id,
-                app_dir,
-                &manifest_dir(repo_dir, manifest_sub)?,
-                &config.docker,
-            )
+            let dir = manifest_dir(repo_dir, manifest_sub)?;
+            let quota = load_quota(SettingsFile::load_for(&dir, &manifest)?.as_ref())?;
+            provision(&manifest, id, app_dir, &dir, &config.docker, quota.as_ref())
         });
     if let Err(err) = restore {
         warn!(app = id, error = %format!("{err:#}"), "rollback: cannot re-provision the previous version");

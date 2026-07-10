@@ -148,6 +148,19 @@ pub enum Msg {
     UpdStatusAvailable,
     UpdNoBuildForPlatform,
     UpdNotInstalled,
+    SettingsNone,
+    SettingsHeader,
+    SettingsPromptSelect,
+    SettingsPromptValue,
+    SettingsSaved,
+    SettingsRestartHint,
+    ErrSettingNumber,
+    ErrSettingRange,
+    ErrSettingBool,
+    ErrSettingEnum,
+    ErrSettingLength,
+    ErrQuotaSize,
+    ErrQuotaCpu,
 }
 
 /// Translate a message key using the current language.
@@ -386,6 +399,46 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::UpdNotInstalled => (
             "daemon is not installed yet (run: asc-updater install)",
             "демон ещё не установлен (выполните: asc-updater install)",
+        ),
+        Msg::SettingsNone => (
+            "app '{}' has no configurable settings (no asc.settings.yaml in the package)",
+            "у приложения '{}' нет настраиваемых параметров (в пакете нет asc.settings.yaml)",
+        ),
+        Msg::SettingsHeader => ("Settings of '{}':", "Настройки приложения '{}':"),
+        Msg::SettingsPromptSelect => (
+            "Setting number to change (Enter — done): ",
+            "Номер настройки для изменения (Enter — готово): ",
+        ),
+        Msg::SettingsPromptValue => ("New value for '{}'{}: ", "Новое значение '{}'{}: "),
+        Msg::SettingsSaved => ("Setting '{}' = {} saved", "Настройка '{}' = {} сохранена"),
+        Msg::SettingsRestartHint => (
+            "Restart the app to apply the changes: asc app restart {}",
+            "Перезапустите приложение, чтобы применить изменения: asc app restart {}",
+        ),
+        Msg::ErrSettingNumber => ("value must be a number", "значение должно быть числом"),
+        Msg::ErrSettingRange => (
+            "value must be in range {}",
+            "значение должно быть в диапазоне {}",
+        ),
+        Msg::ErrSettingBool => (
+            "value must be a boolean: true/false (yes/no, on/off)",
+            "значение должно быть логическим: true/false (yes/no, on/off)",
+        ),
+        Msg::ErrSettingEnum => (
+            "value must be one of: {}",
+            "значение должно быть одним из: {}",
+        ),
+        Msg::ErrSettingLength => (
+            "value length must be in range {}",
+            "длина значения должна быть в диапазоне {}",
+        ),
+        Msg::ErrQuotaSize => (
+            "invalid size '{}' in quota (expected e.g. 512M, 2G, 1T)",
+            "неверный размер '{}' в квоте (ожидается, например, 512M, 2G, 1T)",
+        ),
+        Msg::ErrQuotaCpu => (
+            "quota max_cpu must be a positive number of cores",
+            "квота max_cpu должна быть положительным числом ядер",
         ),
     };
     match lang() {

@@ -300,6 +300,7 @@ mod tests {
                 version: None,
                 source: None,
                 desired_state: DesiredState::Stopped,
+                quota: None,
                 runtime: Runtime::Process {
                     command: "true".into(),
                     args: vec![],
@@ -374,6 +375,7 @@ mod tests {
                 version: None,
                 source: None,
                 desired_state: DesiredState::Stopped,
+                quota: None,
                 runtime: Runtime::Process {
                     command: "sleep".into(),
                     args: vec!["30".into()],

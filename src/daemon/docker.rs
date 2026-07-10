@@ -200,6 +200,10 @@ pub struct CreateSpec<'a> {
     pub ports: Vec<u16>,
     /// Volume binds as `host_path:container_path`.
     pub binds: Vec<String>,
+    /// CPU quota in units of 1e-9 cores (Engine `NanoCpus`); `None` = unlimited.
+    pub nano_cpus: Option<i64>,
+    /// Memory limit in bytes (Engine `Memory`); `None` = unlimited.
+    pub memory_bytes: Option<i64>,
 }
 
 /// Create (but do not start) a container from a spec. Used by the installer.
@@ -228,6 +232,8 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
                 name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                 maximum_retry_count: None,
             }),
+            nano_cpus: spec.nano_cpus,
+            memory: spec.memory_bytes,
             ..Default::default()
         };
 

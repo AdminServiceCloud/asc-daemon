@@ -22,4 +22,4 @@
 
 ## 🔗 Связанные задачи
 
-DMN-012, TASK-001, BE-005, BE-006 в [ROADMAP.md](../../asc-platform/ROADMAP.md).
+DMN-012, TASK-001, BE-005, BE-006 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

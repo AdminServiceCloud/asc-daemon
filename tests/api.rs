@@ -31,6 +31,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
             version: Some("v1.0.0".into()),
             source: Some("test:local".into()),
             desired_state: DesiredState::Stopped,
+            quota: None,
             runtime: Runtime::Process {
                 command: "true".into(),
                 args: vec![],

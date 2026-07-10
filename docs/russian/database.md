@@ -20,4 +20,4 @@
 
 ## 🔗 Связанные задачи
 
-DMN-011, DMN-009 в [ROADMAP.md](../../asc-platform/ROADMAP.md).
+DMN-011, DMN-009 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

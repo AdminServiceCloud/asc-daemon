@@ -27,7 +27,25 @@ pub struct AppMeta {
     /// What the app should be doing; enforced after daemon restart/reboot.
     #[serde(default)]
     pub desired_state: DesiredState,
+    /// Resource quota from asc.settings.yaml (DMN-021), normalized at
+    /// install/upgrade time. `None` = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<Quota>,
     pub runtime: Runtime,
+}
+
+/// Normalized resource quota of one app.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Quota {
+    /// CPU cores limit (enforced for Docker via NanoCpus).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<f64>,
+    /// Memory limit in bytes (enforced for Docker via Memory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_bytes: Option<u64>,
+    /// Disk usage limit in bytes (recorded; enforcement is a next increment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +144,11 @@ mod tests {
             version: Some("v1.2.0".into()),
             source: Some("official".into()),
             desired_state: DesiredState::Running,
+            quota: Some(Quota {
+                cpu_cores: Some(1.5),
+                ram_bytes: Some(512 << 20),
+                disk_bytes: Some(10 << 30),
+            }),
             runtime: Runtime::Docker {
                 container: "asc-helloworld".into(),
             },
@@ -140,6 +163,7 @@ mod tests {
         assert_eq!(loaded.id, "helloworld");
         assert_eq!(loaded.desired_state, DesiredState::Running);
         assert_eq!(loaded.runtime.kind(), "docker");
+        assert_eq!(loaded.quota.unwrap().ram_bytes, Some(512 << 20));
         // No leftover tmp file after an atomic save.
         assert!(!dir.path().join("meta.json.tmp").exists());
     }

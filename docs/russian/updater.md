@@ -52,4 +52,4 @@ asc-updater status                              # версии: установл
 
 ## 🔗 Связанные задачи
 
-DMN-001, DMN-014 в [ROADMAP.md](../../asc-platform/ROADMAP.md).
+DMN-001, DMN-014 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

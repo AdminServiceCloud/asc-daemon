@@ -9,7 +9,7 @@
 - `asc install nginx` — установка из официального реестра.
 - `asc source add https://registry.example.com` — подключение кастомного реестра (как apt source).
 - `asc source add https://github.com/user/my-app` — приложение прямо из GitHub (asc.yaml в корне); для приватного при 404 — предложение подключить токен.
-- Магазин платформы ([🛍️ app-store](../../asc-platform/docs/features/app-store.md)) — витрина над теми же реестрами.
+- Магазин платформы ([🛍️ app-store](../../../asc-platform/docs/features/app-store.md)) — витрина над теми же реестрами.
 
 ## 🏗️ Техническое решение
 
@@ -34,7 +34,7 @@ requirements: { ram: 256M, disk: 1G }
 healthcheck: { http: /health }
 ```
 
-> 📐 JSON-схемы манифестов: [asc.schema.json](../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../registry/schema/asc.stack.schema.json) и [asc.settings.schema.json](../../registry/schema/asc.settings.schema.json) в репозитории `registry`.
+> 📐 JSON-схемы манифестов: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) и [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) в репозитории `registry`.
 
 ### Настройки приложения: asc.settings.yaml
 
@@ -67,8 +67,24 @@ settings:
     default: true
 ```
 
-- Значения настроек сохраняются в `/asc/apps/<id>/config/` и пробрасываются приложению (env/конфиг-файл — по шаблону из манифеста).
-- Изменение настроек — `asc app config <name>` или UI платформы; после изменения — перезапуск приложения.
+- Значения настроек сохраняются в `/asc/apps/<id>/config/settings.json` (0600 — файл может содержать секреты); при установке заполняются дефолтами, при обновлении новые ключи получают дефолты, а выбор пользователя не трогается. Пробрасываются приложению (env/конфиг-файл — по шаблону из манифеста).
+- Изменение настроек — **`asc app settings <id>`**: интерактивный редактор в терминале — выбираете настройку по номеру, вводите значение, оно валидируется по описанию (тип, `limits`, значения `values` у enum; секреты в списке маскируются). Также через UI платформы. После изменения — перезапуск приложения (`asc app restart <id>`).
+
+### 📏 Квоты ресурсов (quota)
+
+Секция `quota:` в `asc.settings.yaml` ограничивает ресурсы инстанса приложения (DMN-021):
+
+```yaml
+quota:
+  max_cpu: 2        # лимит CPU в ядрах (0.5, 2, …)
+  max_ram: 1G       # лимит памяти: 512M, 2G, … (двоичные единицы, как docker -m)
+  max_disk: 10G     # лимит места на диске
+```
+
+- Значения нормализуются при установке/обновлении и записываются в `meta.json`; `asc app info <id>` показывает их (`quota: cpu ≤ 2, ram ≤ 1.0 GiB, …`).
+- **Docker-приложения**: применяются при создании контейнера через Engine API (`NanoCpus`, `Memory`).
+- **native/process**: записываются в `meta.json`; применение через cgroups — следующий инкремент.
+- `max_disk` записывается для всех рантаймов; дисковое ограничение per-runtime (Docker storage-opt / квоты ФС) — инкрементально.
 
 ### 🚀 Команда запуска (start_command)
 
@@ -78,7 +94,7 @@ settings:
 start_command: "java -Xmx${MEM_LIMIT}M -jar server.jar --port ${PORT} --level ${LOG_LEVEL}"
 ```
 
-- Подстановка выполняется демоном при запуске из итогового окружения приложения (настройки + env-уровни организации/ноды/приложения, см. [🌱 environments](../../asc-platform/docs/features/environments.md)).
+- Подстановка выполняется демоном при запуске из итогового окружения приложения (настройки + env-уровни организации/ноды/приложения, см. [🌱 environments](../../../asc-platform/docs/features/environments.md)).
 - Неразрешённая переменная — ошибка запуска с указанием имени переменной.
 - UI платформы показывает вычисленный предпросмотр команды (секреты маскируются).
 - Изменение команды — как и настроек: применяется после перезапуска приложения.
@@ -142,7 +158,7 @@ apps:
 - `asc install my-stack` — установка всего стека; `asc install my-stack/web` — только одного приложения из него.
 - Стек может объявлять общие `env` и зависимости между приложениями (`depends_on` — порядок запуска), компоненты могут быть `optional`.
 - Реестры и магазин платформы индексируют как одиночные `asc.yaml`, так и стеки `asc.stack.yaml`.
-- Примеры — в репозитории [asc-example-apps](../../asc-example-apps).
+- Примеры — в репозитории [asc-example-apps](../../../asc-example-apps).
 
 ### Реестры
 
@@ -159,4 +175,4 @@ apps:
 
 ## 🔗 Связанные задачи
 
-DMN-003, DMN-018, REG-001, REG-002, BE-002, BE-003 в [ROADMAP.md](../../asc-platform/ROADMAP.md); GRW-011 в [ROADMAP-GROWTH.md](../../asc-platform/ROADMAP-GROWTH.md).
+DMN-003, DMN-018, REG-001, REG-002, BE-002, BE-003 в [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 в [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).

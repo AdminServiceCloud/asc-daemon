@@ -32,7 +32,7 @@ cp -r skills/* .claude/skills/
 
 ### 🤖 Другие нейронки
 
-- **MCP-клиенты** (Claude Desktop и др.): вместо скиллов подключай [MCP-сервер демона](../docs/mcp-server.md) — `asc mcp serve`.
+- **MCP-клиенты** (Claude Desktop и др.): вместо скиллов подключай [MCP-сервер демона](../docs/english/mcp-server.md) — `asc mcp serve`.
 - **Прочие агенты**: `SKILL.md` — обычный markdown, его можно вставить в системный промпт любой LLM.
 
 ## ✍️ Правила для новых скиллов

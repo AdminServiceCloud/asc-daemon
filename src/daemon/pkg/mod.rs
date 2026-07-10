@@ -5,6 +5,7 @@ pub mod auth;
 pub mod install;
 pub mod manifest;
 pub mod registry;
+pub mod settings;
 pub mod sources;
 pub mod upgrade;
 

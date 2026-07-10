@@ -44,8 +44,8 @@
 - **Индекс приложений**: `meta.json` — источник правды; в MVP индекс строится сканированием `/asc/apps/*/meta.json` при обращении, при старте демон сверяет желаемое состояние (`desired_state`) с реальностью (контейнеры, юниты, процессы) и дозапускает упавшее. Локальная БД (SQLite) появится, когда добавится состояние сверх meta.json (метрики, история операций).
 - **Логи**: единый интерфейс — docker logs / journald / файл; стрим наружу через [🖥️ console](console.md).
 - **Cluster-мод (пост-MVP)**: несколько экземпляров одного приложения.
-- **CLI-команды MVP**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info`, `asc service` (управление самим демоном).
+- **CLI-команды MVP**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info|settings`, `asc service` (управление самим демоном).
 
 ## 🔗 Связанные задачи
 
-DMN-002, DMN-004, FE-005 в [ROADMAP.md](../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, FE-005 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

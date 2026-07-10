@@ -13,7 +13,8 @@ use tracing::{info, warn};
 
 use super::manifest::{AppType, Manifest};
 use super::registry::RegistryClient;
-use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime};
+use super::settings::{SettingValues, SettingsFile};
+use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Quota, Runtime};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
@@ -79,12 +80,31 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
     // guard removes the cloned repository on this failure path too.
     enforce_install_policy(config, ctx, &manifest, name)?;
 
+    let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+    let quota = load_quota(settings.as_ref())?;
+
     for sub in ["config", "data"] {
         fs::create_dir_all(app_dir.join(sub))
             .with_context(|| format!("cannot create {sub}/ in app directory"))?;
     }
+    // Seed the setting values with the package defaults, so the settings
+    // editor (`asc app settings`) and the runtime see a consistent state.
+    if let Some(settings) = &settings
+        && !settings.settings.is_empty()
+    {
+        let mut values = SettingValues::default();
+        values.merge_defaults(&settings.settings);
+        values.save(&app_dir.join("config"))?;
+    }
 
-    let runtime = provision(&manifest, name, &app_dir, &manifest_dir, &config.docker)?;
+    let runtime = provision(
+        &manifest,
+        name,
+        &app_dir,
+        &manifest_dir,
+        &config.docker,
+        quota.as_ref(),
+    )?;
 
     let effective_version = cloned_tag.unwrap_or_else(|| manifest.version.clone());
     let meta = AppMeta {
@@ -100,6 +120,7 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
             resolved.source_name, resolved.entry.source.git
         )),
         desired_state: DesiredState::Stopped,
+        quota,
         runtime,
     };
     store.save(&meta)?;
@@ -234,13 +255,24 @@ pub(super) fn manifest_dir(repo_dir: &Path, sub: Option<&str>) -> Result<PathBuf
     }
 }
 
+/// Normalized quota from a parsed settings file, if any.
+pub(super) fn load_quota(settings: Option<&SettingsFile>) -> Result<Option<Quota>> {
+    settings
+        .and_then(|s| s.quota.as_ref())
+        .map(|q| q.normalize())
+        .transpose()
+}
+
 /// Prepare the runtime described by the manifest and return its meta form.
+/// The quota is enforced for Docker at container creation; native/process
+/// runtimes record it in meta.json (cgroup enforcement is a next increment).
 pub(super) fn provision(
     manifest: &Manifest,
     id: &str,
     app_dir: &Path,
     manifest_dir: &Path,
     docker_cfg: &DockerConfig,
+    quota: Option<&Quota>,
 ) -> Result<Runtime> {
     match manifest.app_type {
         AppType::Docker => {
@@ -250,7 +282,7 @@ pub(super) fn provision(
                 .as_deref()
                 .expect("validated: docker manifests have an image");
             let container = format!("asc-{id}");
-            docker_create(manifest, image, &container, app_dir, docker_cfg)?;
+            docker_create(manifest, image, &container, app_dir, docker_cfg, quota)?;
             Ok(Runtime::Docker { container })
         }
         AppType::Native | AppType::Utility => {
@@ -271,13 +303,14 @@ fn process_runtime(start: &str) -> Runtime {
 }
 
 /// Create (but do not start) the container via the Docker Engine API: ports,
-/// env defaults, volumes mapped under `<app_dir>/data/`.
+/// env defaults, volumes mapped under `<app_dir>/data/`, quota limits.
 fn docker_create(
     manifest: &Manifest,
     image: &str,
     container: &str,
     app_dir: &Path,
     docker_cfg: &DockerConfig,
+    quota: Option<&Quota>,
 ) -> Result<()> {
     let env: Vec<String> = manifest
         .env
@@ -305,6 +338,11 @@ fn docker_create(
             env,
             ports: manifest.ports.clone(),
             binds,
+            // 1 core = 1e9 NanoCpus (Docker's own `--cpus` scale).
+            nano_cpus: quota
+                .and_then(|q| q.cpu_cores)
+                .map(|cores| (cores * 1_000_000_000.0) as i64),
+            memory_bytes: quota.and_then(|q| q.ram_bytes).map(|bytes| bytes as i64),
         },
     )
     .context("cannot create docker container")

@@ -159,6 +159,10 @@ enum AppAction {
         #[arg(short = 'n', long, default_value_t = 100)]
         tail: usize,
     },
+    /// Interactively edit app settings defined in asc.settings.yaml
+    Settings {
+        id: String,
+    },
     /// Remove an app and all its data
     Remove {
         id: String,
@@ -495,6 +499,9 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             println!("  state:   {}", state_label(status.state));
             println!("  version: {}", m.version.as_deref().unwrap_or("-"));
             println!("  source:  {}", m.source.as_deref().unwrap_or("-"));
+            if let Some(quota) = &m.quota {
+                println!("  quota:   {}", quota_label(quota));
+            }
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
         AppAction::Install { spec } => install_cmd(&spec, config)?,
@@ -520,6 +527,7 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
                 println!("{logs}");
             }
         }
+        AppAction::Settings { id } => app_settings_cmd(&id, config)?,
         AppAction::Remove { id, yes } => {
             if !yes {
                 anyhow::bail!(tf(Msg::AppRemoveNeedsYes, &id));
@@ -527,6 +535,129 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             manager.remove(&ctx, &id)?;
             println!("{}", tf(Msg::AppRemoved, &id));
         }
+    }
+    Ok(())
+}
+
+/// "cpu ≤ 2, ram ≤ 512.0 MiB, disk ≤ 10.0 GiB" — set quota limits only.
+fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
+    let mut parts = Vec::new();
+    if let Some(cores) = quota.cpu_cores {
+        parts.push(format!("cpu ≤ {cores}"));
+    }
+    if let Some(ram) = quota.ram_bytes {
+        parts.push(format!("ram ≤ {}", monitor::human_bytes(ram)));
+    }
+    if let Some(disk) = quota.disk_bytes {
+        parts.push(format!("disk ≤ {}", monitor::human_bytes(disk)));
+    }
+    parts.join(", ")
+}
+
+/// `asc app settings <id>` — interactive settings editor (DMN-017): pick a
+/// setting by number, enter a value validated against asc.settings.yaml.
+/// Values are stored in `config/settings.json`; the runtime picks them up on
+/// the next restart.
+fn app_settings_cmd(id: &str, config: &Config) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::manifest::Manifest;
+    use asc_daemon::daemon::pkg::settings::{
+        SettingKind, SettingValues, SettingsFile, manifest_dir_of,
+    };
+
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+    manager.get_authorized(&ctx, id)?;
+    let app_dir = manager.store().app_dir(id)?;
+
+    let manifest_dir = manifest_dir_of(config, id, &app_dir)?;
+    let manifest = Manifest::load(&manifest_dir)?;
+    let defs = match SettingsFile::load_for(&manifest_dir, &manifest)? {
+        Some(file) if !file.settings.is_empty() => file.settings,
+        _ => {
+            println!("{}", tf(Msg::SettingsNone, id));
+            return Ok(());
+        }
+    };
+
+    let config_dir = app_dir.join("config");
+    let mut values = SettingValues::load(&config_dir)?;
+    values.merge_defaults(&defs);
+    let key_w = defs.iter().map(|d| d.key.len()).max().unwrap_or(4);
+
+    let mut changed = false;
+    loop {
+        println!();
+        println!("{}", tf(Msg::SettingsHeader, id));
+        for (i, def) in defs.iter().enumerate() {
+            let hint = def
+                .constraint_hint()
+                .map(|h| format!("  ({h})"))
+                .unwrap_or_default();
+            let title = def
+                .title
+                .as_deref()
+                .map(|t| format!("  — {t}"))
+                .unwrap_or_default();
+            println!(
+                "  {:>2}) {:<key_w$} = {}{hint}{title}",
+                i + 1,
+                def.key,
+                values.display(def),
+            );
+        }
+        println!();
+        let line = read_line(t(Msg::SettingsPromptSelect))?;
+        if line.is_empty() || line.eq_ignore_ascii_case("q") {
+            break;
+        }
+        let Some(def) = line
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|i| defs.get(i))
+        else {
+            eprintln!("asc: {}", t(Msg::AuthInvalidChoice));
+            continue;
+        };
+
+        // Enums are picked from a numbered list; everything else is typed in.
+        if def.kind == SettingKind::Enum {
+            for (i, value) in def.values.iter().enumerate() {
+                println!("  {}) {}", i + 1, def.display_of(&serde_json::json!(value)));
+            }
+        }
+        let hint = def
+            .constraint_hint()
+            .map(|h| format!(" ({h})"))
+            .unwrap_or_default();
+        let mut raw = read_line(&tf2(Msg::SettingsPromptValue, &def.key, hint))?;
+        if raw.is_empty() {
+            continue;
+        }
+        // An enum answer may be the option number instead of the value.
+        if def.kind == SettingKind::Enum
+            && let Ok(n) = raw.parse::<usize>()
+            && (1..=def.values.len()).contains(&n)
+            && let Ok(picked) = serde_json::to_value(&def.values[n - 1])
+        {
+            raw = match &picked {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+        }
+        match def.parse_value(&raw) {
+            Ok(value) => {
+                let shown = def.display_of(&value);
+                values.set(&def.key, value);
+                values.save(&config_dir)?;
+                changed = true;
+                println!("{}", tf2(Msg::SettingsSaved, &def.key, shown));
+            }
+            Err(err) => eprintln!("asc: {err:#}"),
+        }
+    }
+    if changed {
+        println!("{}", tf(Msg::SettingsRestartHint, id));
     }
     Ok(())
 }

@@ -33,4 +33,4 @@
 
 ## 🔗 Связанные задачи
 
-DMN-006, NODE-003, FE-004 в [ROADMAP.md](../../asc-platform/ROADMAP.md).
+DMN-006, NODE-003, FE-004 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

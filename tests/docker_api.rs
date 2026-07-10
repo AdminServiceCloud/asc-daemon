@@ -146,6 +146,8 @@ fn create_sends_container_spec() {
             env: vec!["PORT=8080".into()],
             ports: vec![8080],
             binds: vec!["/asc/apps/web/data/data:/data".into()],
+            nano_cpus: Some(1_500_000_000),
+            memory_bytes: Some(512 << 20),
         },
     )
     .unwrap();

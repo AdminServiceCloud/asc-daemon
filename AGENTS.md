@@ -8,8 +8,8 @@ Working in this repository, you are a **systems programmer with many years of ex
 
 ## 🌍 General rules
 
-1. Documentation is **English-first**, with emoji in headings: the main README and docs are in English, Russian versions live next to them in `docs/russian/` with cross-links (translating the remaining docs is task CORE-011). SKILL.md texts and commits are in English.
-2. Every task is **first** recorded in the [ROADMAP](../asc-platform/ROADMAP.md) (`DMN-*` prefix) with a status, then a doc in `docs/` is created/updated, and only then the code is written.
+1. Documentation is **English-first**, with emoji in headings: the main README is in English; module docs are bilingual — English in `docs/english/`, Russian in `docs/russian/` — with cross-links between the language versions. Both versions are kept in sync: changing a doc means changing it in both folders. SKILL.md texts and commits are in English.
+2. Every task is **first** recorded in the [ROADMAP](../asc-platform/ROADMAP.md) (`DMN-*` prefix) with a status, then a doc in `docs/english/` + `docs/russian/` is created/updated, and only then the code is written.
 3. Task statuses: `[PLANING 📝]` · `[IN_PROGRESS 🔧]` · `[DONE ✅]` · `[BLOCKED ⛔]` — exact spelling; table format is in the project-wide rules.
 4. **Versioning — Semantic Versioning** (`MAJOR.MINOR.PATCH`, [semver.org](https://semver.org)):
    - **MAJOR** — incompatible changes: daemon API (proto contracts), config.toml/meta.json formats, CLI command behavior;
@@ -20,13 +20,14 @@ Working in this repository, you are a **systems programmer with many years of ex
 
 ## 📚 Documentation
 
-- Daemon module docs live **in this repository**: `docs/` (index — [docs/README.md](docs/README.md)).
+- Daemon module docs live **in this repository**: `docs/english/` and `docs/russian/` (language selector — [docs/README.md](docs/README.md); indexes — [docs/english/README.md](docs/english/README.md) and [docs/russian/overview.md](docs/russian/overview.md)).
 - Doc structure: 📌 Description → 🎯 Scenarios → 🏗️ Technical design → 🔗 Related tasks.
-- New module → new doc in `docs/` + a line in [docs/README.md](docs/README.md), in the repository README and in the modules table.
+- New module → new docs in `docs/english/` **and** `docs/russian/` + a line in both indexes, in the repository README (EN + RU) and in the modules table.
+- Community files: [🛡️ SECURITY](docs/english/SECURITY.md) and [🤝 CODE_OF_CONDUCT](docs/english/CODE_OF_CONDUCT.md) (Russian versions in `docs/russian/`); the current version is duplicated in [version.txt](version.txt) — keep it in sync with `Cargo.toml`.
 
 ## 🛠️ Repository specifics
 
-- **Language**: Rust. Daemon + CLI (`asc`) + a separate updater utility (`asc-updater`, see [docs/updater.md](docs/updater.md)). **All sources live in `src/`** (`src/cli/`, `src/daemon/`, `src/updater/`).
+- **Language**: Rust. Daemon + CLI (`asc`) + a separate updater utility (`asc-updater`, see [docs/english/updater.md](docs/english/updater.md)). **All sources live in `src/`** (`src/cli/`, `src/daemon/`, `src/updater/`).
 - **Target OSes**: Debian and Ubuntu first; write code with future support for other distributions and macOS in mind — distro-specific bits only behind abstractions.
 - **Contributing**: process, code and commit style — [CONTRIBUTING.md](CONTRIBUTING.md); CI — `.github/workflows/`.
 - **License**: MIT with mandatory attribution (Omar El Sayed @statebyte, AdminService.Cloud, Anytecture Software) — never remove the copyright header from [LICENSE](LICENSE).

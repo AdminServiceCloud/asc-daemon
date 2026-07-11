@@ -24,27 +24,29 @@ path = "src/updater/main.rs"
 anyhow = "1"
 # Docker Engine API over the unix socket (no TLS stack: default features off
 # keeps ring/openssl out, preserving pure-Rust cross-compilation).
-bollard = { version = "0.17", default-features = false }
+bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3"
-prost = "0.13"
+prost = "0.14"
 sha2 = "0.11"
 tar = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util"] }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util", "io-std"] }
 toml = "1.1"
-tonic = "0.12"
+tonic = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tonic-prost = "0.14.6"
 
 [build-dependencies]
 # protox компилирует .proto без внешнего protoc — сборка герметична
-protox = "0.7"
-tonic-build = "0.12"
+protox = "0.9"
+tonic-build = "0.14"
+tonic-prost-build = "0.14.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

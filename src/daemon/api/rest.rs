@@ -21,12 +21,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
         .route("/v1/apps", get(list_apps).post(install_app))
-        .route("/v1/apps/:id", get(get_app).delete(remove_app))
-        .route("/v1/apps/:id/start", post(start_app))
-        .route("/v1/apps/:id/stop", post(stop_app))
-        .route("/v1/apps/:id/restart", post(restart_app))
-        .route("/v1/apps/:id/logs", get(app_logs))
-        .route("/v1/apps/:id/console-token", post(console_token))
+        .route("/v1/apps/{id}", get(get_app).delete(remove_app))
+        .route("/v1/apps/{id}/start", post(start_app))
+        .route("/v1/apps/{id}/stop", post(stop_app))
+        .route("/v1/apps/{id}/restart", post(restart_app))
+        .route("/v1/apps/{id}/logs", get(app_logs))
+        .route("/v1/apps/{id}/console-token", post(console_token))
         .with_state(state)
 }
 

@@ -119,7 +119,11 @@ env:
     };
     assert_eq!(stack, "demo-stack");
     let ids: Vec<&str> = installed.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(ids, ["demo-master", "demo-server"], "deps first, no optional");
+    assert_eq!(
+        ids,
+        ["demo-master", "demo-server"],
+        "deps first, no optional"
+    );
     assert!(skipped.is_empty());
 
     // App ids come from each app's own asc.yaml; meta records the stack spec.

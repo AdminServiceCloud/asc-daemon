@@ -133,7 +133,9 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
-            rollback(config, id, &app_dir, &repo_dir, &old_dir, entry_path, stack_app);
+            rollback(
+                config, id, &app_dir, &repo_dir, &old_dir, entry_path, stack_app,
+            );
             return Err(err.context(format!(
                 "upgrade of '{id}' failed, previous version restored"
             )));

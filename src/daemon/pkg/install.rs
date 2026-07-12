@@ -134,7 +134,14 @@ pub fn install(
         .or_else(|| resolved.entry.latest.clone());
 
     if resolved.entry.package_type == "stack" {
-        return install_stack(config, ctx, &resolved, package, stack_app, version.as_deref());
+        return install_stack(
+            config,
+            ctx,
+            &resolved,
+            package,
+            stack_app,
+            version.as_deref(),
+        );
     }
     if stack_app.is_some() {
         bail!(tf2(Msg::PkgNotAStack, package, package));
@@ -143,8 +150,7 @@ pub fn install(
     if store.get(package)?.is_some() {
         bail!(tf(Msg::PkgAlreadyInstalled, package));
     }
-    install_one(config, ctx, &resolved, package, None, version.as_deref())
-        .map(InstallOutcome::App)
+    install_one(config, ctx, &resolved, package, None, version.as_deref()).map(InstallOutcome::App)
 }
 
 /// Install a stack: clone once to read `asc.stack.yaml`, then install the
@@ -159,7 +165,8 @@ fn install_stack(
     stack_app: Option<&str>,
     version: Option<&str>,
 ) -> Result<InstallOutcome> {
-    let probe_dir = std::env::temp_dir().join(format!("asc-stack-{}-{package}", std::process::id()));
+    let probe_dir =
+        std::env::temp_dir().join(format!("asc-stack-{}-{package}", std::process::id()));
     let _ = fs::remove_dir_all(&probe_dir);
     let _probe_cleanup = RemoveOnDrop {
         path: probe_dir.clone(),
@@ -194,7 +201,14 @@ fn install_stack(
             skipped.push(manifest.name);
             continue;
         }
-        let report = install_one(config, ctx, resolved, &manifest.name, Some(&app.name), version)?;
+        let report = install_one(
+            config,
+            ctx,
+            resolved,
+            &manifest.name,
+            Some(&app.name),
+            version,
+        )?;
         installed.push(report);
     }
     Ok(InstallOutcome::Stack {

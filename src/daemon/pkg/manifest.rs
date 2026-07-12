@@ -359,7 +359,12 @@ env:
 "#,
         );
         let all: Vec<&str> = s
-            .install_order(s.apps.iter().filter(|a| !a.optional).map(|a| a.name.as_str()))
+            .install_order(
+                s.apps
+                    .iter()
+                    .filter(|a| !a.optional)
+                    .map(|a| a.name.as_str()),
+            )
             .unwrap()
             .iter()
             .map(|a| a.name.as_str())
@@ -387,7 +392,8 @@ apps:
         let s: StackManifest = serde_yaml::from_str(yaml).unwrap();
         assert!(s.validate().unwrap_err().to_string().contains("cycle"));
 
-        let yaml = "name: bad\nversion: '1'\napps:\n  - { name: a, path: ./a, depends_on: [ghost] }\n";
+        let yaml =
+            "name: bad\nversion: '1'\napps:\n  - { name: a, path: ./a, depends_on: [ghost] }\n";
         let s: StackManifest = serde_yaml::from_str(yaml).unwrap();
         assert!(s.validate().is_err());
     }
@@ -397,7 +403,8 @@ apps:
         let mut m: Manifest =
             serde_yaml::from_str("name: web\nversion: '1'\ntype: docker\nruntime:\n  image: x\nenv:\n  - name: PORT\n    default: 80\n").unwrap();
         let stack_env: Vec<EnvVar> =
-            serde_yaml::from_str("- name: PORT\n  default: 9999\n- name: TZ\n  default: UTC\n").unwrap();
+            serde_yaml::from_str("- name: PORT\n  default: 9999\n- name: TZ\n  default: UTC\n")
+                .unwrap();
         m.merge_stack_env(&stack_env);
         assert_eq!(m.env.len(), 2);
         let port = m.env.iter().find(|e| e.name == "PORT").unwrap();

@@ -126,7 +126,10 @@ fn ambiguous_package_requires_source_choice() {
         ambiguous.candidates.iter().all(|(_, git)| !git.is_empty()),
         "candidates carry the repository URL"
     );
-    assert!(!store.app_dir("demo").unwrap().exists(), "nothing installed");
+    assert!(
+        !store.app_dir("demo").unwrap().exists(),
+        "nothing installed"
+    );
 
     // Unknown source name fails cleanly.
     let err = pkg::install(&config, &ctx, "demo", Some("ghost")).unwrap_err();

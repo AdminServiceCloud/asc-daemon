@@ -170,7 +170,8 @@ apps:
 ### Registries
 
 - **Registry format** (the `registry` repo) — a hierarchy of JSON files: the root index `registry.json` → category files `categories/<topic>.json` (databases, ai, bots, game-servers, system-utilities, web…) → optional subcategories (`children`). Packages come in two kinds: `app` (asc.yaml) and `stack` (asc.stack.yaml). Validation schemas — in `registry/schema/`. Descriptions are in English.
-- **Source tree**: the daemon's sourcelist → a tree is built from all registries (following the root index's `index`/`children` links), then a merged application list (per user); name conflicts are resolved by source priority.
+- **Source tree**: the daemon's sourcelist → a tree is built from all registries (following the root index's `index`/`children` links), then a merged application list (per user); in search results name conflicts are resolved by source priority.
+- **Name conflicts at install**: when several sources provide the requested package, `asc install` in a terminal lists the candidates (source name + repository) and asks which one to use (pick a number); non-interactive callers get an error with the same list — pin the registry explicitly: `asc install <pkg> --source <name>` (API: the `source` field of InstallAppRequest). `asc app upgrade` prefers the source the app was installed from.
 - **Source types**: `file://` (a local directory) and `https://` (a registry, GitHub raw).
 - **Per-user source lists**: two list levels —
   - **system** `/etc/asc/sources.toml` — managed by root (`sudo asc source add|remove`), the sources are visible to **all** users of the server;

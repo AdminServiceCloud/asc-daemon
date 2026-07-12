@@ -50,7 +50,12 @@ enum Command {
         action: AppAction,
     },
     /// Install from a registry: <name>, <stack> or <stack>/<app>, with optional @<version>
-    Install { spec: String },
+    Install {
+        spec: String,
+        /// Registry source to install from (when several provide the package)
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
     /// Upgrade an app to a new version: <name> (latest) or <name>@<version>
@@ -134,6 +139,9 @@ enum AppAction {
     /// Install an app from a registry (same as top-level `asc install`)
     Install {
         spec: String,
+        /// Registry source to install from (when several provide the package)
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
     Attach {
@@ -223,7 +231,7 @@ fn run() -> anyhow::Result<()> {
         Command::Status => status_cmd(&config),
         Command::Stats { sort } => stats_cmd(sort, &config),
         Command::App { action } => app_cmd(action, &config),
-        Command::Install { spec } => install_cmd(&spec, &config),
+        Command::Install { spec, source } => install_cmd(&spec, source.as_deref(), &config),
         Command::Attach { id } => attach_cmd(&id, &config),
         Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
         Command::Search { query } => search_cmd(&query, &config),
@@ -259,13 +267,25 @@ fn autoupdate_cmd(action: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
+fn install_cmd(spec: &str, source: Option<&str>, config: &Config) -> anyhow::Result<()> {
     let ctx = UserContext::current();
-    let outcome = match pkg::install(config, &ctx, spec) {
+    let outcome = match pkg::install(config, &ctx, spec, source) {
         Ok(outcome) => outcome,
         // Private repository: offer to set up auth right here, then retry.
-        Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec)?,
-        Err(err) => return Err(err),
+        Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec, source)?,
+        // Several sources provide the package: let the user pick a number.
+        Err(err) => {
+            let Some(chosen) = pick_source(&err)? else {
+                return Err(err);
+            };
+            match pkg::install(config, &ctx, spec, Some(&chosen)) {
+                Ok(outcome) => outcome,
+                Err(err) if offer_auth_setup(&err) => {
+                    pkg::install(config, &ctx, spec, Some(&chosen))?
+                }
+                Err(err) => return Err(err),
+            }
+        }
     };
     match outcome {
         pkg::InstallOutcome::App(report) => {
@@ -375,6 +395,31 @@ fn read_line(prompt: &str) -> anyhow::Result<String> {
 /// When `err` says the repository is private and stdin is a terminal, ask
 /// for permission to configure authorization on the spot (token for https,
 /// SSH key selection for git@/ssh) and save it. `true` = saved, retry.
+/// When `err` says several sources provide the package and stdin is a
+/// terminal, print the numbered candidate list (source + repository) and let
+/// the user pick one. `Ok(None)` = not that error or non-interactive.
+fn pick_source(err: &anyhow::Error) -> anyhow::Result<Option<String>> {
+    let Some(ambiguous) = err.downcast_ref::<pkg::AmbiguousPackage>() else {
+        return Ok(None);
+    };
+    // Non-interactive callers get the structured error with the hint.
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(None);
+    }
+    println!("{}", tf(Msg::PkgPickSource, &ambiguous.name));
+    for (i, (source, git)) in ambiguous.candidates.iter().enumerate() {
+        println!("  {}) {source}  {git}", i + 1);
+    }
+    let choice = read_line("> ")?;
+    let index: usize = choice
+        .parse()
+        .ok()
+        .filter(|n| (1..=ambiguous.candidates.len()).contains(n))
+        .ok_or_else(|| anyhow::anyhow!(t(Msg::AuthInvalidChoice)))?;
+    Ok(Some(ambiguous.candidates[index - 1].0.clone()))
+}
+
 fn offer_auth_setup(err: &anyhow::Error) -> bool {
     use asc_daemon::daemon::pkg::auth::{self, AuthRequired, GitAuth, Method};
     use asc_daemon::daemon::pkg::sources::Scope;
@@ -529,7 +574,7 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             }
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
-        AppAction::Install { spec } => install_cmd(&spec, config)?,
+        AppAction::Install { spec, source } => install_cmd(&spec, source.as_deref(), config)?,
         AppAction::Attach { id } => attach_cmd(&id, config)?,
         AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
         AppAction::Start { id } => match manager.start(&ctx, &id)? {

@@ -84,6 +84,9 @@ pub enum Msg {
     PkgInstalled,
     PkgAlreadyInstalled,
     PkgNotFound,
+    PkgAmbiguous,
+    PkgNotInSource,
+    PkgPickSource,
     PkgNotAStack,
     PkgStackNoApp,
     PkgStackInstalled,
@@ -228,6 +231,18 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::PkgNotFound => (
             "package '{}' not found in any registry (refresh indexes: asc update)",
             "пакет '{}' не найден ни в одном реестре (обновить индексы: asc update)",
+        ),
+        Msg::PkgAmbiguous => (
+            "package '{}' is available from several sources: {} — re-run with --source <name>",
+            "пакет '{}' доступен из нескольких источников: {} — повторите с --source <имя>",
+        ),
+        Msg::PkgNotInSource => (
+            "package '{}' not found in source '{}'",
+            "пакет '{}' не найден в источнике '{}'",
+        ),
+        Msg::PkgPickSource => (
+            "Package '{}' is available from several sources — pick one:",
+            "Пакет '{}' доступен из нескольких источников — выберите один:",
         ),
         Msg::PkgNotAStack => (
             "package '{}' is not a stack — install it as a whole: asc install {}",

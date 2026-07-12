@@ -39,6 +39,55 @@ pub enum InstallOutcome {
     },
 }
 
+/// Typed error: several sources provide the requested package. The CLI
+/// catches it to let the user pick a source interactively; everyone else
+/// sees the candidate list with a hint to pass an explicit source.
+#[derive(Debug)]
+pub struct AmbiguousPackage {
+    pub name: String,
+    /// `(source name, git repository)` in source priority order.
+    pub candidates: Vec<(String, String)>,
+}
+
+impl std::fmt::Display for AmbiguousPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list = self
+            .candidates
+            .iter()
+            .map(|(source, git)| format!("{source} ({git})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, "{}", tf2(Msg::PkgAmbiguous, &self.name, list))
+    }
+}
+
+impl std::error::Error for AmbiguousPackage {}
+
+/// Pick the candidate from `source`, or the only one there is; several
+/// candidates without an explicit source is the [`AmbiguousPackage`] error.
+fn select_source(
+    mut candidates: Vec<ResolvedPackage>,
+    source: Option<&str>,
+    package: &str,
+) -> Result<ResolvedPackage> {
+    if let Some(source) = source {
+        return candidates
+            .into_iter()
+            .find(|c| c.source_name == source)
+            .ok_or_else(|| anyhow::anyhow!(tf2(Msg::PkgNotInSource, package, source)));
+    }
+    if candidates.len() > 1 {
+        return Err(anyhow::Error::new(AmbiguousPackage {
+            name: package.to_string(),
+            candidates: candidates
+                .iter()
+                .map(|c| (c.source_name.clone(), c.entry.source.git.clone()))
+                .collect(),
+        }));
+    }
+    Ok(candidates.remove(0))
+}
+
 /// Remove a directory unless `disarm` was called — cleanup for failed installs.
 pub(super) struct RemoveOnDrop {
     pub(super) path: PathBuf,
@@ -64,7 +113,13 @@ impl Drop for RemoveOnDrop {
 
 /// Install from the configured registries. The spec is `name[@version]` for
 /// apps and whole stacks, `stack/app[@version]` for one app of a stack.
-pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<InstallOutcome> {
+/// `source` pins the registry source when several provide the package.
+pub fn install(
+    config: &Config,
+    ctx: &UserContext,
+    spec: &str,
+    source: Option<&str>,
+) -> Result<InstallOutcome> {
     let (package_spec, requested_version) = parse_spec(spec);
     let (package, stack_app) = match package_spec.split_once('/') {
         Some((package, app)) if !package.is_empty() && !app.is_empty() => (package, Some(app)),
@@ -72,7 +127,8 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
         None => (package_spec, None),
     };
 
-    let resolved = RegistryClient::new(config)?.resolve(package)?;
+    let candidates = RegistryClient::new(config)?.resolve_all(package)?;
+    let resolved = select_source(candidates, source, package)?;
     let version = requested_version
         .map(str::to_string)
         .or_else(|| resolved.entry.latest.clone());

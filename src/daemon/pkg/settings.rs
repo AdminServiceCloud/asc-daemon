@@ -434,15 +434,31 @@ impl SettingValues {
     }
 }
 
-/// Manifest directory of an installed app: the repository root, or the
-/// package `path` from the registry entry (monorepo packages).
+/// Manifest directory of an installed app: the repository root, or — for
+/// monorepo and stack packages — located through the registry entry and the
+/// origin recorded in meta.json (`package: "stack/app"`), preferring the
+/// source the app was installed from.
 pub fn manifest_dir_of(config: &Config, id: &str, app_dir: &Path) -> Result<PathBuf> {
     let repo = app_dir.join("repository");
     if repo.join(Manifest::FILE).exists() {
         return Ok(repo);
     }
-    let resolved = super::registry::RegistryClient::new(config)?.resolve(id)?;
-    super::install::manifest_dir(&repo, resolved.entry.source.path.as_deref())
+    let meta = crate::daemon::apps::meta::AppMeta::load(app_dir)?;
+    let package_spec = meta.package.clone().unwrap_or_else(|| id.to_string());
+    let (package, stack_app) = match package_spec.split_once('/') {
+        Some((package, app)) => (package, Some(app)),
+        None => (package_spec.as_str(), None),
+    };
+    let installed_from = meta
+        .source
+        .as_deref()
+        .and_then(|s| s.split_once(':'))
+        .map(|(name, _)| name);
+    let resolved = super::registry::RegistryClient::new(config)?
+        .resolve_preferring(package, installed_from)?;
+    let (dir, _) =
+        super::install::locate_manifest(&repo, resolved.entry.source.path.as_deref(), stack_app)?;
+    Ok(dir)
 }
 
 #[cfg(test)]

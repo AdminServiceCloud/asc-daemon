@@ -172,6 +172,9 @@ async fn get_app(
 struct InstallBody {
     /// "name", "stack" or "stack/app", optionally with "@version".
     spec: String,
+    /// Registry source to install from; required when several provide the package.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 async fn install_app(
@@ -179,7 +182,7 @@ async fn install_app(
     Json(body): Json<InstallBody>,
 ) -> Result<Response, ApiError> {
     // Mirrors InstallAppResponse from the proto contract.
-    let json = match state.install(body.spec).await? {
+    let json = match state.install(body.spec, body.source).await? {
         InstallOutcome::App(report) => serde_json::json!({
             "id": report.id,
             "version": report.version,

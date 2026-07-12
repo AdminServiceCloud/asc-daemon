@@ -113,7 +113,7 @@ env:
         stack,
         installed,
         skipped,
-    } = pkg::install(&config, &ctx, "demo-stack").unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -148,7 +148,7 @@ env:
     // ── Re-install: everything is skipped, nothing breaks ────────────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack").unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -158,7 +158,7 @@ env:
     // ── Single app from the stack (optional installs when asked) ─────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack/extras").unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack/extras", None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -167,7 +167,7 @@ env:
     assert!(skipped.is_empty());
 
     // Unknown stack app fails cleanly.
-    let err = pkg::install(&config, &ctx, "demo-stack/ghost").unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo-stack/ghost", None).unwrap_err();
     assert!(err.to_string().contains("ghost"), "got: {err:#}");
 
     // ── Upgrade one app of the stack to a new tag ─────────────────────────

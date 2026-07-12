@@ -77,6 +77,9 @@ message InstallAppRequest {
   // "name", "stack" or "stack/app", optionally with "@version"
   // (version = git tag of the package repo).
   string spec = 1;
+  // Registry source to install from; empty = automatic. Required when
+  // several sources provide the package (the error lists them).
+  string source = 2;
 }
 
 message InstallAppResponse {

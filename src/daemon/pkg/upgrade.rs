@@ -57,7 +57,14 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         None => (package_spec.as_str(), None),
     };
 
-    let resolved = RegistryClient::new(config)?.resolve(package)?;
+    // When several sources provide the package, prefer the one the app was
+    // installed from (meta.source = "name:git-url"); fall back to priority.
+    let installed_from = meta
+        .source
+        .as_deref()
+        .and_then(|s| s.split_once(':'))
+        .map(|(name, _)| name);
+    let resolved = RegistryClient::new(config)?.resolve_preferring(package, installed_from)?;
     let Some(version) = requested_version
         .map(str::to_string)
         .or_else(|| resolved.entry.latest.clone())

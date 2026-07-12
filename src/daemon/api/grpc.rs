@@ -165,9 +165,11 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::InstallAppRequest>,
     ) -> Result<Response<pb::InstallAppResponse>, Status> {
+        let request = request.into_inner();
+        let source = Some(request.source).filter(|s| !s.is_empty());
         let outcome = self
             .0
-            .install(request.into_inner().spec)
+            .install(request.spec, source)
             .await
             .map_err(to_status)?;
         let response = match outcome {

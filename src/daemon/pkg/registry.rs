@@ -114,14 +114,16 @@ impl RegistryClient {
         })
     }
 
-    /// Resolve a package (app or stack) by name; the first source that has
-    /// it wins. Callers dispatch on `entry.package_type`.
-    pub fn resolve(&self, name: &str) -> Result<ResolvedPackage> {
+    /// Every source that provides the package (app or stack), in source
+    /// priority order; never empty. Callers dispatch on `entry.package_type`
+    /// and decide what to do when several sources compete.
+    pub fn resolve_all(&self, name: &str) -> Result<Vec<ResolvedPackage>> {
+        let mut found = Vec::new();
         for (source, _) in self.sources.list() {
             match self.packages_of(source, false) {
                 Ok(packages) => {
                     if let Some(entry) = packages.into_iter().find(|p| p.name == name) {
-                        return Ok(ResolvedPackage {
+                        found.push(ResolvedPackage {
                             source_name: source.name.clone(),
                             entry,
                         });
@@ -132,7 +134,20 @@ impl RegistryClient {
                 }
             }
         }
-        bail!(tf(Msg::PkgNotFound, name))
+        if found.is_empty() {
+            bail!(tf(Msg::PkgNotFound, name));
+        }
+        Ok(found)
+    }
+
+    /// Resolve preferring `source` when it still provides the package
+    /// (installed apps stick to their origin), falling back to priority.
+    pub fn resolve_preferring(&self, name: &str, source: Option<&str>) -> Result<ResolvedPackage> {
+        let mut candidates = self.resolve_all(name)?;
+        let position = source
+            .and_then(|source| candidates.iter().position(|c| c.source_name == source))
+            .unwrap_or(0);
+        Ok(candidates.remove(position))
     }
 
     /// Case-insensitive substring search over name/title/description/tags.

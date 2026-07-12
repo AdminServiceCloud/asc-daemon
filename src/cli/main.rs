@@ -228,8 +228,12 @@ fn run() -> anyhow::Result<()> {
         Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
         Command::Search { query } => search_cmd(&query, &config),
         Command::Update => {
-            RegistryClient::new(&config)?.update()?;
-            println!("{}", t(Msg::UpdateDone));
+            let updated = RegistryClient::new(&config)?.update()?;
+            let total: usize = updated.iter().map(|s| s.packages).sum();
+            for s in &updated {
+                println!("{}", tf2(Msg::UpdateSourceDone, &s.source_name, s.packages));
+            }
+            println!("{}", tf2(Msg::UpdateDone, updated.len(), total));
             Ok(())
         }
         Command::Source { action } => source_cmd(action),

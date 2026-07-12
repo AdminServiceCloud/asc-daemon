@@ -105,6 +105,7 @@ pub enum Msg {
     SourceRemoved,
     SourcesEmpty,
     SourceSystemNeedsRoot,
+    UpdateSourceDone,
     UpdateDone,
     SearchNoResults,
     ErrGitNotFound,
@@ -291,7 +292,14 @@ pub fn t(msg: Msg) -> &'static str {
             "source '{}' is a system source (managed by root; run with sudo)",
             "источник '{}' — системный (управляется root; выполните через sudo)",
         ),
-        Msg::UpdateDone => ("Registry indexes updated", "Индексы реестров обновлены"),
+        Msg::UpdateSourceDone => (
+            "  {}: {} packages indexed",
+            "  {}: заиндексировано пакетов — {}",
+        ),
+        Msg::UpdateDone => (
+            "Registry indexes updated: {} sources, {} packages",
+            "Индексы реестров обновлены: источников — {}, пакетов — {}",
+        ),
         Msg::SearchNoResults => (
             "nothing found for '{}'",
             "по запросу '{}' ничего не найдено",

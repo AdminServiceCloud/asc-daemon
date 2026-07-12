@@ -79,6 +79,14 @@ pub struct ResolvedPackage {
     pub entry: PackageEntry,
 }
 
+/// Result of refreshing one source during `asc update`.
+#[derive(Debug, Clone)]
+pub struct SourceUpdate {
+    pub source_name: String,
+    /// Packages indexed across all categories of the source.
+    pub packages: usize,
+}
+
 pub struct RegistryClient {
     sources: SourceList,
     cache_dir: PathBuf,
@@ -164,12 +172,19 @@ impl RegistryClient {
     }
 
     /// Force-refresh all indexes of all sources (`asc update`).
-    pub fn update(&self) -> Result<()> {
+    /// Returns per-source stats so the CLI can report what was indexed.
+    pub fn update(&self) -> Result<Vec<SourceUpdate>> {
+        let mut updated = Vec::new();
         for (source, _) in self.sources.list() {
-            self.packages_of(source, true)
+            let packages = self
+                .packages_of(source, true)
                 .with_context(|| format!("cannot update source '{}'", source.name))?;
+            updated.push(SourceUpdate {
+                source_name: source.name.clone(),
+                packages: packages.len(),
+            });
         }
-        Ok(())
+        Ok(updated)
     }
 
     /// All packages of a source, walking categories and children.

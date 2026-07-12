@@ -23,7 +23,7 @@ use bollard::query_parameters::{
 use futures_util::{Stream, StreamExt};
 
 use crate::daemon::config::DockerConfig;
-use crate::daemon::i18n::{Msg, tf};
+use crate::daemon::i18n::{Msg, t, tf};
 
 /// Seconds the Engine waits on stop before killing the container.
 const STOP_TIMEOUT_SECS: i64 = 10;
@@ -40,12 +40,24 @@ pub fn connect(cfg: &DockerConfig) -> Result<Docker> {
         .map_err(|err| friendly(cfg, err))
 }
 
-/// Map a Docker error to a user-facing one that names the socket path.
+/// Map a Docker error to a user-facing one. A host without the docker binary
+/// has Docker missing, not stopped — say that and how to install it instead
+/// of asking whether the daemon is running.
 fn friendly(cfg: &DockerConfig, err: BollardError) -> anyhow::Error {
+    if !docker_binary_present() {
+        return anyhow!("{}: {err}", t(Msg::ErrDockerNotFound));
+    }
     anyhow!(
         "{}: {err}",
         tf(Msg::ErrDockerUnreachable, cfg.socket.display())
     )
+}
+
+/// Whether a `docker` executable is anywhere on PATH.
+fn docker_binary_present() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("docker").is_file()))
+        .unwrap_or(false)
 }
 
 /// HTTP status carried by a Docker Engine error response, if any.

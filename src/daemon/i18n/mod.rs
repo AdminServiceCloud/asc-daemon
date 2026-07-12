@@ -367,8 +367,8 @@ pub fn t(msg: Msg) -> &'static str {
             "curl не найден: установите curl для загрузки обновлений и индексов реестров",
         ),
         Msg::ErrDockerNotFound => (
-            "docker not found: install Docker to manage container apps",
-            "docker не найден: установите Docker для управления контейнерными приложениями",
+            "Docker is not installed — container apps need it; install: curl -fsSL https://get.docker.com | sh",
+            "Docker не установлен — он нужен контейнерным приложениям; установка: curl -fsSL https://get.docker.com | sh",
         ),
         Msg::ErrDockerUnreachable => (
             "cannot reach Docker at {} (is Docker running? set the socket path in [docker] socket)",

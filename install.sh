@@ -34,6 +34,31 @@ if [ -r /etc/os-release ]; then
     esac
 fi
 
+# ── Docker: container apps need it; offer to install when missing ───────────
+# The script usually arrives via `curl | bash`, so stdin is the script itself —
+# interactive answers are read from /dev/tty when there is one.
+if ! command -v docker >/dev/null 2>&1; then
+    if [ "$SILENT" -eq 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        printf "Docker is not installed. Container apps (asc install <pkg>) need it.\nInstall Docker now via get.docker.com? [y/N] " > /dev/tty
+        read -r answer < /dev/tty || answer=""
+        case "$answer" in
+            y|Y|yes|YES|д|да|Д|Да)
+                echo "Installing Docker (get.docker.com)..."
+                curl -fsSL --proto '=https' --tlsv1.2 https://get.docker.com | sh \
+                    || fail "Docker installation failed"
+                systemctl enable --now docker >/dev/null 2>&1 || true
+                echo "Docker installed"
+                ;;
+            *)
+                echo "Skipping Docker. Install it later with: curl -fsSL https://get.docker.com | sh"
+                ;;
+        esac
+    else
+        echo "warning: Docker is not installed — container apps will not run." >&2
+        echo "         Install it with: curl -fsSL https://get.docker.com | sh" >&2
+    fi
+fi
+
 # ── Architecture → Rust target triple (as published in releases) ────────────
 case "$(uname -m)" in
     x86_64)          TARGET="x86_64-unknown-linux-gnu" ;;

@@ -11,19 +11,32 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use super::manifest::{AppType, Manifest};
-use super::registry::RegistryClient;
+use super::manifest::{AppType, Manifest, StackManifest};
+use super::registry::{RegistryClient, ResolvedPackage};
 use super::settings::{SettingValues, SettingsFile};
 use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Quota, Runtime};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
-use crate::daemon::i18n::{Msg, t, tf};
+use crate::daemon::i18n::{Msg, t, tf, tf2};
 
 #[derive(Debug)]
 pub struct InstallReport {
     pub id: String,
     pub version: String,
+}
+
+/// What `asc install <spec>` produced: one app, or the apps of a stack.
+#[derive(Debug)]
+pub enum InstallOutcome {
+    App(InstallReport),
+    Stack {
+        stack: String,
+        /// Freshly installed apps, in dependency (= start) order.
+        installed: Vec<InstallReport>,
+        /// Stack apps that were already installed and were left untouched.
+        skipped: Vec<String>,
+    },
 }
 
 /// Remove a directory unless `disarm` was called — cleanup for failed installs.
@@ -49,19 +62,104 @@ impl Drop for RemoveOnDrop {
     }
 }
 
-/// Install `name` or `name@version` from the configured registries.
-pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<InstallReport> {
-    let (name, requested_version) = parse_spec(spec);
-    let store = AppStore::new(config.daemon.apps_dir.clone());
-    if store.get(name)?.is_some() {
-        bail!(tf(Msg::PkgAlreadyInstalled, name));
-    }
+/// Install from the configured registries. The spec is `name[@version]` for
+/// apps and whole stacks, `stack/app[@version]` for one app of a stack.
+pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<InstallOutcome> {
+    let (package_spec, requested_version) = parse_spec(spec);
+    let (package, stack_app) = match package_spec.split_once('/') {
+        Some((package, app)) if !package.is_empty() && !app.is_empty() => (package, Some(app)),
+        Some(_) => bail!("invalid package spec '{package_spec}': use <name> or <stack>/<app>"),
+        None => (package_spec, None),
+    };
 
-    let resolved = RegistryClient::new(config)?.resolve(name)?;
+    let resolved = RegistryClient::new(config)?.resolve(package)?;
     let version = requested_version
         .map(str::to_string)
         .or_else(|| resolved.entry.latest.clone());
 
+    if resolved.entry.package_type == "stack" {
+        return install_stack(config, ctx, &resolved, package, stack_app, version.as_deref());
+    }
+    if stack_app.is_some() {
+        bail!(tf2(Msg::PkgNotAStack, package, package));
+    }
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    if store.get(package)?.is_some() {
+        bail!(tf(Msg::PkgAlreadyInstalled, package));
+    }
+    install_one(config, ctx, &resolved, package, None, version.as_deref())
+        .map(InstallOutcome::App)
+}
+
+/// Install a stack: clone once to read `asc.stack.yaml`, then install the
+/// selected apps (all non-optional ones, or the requested app) together with
+/// their transitive dependencies, dependencies first. Each app installs
+/// atomically; already-installed apps are skipped and left untouched.
+fn install_stack(
+    config: &Config,
+    ctx: &UserContext,
+    resolved: &ResolvedPackage,
+    package: &str,
+    stack_app: Option<&str>,
+    version: Option<&str>,
+) -> Result<InstallOutcome> {
+    let probe_dir = std::env::temp_dir().join(format!("asc-stack-{}-{package}", std::process::id()));
+    let _ = fs::remove_dir_all(&probe_dir);
+    let _probe_cleanup = RemoveOnDrop {
+        path: probe_dir.clone(),
+        armed: true,
+    };
+    clone_repository(&resolved.entry.source.git, version, &probe_dir)?;
+    let stack_root = manifest_dir(&probe_dir, resolved.entry.source.path.as_deref())?;
+    let stack = StackManifest::load(&stack_root)?;
+
+    let wanted: Vec<&str> = match stack_app {
+        Some(app) => {
+            if stack.app(app).is_none() {
+                bail!(tf2(Msg::PkgStackNoApp, package, app));
+            }
+            vec![app]
+        }
+        None => stack
+            .apps
+            .iter()
+            .filter(|a| !a.optional)
+            .map(|a| a.name.as_str())
+            .collect(),
+    };
+
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    let mut installed = Vec::new();
+    let mut skipped = Vec::new();
+    for app in stack.install_order(wanted)? {
+        // The app id is the name from the app's own asc.yaml.
+        let manifest = Manifest::load(&safe_join(&stack_root, &app.path)?)?;
+        if store.get(&manifest.name)?.is_some() {
+            skipped.push(manifest.name);
+            continue;
+        }
+        let report = install_one(config, ctx, resolved, &manifest.name, Some(&app.name), version)?;
+        installed.push(report);
+    }
+    Ok(InstallOutcome::Stack {
+        stack: package.to_string(),
+        installed,
+        skipped,
+    })
+}
+
+/// Install one app: clone the package repository into the app directory,
+/// read the manifest (through `asc.stack.yaml` for stack apps), provision
+/// the runtime and write meta.json.
+fn install_one(
+    config: &Config,
+    ctx: &UserContext,
+    resolved: &ResolvedPackage,
+    name: &str,
+    stack_app: Option<&str>,
+    version: Option<&str>,
+) -> Result<InstallReport> {
+    let store = AppStore::new(config.daemon.apps_dir.clone());
     let app_dir = store.app_dir(name)?;
     fs::create_dir_all(&app_dir)
         .with_context(|| format!("cannot create app directory {}", app_dir.display()))?;
@@ -71,10 +169,14 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
     };
 
     let repo_dir = app_dir.join("repository");
-    let cloned_tag = clone_repository(&resolved.entry.source.git, version.as_deref(), &repo_dir)?;
+    let cloned_tag = clone_repository(&resolved.entry.source.git, version, &repo_dir)?;
 
-    let manifest_dir = manifest_dir(&repo_dir, resolved.entry.source.path.as_deref())?;
-    let manifest = Manifest::load(&manifest_dir)?;
+    let (manifest_dir, stack) =
+        locate_manifest(&repo_dir, resolved.entry.source.path.as_deref(), stack_app)?;
+    let mut manifest = Manifest::load(&manifest_dir)?;
+    if let Some(stack) = &stack {
+        manifest.merge_stack_env(&stack.env);
+    }
 
     // The app type is only known after reading the manifest; the cleanup
     // guard removes the cloned repository on this failure path too.
@@ -119,6 +221,7 @@ pub fn install(config: &Config, ctx: &UserContext, spec: &str) -> Result<Install
             "{}:{}",
             resolved.source_name, resolved.entry.source.git
         )),
+        package: stack_app.map(|app| format!("{}/{app}", resolved.entry.name)),
         desired_state: DesiredState::Stopped,
         quota,
         runtime,
@@ -238,21 +341,45 @@ fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
 pub(super) fn manifest_dir(repo_dir: &Path, sub: Option<&str>) -> Result<PathBuf> {
     match sub {
         None => Ok(repo_dir.to_path_buf()),
-        Some(sub) => {
-            // The path comes from a registry file — never let it escape the repo.
-            // `has_root` also catches "/abs", which is not `is_absolute` on Windows.
-            let clean = Path::new(sub);
-            if clean.is_absolute()
-                || clean.has_root()
-                || clean
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                bail!("invalid package path '{sub}' in registry entry");
-            }
-            Ok(repo_dir.join(clean))
-        }
+        Some(sub) => safe_join(repo_dir, sub),
     }
+}
+
+/// Join a relative path from a registry entry or a stack manifest — never
+/// let it escape the repository. `has_root` also catches "/abs", which is
+/// not `is_absolute` on Windows.
+pub(super) fn safe_join(base: &Path, sub: &str) -> Result<PathBuf> {
+    let clean = Path::new(sub);
+    if clean.is_absolute()
+        || clean.has_root()
+        || clean
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!("invalid package path '{sub}'");
+    }
+    Ok(base.join(clean))
+}
+
+/// Directory of the app manifest inside a cloned repository: the registry
+/// entry `path`, then — for stack apps — the app path from `asc.stack.yaml`.
+/// Returns the stack manifest for stack apps (its shared env is merged into
+/// the app manifest by the callers).
+pub(super) fn locate_manifest(
+    repo_dir: &Path,
+    entry_path: Option<&str>,
+    stack_app: Option<&str>,
+) -> Result<(PathBuf, Option<StackManifest>)> {
+    let root = manifest_dir(repo_dir, entry_path)?;
+    let Some(app) = stack_app else {
+        return Ok((root, None));
+    };
+    let stack = StackManifest::load(&root)?;
+    let entry = stack
+        .app(app)
+        .with_context(|| format!("stack '{}' has no app '{app}'", stack.name))?;
+    let dir = safe_join(&root, &entry.path)?;
+    Ok((dir, Some(stack)))
 }
 
 /// Normalized quota from a parsed settings file, if any.

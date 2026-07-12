@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::ApiState;
 use super::console::SessionType;
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState};
+use crate::daemon::pkg::InstallOutcome;
 
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
@@ -169,7 +170,7 @@ async fn get_app(
 
 #[derive(Deserialize)]
 struct InstallBody {
-    /// "name" or "name@version".
+    /// "name", "stack" or "stack/app", optionally with "@version".
     spec: String,
 }
 
@@ -177,12 +178,29 @@ async fn install_app(
     State(state): State<Arc<ApiState>>,
     Json(body): Json<InstallBody>,
 ) -> Result<Response, ApiError> {
-    let report = state.install(body.spec).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": report.id, "version": report.version })),
-    )
-        .into_response())
+    // Mirrors InstallAppResponse from the proto contract.
+    let json = match state.install(body.spec).await? {
+        InstallOutcome::App(report) => serde_json::json!({
+            "id": report.id,
+            "version": report.version,
+            "apps": [],
+            "skipped": [],
+        }),
+        InstallOutcome::Stack {
+            stack,
+            installed,
+            skipped,
+        } => serde_json::json!({
+            "id": stack,
+            "version": installed.first().map(|r| r.version.clone()).unwrap_or_default(),
+            "apps": installed
+                .iter()
+                .map(|r| serde_json::json!({ "id": r.id, "version": r.version }))
+                .collect::<Vec<_>>(),
+            "skipped": skipped,
+        }),
+    };
+    Ok((StatusCode::CREATED, Json(json)).into_response())
 }
 
 async fn start_app(

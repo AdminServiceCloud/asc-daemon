@@ -160,6 +160,13 @@ apps:
 - Registries and the platform store index both single `asc.yaml` files and `asc.stack.yaml` stacks.
 - Examples — in the [asc-example-apps](../../../asc-example-apps) repository.
 
+**Stack install mechanics**: the repository is cloned once to read `asc.stack.yaml`, then every selected application installs like a regular app — with its own repository clone, `/asc/apps/<id>/` directory and meta.json:
+
+- **The app id** is the `name` from the app's own `asc.yaml` (in the example above the stack's `web` app may be named `my-stack-web`); the origin is recorded in meta.json as `package: "my-stack/web"` — `asc app upgrade` resolves the package through it.
+- **Order**: dependencies (`depends_on`) install first; cycles are rejected at validation. `asc install my-stack` installs every non-`optional` component; `asc install my-stack/db` installs the requested component (even an `optional` one) plus its dependencies.
+- **Idempotency**: already-installed apps of the stack are skipped and left untouched; every app installs atomically (a failure removes only its own directory, previously installed components stay).
+- **The stack's shared `env`** is appended to every app's `env`; the app's own declaration wins.
+
 ### Registries
 
 - **Registry format** (the `registry` repo) — a hierarchy of JSON files: the root index `registry.json` → category files `categories/<topic>.json` (databases, ai, bots, game-servers, system-utilities, web…) → optional subcategories (`children`). Packages come in two kinds: `app` (asc.yaml) and `stack` (asc.stack.yaml). Validation schemas — in `registry/schema/`. Descriptions are in English.

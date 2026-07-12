@@ -9,6 +9,7 @@ use super::console::SessionType;
 use super::proto::v1 as pb;
 use super::{ApiState, proto};
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState};
+use crate::daemon::pkg::InstallOutcome;
 
 use pb::app_service_server::{AppService, AppServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
@@ -164,15 +165,39 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::InstallAppRequest>,
     ) -> Result<Response<pb::InstallAppResponse>, Status> {
-        let report = self
+        let outcome = self
             .0
             .install(request.into_inner().spec)
             .await
             .map_err(to_status)?;
-        Ok(Response::new(pb::InstallAppResponse {
-            id: report.id,
-            version: report.version,
-        }))
+        let response = match outcome {
+            InstallOutcome::App(report) => pb::InstallAppResponse {
+                id: report.id,
+                version: report.version,
+                apps: vec![],
+                skipped: vec![],
+            },
+            InstallOutcome::Stack {
+                stack,
+                installed,
+                skipped,
+            } => pb::InstallAppResponse {
+                id: stack,
+                version: installed
+                    .first()
+                    .map(|r| r.version.clone())
+                    .unwrap_or_default(),
+                apps: installed
+                    .into_iter()
+                    .map(|r| pb::InstalledApp {
+                        id: r.id,
+                        version: r.version,
+                    })
+                    .collect(),
+                skipped,
+            },
+        };
+        Ok(Response::new(response))
     }
 
     async fn start_app(

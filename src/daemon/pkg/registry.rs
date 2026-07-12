@@ -114,15 +114,13 @@ impl RegistryClient {
         })
     }
 
-    /// Resolve a package by name; the first source that has it wins.
+    /// Resolve a package (app or stack) by name; the first source that has
+    /// it wins. Callers dispatch on `entry.package_type`.
     pub fn resolve(&self, name: &str) -> Result<ResolvedPackage> {
         for (source, _) in self.sources.list() {
             match self.packages_of(source, false) {
                 Ok(packages) => {
                     if let Some(entry) = packages.into_iter().find(|p| p.name == name) {
-                        if entry.package_type != "app" {
-                            bail!(tf(Msg::PkgStacksNotSupported, name));
-                        }
                         return Ok(ResolvedPackage {
                             source_name: source.name.clone(),
                             entry,

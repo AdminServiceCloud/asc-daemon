@@ -42,6 +42,7 @@ fn install_app_with_logs(state: &ApiState, id: &str, log_lines: &str) {
             },
             version: None,
             source: None,
+            package: None,
             desired_state: DesiredState::Stopped,
             quota: None,
             runtime: Runtime::Process {

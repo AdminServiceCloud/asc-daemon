@@ -24,6 +24,10 @@ pub struct AppMeta {
     /// Package source (registry name or repository URL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Registry install spec this app came from (`name` or `stack/app`);
+    /// upgrades resolve the package through it. `None` = the app id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     /// What the app should be doing; enforced after daemon restart/reboot.
     #[serde(default)]
     pub desired_state: DesiredState,
@@ -143,6 +147,7 @@ mod tests {
             },
             version: Some("v1.2.0".into()),
             source: Some("official".into()),
+            package: None,
             desired_state: DesiredState::Running,
             quota: Some(Quota {
                 cpu_cores: Some(1.5),

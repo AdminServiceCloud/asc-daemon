@@ -74,11 +74,23 @@ message GetAppResponse {
 }
 
 message InstallAppRequest {
-  // "name" or "name@version" (version = git tag of the package repo).
+  // "name", "stack" or "stack/app", optionally with "@version"
+  // (version = git tag of the package repo).
   string spec = 1;
 }
 
 message InstallAppResponse {
+  // Installed app id; for stack installs — the stack name.
+  string id = 1;
+  // Installed version; for stack installs — the version of the first app.
+  string version = 2;
+  // Stack installs: every freshly installed app, in dependency order.
+  repeated InstalledApp apps = 3;
+  // Stack installs: apps that were already installed and were skipped.
+  repeated string skipped = 4;
+}
+
+message InstalledApp {
   string id = 1;
   string version = 2;
 }

@@ -112,6 +112,7 @@ mod tests {
             },
             version: None,
             source: None,
+            package: None,
             desired_state: DesiredState::Stopped,
             quota: None,
             runtime: Runtime::Process {

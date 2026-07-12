@@ -12,8 +12,8 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::install::{
-    RemoveOnDrop, clone_repository, enforce_install_policy, load_quota, manifest_dir, parse_spec,
-    provision,
+    RemoveOnDrop, clone_repository, enforce_install_policy, load_quota, locate_manifest,
+    parse_spec, provision,
 };
 use super::manifest::Manifest;
 use super::registry::RegistryClient;
@@ -49,7 +49,15 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     }
     let meta = status.meta;
 
-    let resolved = RegistryClient::new(config)?.resolve(id)?;
+    // Stack apps record their origin as `stack/app` in meta.package;
+    // plain apps resolve by their own id.
+    let package_spec = meta.package.clone().unwrap_or_else(|| id.to_string());
+    let (package, stack_app) = match package_spec.split_once('/') {
+        Some((package, app)) => (package, Some(app)),
+        None => (package_spec.as_str(), None),
+    };
+
+    let resolved = RegistryClient::new(config)?.resolve(package)?;
     let Some(version) = requested_version
         .map(str::to_string)
         .or_else(|| resolved.entry.latest.clone())
@@ -84,8 +92,12 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     };
     let cloned_tag = clone_repository(&resolved.entry.source.git, Some(&version), &new_dir)?
         .expect("a version was requested, so a tag was checked out");
-    let new_manifest_dir = manifest_dir(&new_dir, resolved.entry.source.path.as_deref())?;
-    let manifest = Manifest::load(&new_manifest_dir)?;
+    let entry_path = resolved.entry.source.path.as_deref();
+    let (new_manifest_dir, stack) = locate_manifest(&new_dir, entry_path, stack_app)?;
+    let mut manifest = Manifest::load(&new_manifest_dir)?;
+    if let Some(stack) = &stack {
+        manifest.merge_stack_env(&stack.env);
+    }
     enforce_install_policy(config, ctx, &manifest, id)?;
     let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
     let quota = load_quota(settings.as_ref())?;
@@ -104,18 +116,17 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     // Tear down the old runtime (the container name is reused) and build the
     // new one; on failure restore the previous repository and runtime.
     teardown_runtime(config, &meta.runtime)?;
-    let manifest_sub = resolved.entry.source.path.as_deref();
     let runtime = match provision(
         &manifest,
         id,
         &app_dir,
-        &manifest_dir(&repo_dir, manifest_sub)?,
+        &locate_manifest(&repo_dir, entry_path, stack_app)?.0,
         &config.docker,
         quota.as_ref(),
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
-            rollback(config, id, &app_dir, &repo_dir, &old_dir, manifest_sub);
+            rollback(config, id, &app_dir, &repo_dir, &old_dir, entry_path, stack_app);
             return Err(err.context(format!(
                 "upgrade of '{id}' failed, previous version restored"
             )));
@@ -169,20 +180,22 @@ fn rollback(
     app_dir: &Path,
     repo_dir: &Path,
     old_dir: &Path,
-    manifest_sub: Option<&str>,
+    entry_path: Option<&str>,
+    stack_app: Option<&str>,
 ) {
     let _ = fs::remove_dir_all(repo_dir);
     if let Err(err) = fs::rename(old_dir, repo_dir) {
         warn!(app = id, error = %err, "rollback: cannot restore the previous repository");
         return;
     }
-    let restore = manifest_dir(repo_dir, manifest_sub)
-        .and_then(|dir| Manifest::load(&dir))
-        .and_then(|manifest| {
-            let dir = manifest_dir(repo_dir, manifest_sub)?;
-            let quota = load_quota(SettingsFile::load_for(&dir, &manifest)?.as_ref())?;
-            provision(&manifest, id, app_dir, &dir, &config.docker, quota.as_ref())
-        });
+    let restore = locate_manifest(repo_dir, entry_path, stack_app).and_then(|(dir, stack)| {
+        let mut manifest = Manifest::load(&dir)?;
+        if let Some(stack) = &stack {
+            manifest.merge_stack_env(&stack.env);
+        }
+        let quota = load_quota(SettingsFile::load_for(&dir, &manifest)?.as_ref())?;
+        provision(&manifest, id, app_dir, &dir, &config.docker, quota.as_ref())
+    });
     if let Err(err) = restore {
         warn!(app = id, error = %format!("{err:#}"), "rollback: cannot re-provision the previous version");
     }

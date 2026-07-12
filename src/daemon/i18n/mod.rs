@@ -84,7 +84,10 @@ pub enum Msg {
     PkgInstalled,
     PkgAlreadyInstalled,
     PkgNotFound,
-    PkgStacksNotSupported,
+    PkgNotAStack,
+    PkgStackNoApp,
+    PkgStackInstalled,
+    PkgStackAppSkipped,
     PkgStartHint,
     PkgPolicyDockerOnly,
     PkgUpgraded,
@@ -226,9 +229,21 @@ pub fn t(msg: Msg) -> &'static str {
             "package '{}' not found in any registry (refresh indexes: asc update)",
             "пакет '{}' не найден ни в одном реестре (обновить индексы: asc update)",
         ),
-        Msg::PkgStacksNotSupported => (
-            "package '{}' is a stack (asc.stack.yaml) — stacks are not supported yet",
-            "пакет '{}' — это стек (asc.stack.yaml), стеки пока не поддерживаются",
+        Msg::PkgNotAStack => (
+            "package '{}' is not a stack — install it as a whole: asc install {}",
+            "пакет '{}' — не стек, устанавливается целиком: asc install {}",
+        ),
+        Msg::PkgStackNoApp => (
+            "stack '{}' has no app '{}'",
+            "в стеке '{}' нет приложения '{}'",
+        ),
+        Msg::PkgStackInstalled => (
+            "Stack '{}' installed ({} apps)",
+            "Стек '{}' установлен (приложений: {})",
+        ),
+        Msg::PkgStackAppSkipped => (
+            "App '{}' is already installed — skipped",
+            "Приложение '{}' уже установлено — пропущено",
         ),
         Msg::PkgStartHint => ("Start it: asc app start {}", "Запуск: asc app start {}"),
         Msg::PkgUpgraded => (

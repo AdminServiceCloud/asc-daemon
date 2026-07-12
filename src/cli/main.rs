@@ -49,7 +49,7 @@ enum Command {
         #[command(subcommand)]
         action: AppAction,
     },
-    /// Install an app from a registry: <name> or <name>@<version>
+    /// Install from a registry: <name>, <stack> or <stack>/<app>, with optional @<version>
     Install { spec: String },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
@@ -261,14 +261,35 @@ fn autoupdate_cmd(action: &str) -> anyhow::Result<()> {
 
 fn install_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
     let ctx = UserContext::current();
-    let report = match pkg::install(config, &ctx, spec) {
-        Ok(report) => report,
+    let outcome = match pkg::install(config, &ctx, spec) {
+        Ok(outcome) => outcome,
         // Private repository: offer to set up auth right here, then retry.
         Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec)?,
         Err(err) => return Err(err),
     };
-    println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
-    println!("{}", tf(Msg::PkgStartHint, &report.id));
+    match outcome {
+        pkg::InstallOutcome::App(report) => {
+            println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
+            println!("{}", tf(Msg::PkgStartHint, &report.id));
+        }
+        pkg::InstallOutcome::Stack {
+            stack,
+            installed,
+            skipped,
+        } => {
+            for id in &skipped {
+                println!("{}", tf(Msg::PkgStackAppSkipped, id));
+            }
+            for report in &installed {
+                println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
+            }
+            println!("{}", tf2(Msg::PkgStackInstalled, &stack, installed.len()));
+            // Dependency order doubles as the recommended start order.
+            for report in &installed {
+                println!("{}", tf(Msg::PkgStartHint, &report.id));
+            }
+        }
+    }
     Ok(())
 }
 

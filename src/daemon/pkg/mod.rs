@@ -9,7 +9,7 @@ pub mod settings;
 pub mod sources;
 pub mod upgrade;
 
-pub use install::{InstallReport, install};
+pub use install::{InstallOutcome, InstallReport, install};
 pub use registry::RegistryClient;
 pub use sources::SourceList;
 pub use upgrade::{UpgradeOutcome, upgrade};

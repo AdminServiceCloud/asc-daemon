@@ -111,7 +111,10 @@ fn install_from_file_registry() {
     }
 
     // Requested tag is `1.0.0`, the repo has `v1.0.0` — the fallback must hit.
-    let report = pkg::install(&config, &ctx, "demo@1.0.0").unwrap();
+    let pkg::InstallOutcome::App(report) = pkg::install(&config, &ctx, "demo@1.0.0").unwrap()
+    else {
+        panic!("expected a single-app install");
+    };
     assert_eq!(report.id, "demo");
     assert_eq!(report.version, "v1.0.0");
 

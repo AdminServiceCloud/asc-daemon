@@ -445,9 +445,7 @@ mod tests {
             "cs2-server"
         );
         assert_eq!(
-            mgr.get_authorized(&user(1000), "My CS2 Server")
-                .unwrap()
-                .id,
+            mgr.get_authorized(&user(1000), "My CS2 Server").unwrap().id,
             "cs2-server"
         );
         // Foreign users cannot resolve the name either.
@@ -463,8 +461,14 @@ mod tests {
         // A second app whose custom name shadows the first app's id.
         install_named(&mgr, "other", 1000, Some("nginx"));
 
-        assert_eq!(mgr.get_authorized(&user(1000), "nginx").unwrap().id, "nginx");
-        assert_eq!(mgr.get_authorized(&user(1000), "other").unwrap().id, "other");
+        assert_eq!(
+            mgr.get_authorized(&user(1000), "nginx").unwrap().id,
+            "nginx"
+        );
+        assert_eq!(
+            mgr.get_authorized(&user(1000), "other").unwrap().id,
+            "other"
+        );
     }
 
     #[test]

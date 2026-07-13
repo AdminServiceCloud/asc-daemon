@@ -114,11 +114,14 @@ impl Drop for RemoveOnDrop {
 /// Install from the configured registries. The spec is `name[@version]` for
 /// apps and whole stacks, `stack/app[@version]` for one app of a stack.
 /// `source` pins the registry source when several provide the package.
+/// `custom_name` is the user-chosen app name (DMN-024); it applies to a
+/// single app — installing a whole stack with one rejects the install.
 pub fn install(
     config: &Config,
     ctx: &UserContext,
     spec: &str,
     source: Option<&str>,
+    custom_name: Option<&str>,
 ) -> Result<InstallOutcome> {
     let (package_spec, requested_version) = parse_spec(spec);
     let (package, stack_app) = match package_spec.split_once('/') {
@@ -126,6 +129,9 @@ pub fn install(
         Some(_) => bail!("invalid package spec '{package_spec}': use <name> or <stack>/<app>"),
         None => (package_spec, None),
     };
+    if let Some(name) = custom_name {
+        validate_custom_name(config, ctx, name)?;
+    }
 
     let candidates = RegistryClient::new(config)?.resolve_all(package)?;
     let resolved = select_source(candidates, source, package)?;
@@ -134,6 +140,9 @@ pub fn install(
         .or_else(|| resolved.entry.latest.clone());
 
     if resolved.entry.package_type == "stack" {
+        if custom_name.is_some() && stack_app.is_none() {
+            bail!(tf(Msg::PkgNameForSingleApp, package));
+        }
         return install_stack(
             config,
             ctx,
@@ -141,6 +150,7 @@ pub fn install(
             package,
             stack_app,
             version.as_deref(),
+            custom_name,
         );
     }
     if stack_app.is_some() {
@@ -150,7 +160,38 @@ pub fn install(
     if store.get(package)?.is_some() {
         bail!(tf(Msg::PkgAlreadyInstalled, package));
     }
-    install_one(config, ctx, &resolved, package, None, version.as_deref()).map(InstallOutcome::App)
+    install_one(
+        config,
+        ctx,
+        &resolved,
+        package,
+        None,
+        version.as_deref(),
+        custom_name,
+    )
+    .map(InstallOutcome::App)
+}
+
+/// Validate a user-chosen app name (DMN-024): printable, sane length, and
+/// unique among the apps this user can see — otherwise `asc app <name>`
+/// commands would be ambiguous. Uniqueness is checked against visible apps
+/// only, so the error never leaks foreign users' app names.
+fn validate_custom_name(config: &Config, ctx: &UserContext, name: &str) -> Result<()> {
+    let ok_len = (1..=64).contains(&name.chars().count());
+    let ok_chars = !name.chars().any(char::is_control);
+    if !ok_len || !ok_chars || name.trim() != name {
+        bail!(tf(Msg::PkgNameInvalid, name));
+    }
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    for meta in store.list()? {
+        if !ctx.is_root && meta.owner.uid != ctx.uid {
+            continue;
+        }
+        if meta.id == name || meta.custom_name.as_deref() == Some(name) {
+            bail!(tf(Msg::PkgNameTaken, name));
+        }
+    }
+    Ok(())
 }
 
 /// Install a stack: clone once to read `asc.stack.yaml`, then install the
@@ -164,6 +205,7 @@ fn install_stack(
     package: &str,
     stack_app: Option<&str>,
     version: Option<&str>,
+    custom_name: Option<&str>,
 ) -> Result<InstallOutcome> {
     let probe_dir =
         std::env::temp_dir().join(format!("asc-stack-{}-{package}", std::process::id()));
@@ -201,6 +243,9 @@ fn install_stack(
             skipped.push(manifest.name);
             continue;
         }
+        // The custom name goes to the app the user asked for, not to the
+        // dependencies pulled in alongside it.
+        let name_for_app = custom_name.filter(|_| Some(app.name.as_str()) == stack_app);
         let report = install_one(
             config,
             ctx,
@@ -208,6 +253,7 @@ fn install_stack(
             &manifest.name,
             Some(&app.name),
             version,
+            name_for_app,
         )?;
         installed.push(report);
     }
@@ -228,6 +274,7 @@ fn install_one(
     name: &str,
     stack_app: Option<&str>,
     version: Option<&str>,
+    custom_name: Option<&str>,
 ) -> Result<InstallReport> {
     let store = AppStore::new(config.daemon.apps_dir.clone());
     let app_dir = store.app_dir(name)?;
@@ -283,6 +330,7 @@ fn install_one(
     let meta = AppMeta {
         id: name.to_string(),
         name: manifest.title.clone().unwrap_or_else(|| name.to_string()),
+        custom_name: custom_name.map(str::to_string),
         owner: Owner {
             uid: ctx.uid,
             name: ctx.name.clone(),

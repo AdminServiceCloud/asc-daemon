@@ -14,8 +14,13 @@ use serde::{Deserialize, Serialize};
 pub struct AppMeta {
     /// Unique id — the directory name under the apps root.
     pub id: String,
-    /// Human-readable name (defaults to the id).
+    /// Human-readable name (defaults to the id). Refreshed from the package
+    /// manifest on upgrade — user renames go to `custom_name` instead.
     pub name: String,
+    /// Name chosen by the user at install time (DMN-024). Survives upgrades;
+    /// commands accept it interchangeably with the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     /// Linux user owning this app (fixed at install time).
     pub owner: Owner,
     /// Installed version — a git tag of the package repository.
@@ -96,6 +101,11 @@ impl Runtime {
 impl AppMeta {
     pub const FILE: &'static str = "meta.json";
 
+    /// Name shown to the user: the custom name when set, else the package title.
+    pub fn display_name(&self) -> &str {
+        self.custom_name.as_deref().unwrap_or(&self.name)
+    }
+
     /// Load metadata from an app directory.
     pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join(Self::FILE);
@@ -141,6 +151,7 @@ mod tests {
         AppMeta {
             id: "helloworld".into(),
             name: "Hello World".into(),
+            custom_name: None,
             owner: Owner {
                 uid: 1000,
                 name: "alice".into(),
@@ -171,6 +182,21 @@ mod tests {
         assert_eq!(loaded.quota.unwrap().ram_bytes, Some(512 << 20));
         // No leftover tmp file after an atomic save.
         assert!(!dir.path().join("meta.json.tmp").exists());
+    }
+
+    #[test]
+    fn custom_name_roundtrip_and_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = sample();
+        assert_eq!(meta.display_name(), "Hello World");
+        meta.custom_name = Some("My Server".into());
+        meta.save(dir.path()).unwrap();
+        let loaded = AppMeta::load(dir.path()).unwrap();
+        assert_eq!(loaded.display_name(), "My Server");
+        assert_eq!(loaded.name, "Hello World");
+        // Old meta.json files (no custom_name key) must keep loading.
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(!json.contains("custom_name"));
     }
 
     #[test]

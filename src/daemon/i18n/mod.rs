@@ -78,6 +78,7 @@ pub enum Msg {
     AppRemoved,
     AppRemoveNeedsYes,
     AppListEmpty,
+    AppNameAmbiguous,
     AttachHint,
     AttachDockerOnly,
     AttachStartFirst,
@@ -92,6 +93,10 @@ pub enum Msg {
     PkgStackInstalled,
     PkgStackAppSkipped,
     PkgStartHint,
+    PkgPromptName,
+    PkgNameInvalid,
+    PkgNameTaken,
+    PkgNameForSingleApp,
     PkgPolicyDockerOnly,
     PkgUpgraded,
     PkgUpToDate,
@@ -224,6 +229,10 @@ pub fn t(msg: Msg) -> &'static str {
             "удаление приложения '{}' сотрёт все его данные; для подтверждения повторите команду с --yes",
         ),
         Msg::AppListEmpty => ("No apps installed", "Приложения не установлены"),
+        Msg::AppNameAmbiguous => (
+            "several apps are named '{}' — use the app id instead",
+            "названию '{}' соответствует несколько приложений — используйте id",
+        ),
         Msg::PkgInstalled => ("Installed '{}' version {}", "Установлено '{}' версии {}"),
         Msg::PkgAlreadyInstalled => (
             "app '{}' is already installed",
@@ -262,6 +271,22 @@ pub fn t(msg: Msg) -> &'static str {
             "Приложение '{}' уже установлено — пропущено",
         ),
         Msg::PkgStartHint => ("Start it: asc app start {}", "Запуск: asc app start {}"),
+        Msg::PkgPromptName => (
+            "App name [{}] — Enter keeps the default: ",
+            "Название приложения [{}] — Enter оставит по умолчанию: ",
+        ),
+        Msg::PkgNameInvalid => (
+            "invalid app name '{}': 1-64 printable characters, no leading/trailing spaces",
+            "недопустимое название '{}': 1-64 печатных символа, без пробелов по краям",
+        ),
+        Msg::PkgNameTaken => (
+            "name '{}' is already used by another app",
+            "название '{}' уже занято другим приложением",
+        ),
+        Msg::PkgNameForSingleApp => (
+            "a custom name applies to a single app, not the whole '{}' stack",
+            "пользовательское название применимо к одному приложению, а не ко всему стеку '{}'",
+        ),
         Msg::PkgUpgraded => (
             "App '{}' upgraded: {} → {}",
             "Приложение '{}' обновлено: {} → {}",

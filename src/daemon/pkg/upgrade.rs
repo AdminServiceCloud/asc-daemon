@@ -37,21 +37,24 @@ pub enum UpgradeOutcome {
     },
 }
 
-/// Upgrade `name` (to the registry's latest tag) or `name@version`.
-/// The app must be stopped.
+/// Upgrade `name` (to the registry's latest tag) or `name@version`; the app
+/// is referenced by id or custom name. The app must be stopped.
 pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<UpgradeOutcome> {
-    let (id, requested_version) = parse_spec(spec);
+    let (reference, requested_version) = parse_spec(spec);
     let manager = AppManager::new(config);
     // Ownership check plus live state: only stopped apps are upgraded.
-    let status = manager.status(ctx, id)?;
-    if status.state == RuntimeState::Running {
-        bail!(tf2(Msg::PkgUpgradeStopFirst, id, id));
-    }
+    let status = manager.status(ctx, reference)?;
+    let state = status.state;
     let meta = status.meta;
+    // The canonical id: `reference` may have been the app's custom name.
+    let id = meta.id.clone();
+    if state == RuntimeState::Running {
+        bail!(tf2(Msg::PkgUpgradeStopFirst, &id, &id));
+    }
 
     // Stack apps record their origin as `stack/app` in meta.package;
     // plain apps resolve by their own id.
-    let package_spec = meta.package.clone().unwrap_or_else(|| id.to_string());
+    let package_spec = meta.package.clone().unwrap_or_else(|| id.clone());
     let (package, stack_app) = match package_spec.split_once('/') {
         Some((package, app)) => (package, Some(app)),
         None => (package_spec.as_str(), None),
@@ -79,13 +82,13 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         && (*current == version || *current == format!("v{version}"))
     {
         return Ok(UpgradeOutcome::UpToDate {
-            id: id.to_string(),
+            id,
             version: current.clone(),
         });
     }
 
     let store = manager.store();
-    let app_dir = store.app_dir(id)?;
+    let app_dir = store.app_dir(&id)?;
     let repo_dir = app_dir.join("repository");
     let new_dir = app_dir.join("repository.new");
     let old_dir = app_dir.join("repository.old");
@@ -105,7 +108,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     if let Some(stack) = &stack {
         manifest.merge_stack_env(&stack.env);
     }
-    enforce_install_policy(config, ctx, &manifest, id)?;
+    enforce_install_policy(config, ctx, &manifest, &id)?;
     let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
     let quota = load_quota(settings.as_ref())?;
 
@@ -125,7 +128,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     teardown_runtime(config, &meta.runtime)?;
     let runtime = match provision(
         &manifest,
-        id,
+        &id,
         &app_dir,
         &locate_manifest(&repo_dir, entry_path, stack_app)?.0,
         &config.docker,
@@ -135,7 +138,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         Ok(runtime) => runtime,
         Err(err) => {
             rollback(
-                config, id, &app_dir, &repo_dir, &old_dir, entry_path, stack_app,
+                config, &id, &app_dir, &repo_dir, &old_dir, entry_path, stack_app,
             );
             return Err(err.context(format!(
                 "upgrade of '{id}' failed, previous version restored"
@@ -152,20 +155,22 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         let mut values = SettingValues::load(&config_dir).unwrap_or_default();
         values.merge_defaults(&settings.settings);
         if let Err(err) = values.save(&config_dir) {
-            warn!(app = id, error = %format!("{err:#}"), "cannot refresh setting defaults");
+            warn!(app = %id, error = %format!("{err:#}"), "cannot refresh setting defaults");
         }
     }
 
     let from = meta.version.clone();
     let mut meta = meta;
-    meta.name = manifest.title.clone().unwrap_or_else(|| id.to_string());
+    // The package title may change between versions; the user's custom_name
+    // is left untouched and keeps winning in display_name().
+    meta.name = manifest.title.clone().unwrap_or_else(|| id.clone());
     meta.version = Some(cloned_tag.clone());
     meta.quota = quota;
     meta.runtime = runtime;
     store.save(&meta)?;
-    info!(app = id, from = %from.as_deref().unwrap_or("-"), to = %cloned_tag, "app upgraded");
+    info!(app = %id, from = %from.as_deref().unwrap_or("-"), to = %cloned_tag, "app upgraded");
     Ok(UpgradeOutcome::Upgraded {
-        id: id.to_string(),
+        id,
         from,
         to: cloned_tag,
     })

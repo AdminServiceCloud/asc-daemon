@@ -7,7 +7,8 @@ The core of the daemon: a single interface for managing applications of three ki
 ## 🎯 Scenarios
 
 - `asc app install helloworld` — install from a registry (Docker or native — the manifest decides).
-- `asc app start|stop|restart|status|logs <name>` — lifecycle management.
+- `asc app start|stop|restart|status|logs <name>` — lifecycle management. `start` attaches to the app's console right away (Docker apps, interactive terminal — like `docker run` without `-d`); `asc app start -d <name>` starts detached, without attaching.
+- **Custom names** (DMN-024): `asc install` asks for an app name (Enter keeps the default; non-interactively — `--name`). `asc app list` shows both the original ID and the NAME, and every command accepts either one: `asc app start "My Server"` = `asc app start cs2-server`. When an id and a name collide, the id wins; an ambiguous name (several apps named alike) is an error suggesting the id.
 - `asc app list` — a user sees **only their own** applications; `sudo asc app list` — the applications of all users.
 - `asc stats` — CPU and memory consumption per application (like `docker stats`, see [📊 monitoring](monitoring.md)).
 - The platform performs the same operations through the daemon API.
@@ -31,7 +32,7 @@ Every application lives in a directory named after its ID:
 ├── config/        # ⚙️ application settings (see asc.settings.yaml in package-manager.md)
 ├── repository/    # 📦 the application's cloned repository (versions = git tags)
 ├── data/          # 💾 volumes — if the application runs in Docker
-└── meta.json      # 📇 application info: id, name, owner, version (tag), source, state
+└── meta.json      # 📇 application info: id, name, custom name, owner, version (tag), source, state
 ```
 
 - **Installation = cloning the repository** of the package into `repository/`; switching versions = checking out the desired git tag (details — [📦 package-manager](package-manager.md)).

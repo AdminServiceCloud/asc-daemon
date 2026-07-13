@@ -105,8 +105,10 @@ impl ApiState {
         spec: String,
         source: Option<String>,
     ) -> Result<pkg::InstallOutcome> {
-        self.blocking(move |s| pkg::install(&s.config, &api_context(), &spec, source.as_deref()))
-            .await
+        self.blocking(move |s| {
+            pkg::install(&s.config, &api_context(), &spec, source.as_deref(), None)
+        })
+        .await
     }
 
     pub async fn start(self: &Arc<Self>, id: String) -> Result<Outcome> {

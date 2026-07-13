@@ -24,6 +24,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
         .save(&AppMeta {
             id: id.into(),
             name: id.into(),
+            custom_name: None,
             owner: Owner {
                 uid: 0,
                 name: "root".into(),

@@ -55,6 +55,10 @@ enum Command {
         /// Registry source to install from (when several provide the package)
         #[arg(long)]
         source: Option<String>,
+        /// Custom app name (skips the interactive prompt); commands accept
+        /// it interchangeably with the app id
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
@@ -142,6 +146,10 @@ enum AppAction {
         /// Registry source to install from (when several provide the package)
         #[arg(long)]
         source: Option<String>,
+        /// Custom app name (skips the interactive prompt); commands accept
+        /// it interchangeably with the app id
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
     Attach {
@@ -151,8 +159,13 @@ enum AppAction {
     Upgrade {
         spec: String,
     },
+    /// Start the app and attach to its console (Docker apps, interactive
+    /// terminal); use -d to start in the background
     Start {
         id: String,
+        /// Detached mode: start the app without attaching to its console
+        #[arg(short = 'd', long)]
+        detach: bool,
     },
     Stop {
         id: String,
@@ -231,7 +244,9 @@ fn run() -> anyhow::Result<()> {
         Command::Status => status_cmd(&config),
         Command::Stats { sort } => stats_cmd(sort, &config),
         Command::App { action } => app_cmd(action, &config),
-        Command::Install { spec, source } => install_cmd(&spec, source.as_deref(), &config),
+        Command::Install { spec, source, name } => {
+            install_cmd(&spec, source.as_deref(), name, &config)
+        }
         Command::Attach { id } => attach_cmd(&id, &config),
         Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
         Command::Search { query } => search_cmd(&query, &config),
@@ -267,21 +282,31 @@ fn autoupdate_cmd(action: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_cmd(spec: &str, source: Option<&str>, config: &Config) -> anyhow::Result<()> {
+fn install_cmd(
+    spec: &str,
+    source: Option<&str>,
+    name: Option<String>,
+    config: &Config,
+) -> anyhow::Result<()> {
     let ctx = UserContext::current();
-    let outcome = match pkg::install(config, &ctx, spec, source) {
+    let name = match name {
+        Some(name) => Some(name),
+        None => prompt_app_name(spec)?,
+    };
+    let name = name.as_deref();
+    let outcome = match pkg::install(config, &ctx, spec, source, name) {
         Ok(outcome) => outcome,
         // Private repository: offer to set up auth right here, then retry.
-        Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec, source)?,
+        Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec, source, name)?,
         // Several sources provide the package: let the user pick a number.
         Err(err) => {
             let Some(chosen) = pick_source(&err)? else {
                 return Err(err);
             };
-            match pkg::install(config, &ctx, spec, Some(&chosen)) {
+            match pkg::install(config, &ctx, spec, Some(&chosen), name) {
                 Ok(outcome) => outcome,
                 Err(err) if offer_auth_setup(&err) => {
-                    pkg::install(config, &ctx, spec, Some(&chosen))?
+                    pkg::install(config, &ctx, spec, Some(&chosen), name)?
                 }
                 Err(err) => return Err(err),
             }
@@ -311,6 +336,20 @@ fn install_cmd(spec: &str, source: Option<&str>, config: &Config) -> anyhow::Res
         }
     }
     Ok(())
+}
+
+/// Interactive custom-name prompt of `asc install` (DMN-024): Enter keeps
+/// the default (the name from the package manifest), anything else becomes
+/// the app's name — commands then accept it interchangeably with the id.
+/// Skipped for non-interactive stdin, where `--name` is the way.
+fn prompt_app_name(spec: &str) -> anyhow::Result<Option<String>> {
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(None);
+    }
+    let default = spec.split_once('@').map(|(n, _)| n).unwrap_or(spec);
+    let answer = read_line(&tf(Msg::PkgPromptName, default))?;
+    Ok(Some(answer).filter(|a| !a.is_empty()))
 }
 
 fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
@@ -564,7 +603,10 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
         AppAction::Info { id } => {
             let status = manager.status(&ctx, &id)?;
             let m = &status.meta;
-            println!("{}  {}", m.id, m.name);
+            println!("{}  {}", m.id, m.display_name());
+            if m.custom_name.is_some() {
+                println!("  title:   {}", m.name);
+            }
             println!("  kind:    {}", m.runtime.kind());
             println!("  state:   {}", state_label(status.state));
             println!("  version: {}", m.version.as_deref().unwrap_or("-"));
@@ -574,13 +616,32 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             }
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
-        AppAction::Install { spec, source } => install_cmd(&spec, source.as_deref(), config)?,
+        AppAction::Install { spec, source, name } => {
+            install_cmd(&spec, source.as_deref(), name, config)?
+        }
         AppAction::Attach { id } => attach_cmd(&id, config)?,
         AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
-        AppAction::Start { id } => match manager.start(&ctx, &id)? {
-            Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
-            Outcome::AlreadyInState => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
-        },
+        AppAction::Start { id, detach } => {
+            match manager.start(&ctx, &id)? {
+                Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
+                Outcome::AlreadyInState => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
+            }
+            // Like `docker run` without -d: the console is attached by
+            // default. Skipped with -d, for non-Docker apps (nothing to
+            // attach to) and for non-interactive stdin (scripts must not
+            // block on an interactive console).
+            // SAFETY: isatty() has no preconditions.
+            let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
+            if !detach
+                && interactive
+                && matches!(
+                    manager.status(&ctx, &id)?.meta.runtime,
+                    Runtime::Docker { .. }
+                )
+            {
+                attach_cmd(&id, config)?;
+            }
+        }
         AppAction::Stop { id } => match manager.stop(&ctx, &id)? {
             Outcome::Done => println!("{}", tf(Msg::AppStopped, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
@@ -628,7 +689,7 @@ fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
 /// setting by number, enter a value validated against asc.settings.yaml.
 /// Values are stored in `config/settings.json`; the runtime picks them up on
 /// the next restart.
-fn app_settings_cmd(id: &str, config: &Config) -> anyhow::Result<()> {
+fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::manifest::Manifest;
     use asc_daemon::daemon::pkg::settings::{
         SettingKind, SettingValues, SettingsFile, manifest_dir_of,
@@ -636,7 +697,8 @@ fn app_settings_cmd(id: &str, config: &Config) -> anyhow::Result<()> {
 
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
-    manager.get_authorized(&ctx, id)?;
+    // The canonical id: `reference` may have been the app's custom name.
+    let id = &manager.get_authorized(&ctx, reference)?.id;
     let app_dir = manager.store().app_dir(id)?;
 
     let manifest_dir = manifest_dir_of(config, id, &app_dir)?;
@@ -871,6 +933,8 @@ fn state_label(state: RuntimeState) -> &'static str {
 
 /// Table of apps; root gets them grouped by owner. Column headers are
 /// technical identifiers and stay English by convention (like `docker ps`).
+/// NAME is the user's custom name (or the package title): both it and the
+/// ID address the app in commands.
 fn print_app_list(apps: &[AppStatus], group_by_owner: bool) {
     if apps.is_empty() {
         println!("{}", t(Msg::AppListEmpty));
@@ -882,12 +946,22 @@ fn print_app_list(apps: &[AppStatus], group_by_owner: bool) {
         .max()
         .unwrap_or(2)
         .max(2);
+    let name_w = apps
+        .iter()
+        .map(|a| a.meta.display_name().chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
     let print_rows = |rows: &[&AppStatus]| {
-        println!("{:<id_w$}  {:<7}  {:<10}  VERSION", "ID", "KIND", "STATE");
+        println!(
+            "{:<id_w$}  {:<name_w$}  {:<7}  {:<10}  VERSION",
+            "ID", "NAME", "KIND", "STATE"
+        );
         for app in rows {
             println!(
-                "{:<id_w$}  {:<7}  {:<10}  {}",
+                "{:<id_w$}  {:<name_w$}  {:<7}  {:<10}  {}",
                 app.meta.id,
+                app.meta.display_name(),
                 app.meta.runtime.kind(),
                 state_label(app.state),
                 app.meta.version.as_deref().unwrap_or("-"),

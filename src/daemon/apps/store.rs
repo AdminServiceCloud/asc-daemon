@@ -106,6 +106,7 @@ mod tests {
         AppMeta {
             id: id.into(),
             name: id.into(),
+            custom_name: None,
             owner: Owner {
                 uid,
                 name: format!("user{uid}"),

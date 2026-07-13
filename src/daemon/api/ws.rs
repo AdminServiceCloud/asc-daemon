@@ -111,7 +111,7 @@ fn load_app(
     // The grant was issued after an authorization check; reload the meta in
     // case the app changed between token issue and use.
     let meta = state.manager.get_authorized(&super::api_context(), id)?;
-    let dir = state.manager.store().app_dir(id)?;
+    let dir = state.manager.store().app_dir(&meta.id)?;
     Ok((meta, dir))
 }
 

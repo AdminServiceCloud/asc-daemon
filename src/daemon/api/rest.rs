@@ -66,7 +66,7 @@ struct AppJson {
 fn to_json(status: &AppStatus) -> AppJson {
     AppJson {
         id: status.meta.id.clone(),
-        name: status.meta.name.clone(),
+        name: status.meta.display_name().to_string(),
         kind: status.meta.runtime.kind(),
         state: match status.state {
             RuntimeState::Running => "running",

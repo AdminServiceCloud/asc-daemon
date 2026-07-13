@@ -33,8 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 |---|---|
 | Server & apps overview | `asc status` |
 | Search a package | `asc search <query>` |
-| Install an app | `asc install <package>` (stack app: `asc install <stack>/<app>`) |
-| Start / stop / restart | `asc app start|stop|restart <name>` |
+| Install an app | `asc install <package>` (stack app: `asc install <stack>/<app>`); `--name "My Server"` sets a custom name — commands then accept it interchangeably with the id |
+| Start / stop / restart | `asc app start|stop|restart <name>` — in an interactive terminal `start` attaches to the console; use `asc app start -d <name>` to start detached |
 | App details | `asc app info <name>` |
 | Logs (follow) | `asc app logs <name> -f` |
 | Remove an app | `asc app remove <name>` — confirm with the user first |

@@ -116,14 +116,33 @@ impl AppManager {
         Ok(result)
     }
 
-    /// Load an app the user is allowed to manage.
+    /// Load an app the user is allowed to manage. `reference` is the app id
+    /// or its custom name (DMN-024) — every command accepts both.
     ///
     /// A foreign app reports "not found" — same as a missing one — so users
     /// cannot probe which app ids exist on the server.
-    pub fn get_authorized(&self, ctx: &UserContext, id: &str) -> Result<AppMeta> {
-        match self.store.get(id)? {
-            Some(meta) if ctx.is_root || meta.owner.uid == ctx.uid => Ok(meta),
-            _ => bail!(tf(Msg::AppNotFound, id)),
+    pub fn get_authorized(&self, ctx: &UserContext, reference: &str) -> Result<AppMeta> {
+        // The id first: ids are unique, custom names may not be. A reference
+        // that is not even a valid id (spaces, uppercase) skips straight to
+        // the name lookup.
+        if meta::validate_id(reference).is_ok()
+            && let Some(meta) = self.store.get(reference)?
+            && (ctx.is_root || meta.owner.uid == ctx.uid)
+        {
+            return Ok(meta);
+        }
+        // Custom names are matched among visible apps only, so a name equal
+        // to a foreign user's id still resolves to the caller's own app.
+        let mut matches = self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|m| ctx.is_root || m.owner.uid == ctx.uid)
+            .filter(|m| m.custom_name.as_deref() == Some(reference));
+        match (matches.next(), matches.next()) {
+            (Some(meta), None) => Ok(meta),
+            (Some(_), Some(_)) => bail!(tf(Msg::AppNameAmbiguous, reference)),
+            _ => bail!(tf(Msg::AppNotFound, reference)),
         }
     }
 
@@ -192,7 +211,7 @@ impl AppManager {
 
     pub fn start(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
         let mut meta = self.get_authorized(ctx, id)?;
-        let dir = self.store.app_dir(id)?;
+        let dir = self.store.app_dir(&meta.id)?;
         let outcome = if self.state_of(&meta) == RuntimeState::Running {
             Outcome::AlreadyInState
         } else {
@@ -209,7 +228,7 @@ impl AppManager {
 
     pub fn stop(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
         let mut meta = self.get_authorized(ctx, id)?;
-        let dir = self.store.app_dir(id)?;
+        let dir = self.store.app_dir(&meta.id)?;
         let outcome = if self.state_of(&meta) == RuntimeState::Stopped {
             Outcome::AlreadyInState
         } else {
@@ -225,7 +244,7 @@ impl AppManager {
 
     pub fn restart(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let mut meta = self.get_authorized(ctx, id)?;
-        let dir = self.store.app_dir(id)?;
+        let dir = self.store.app_dir(&meta.id)?;
         driver::for_runtime(&meta.runtime, &self.docker).restart(&meta, &dir)?;
         if meta.desired_state != DesiredState::Running {
             meta.desired_state = DesiredState::Running;
@@ -236,16 +255,16 @@ impl AppManager {
 
     pub fn logs(&self, ctx: &UserContext, id: &str, tail: usize) -> Result<String> {
         let meta = self.get_authorized(ctx, id)?;
-        let dir = self.store.app_dir(id)?;
+        let dir = self.store.app_dir(&meta.id)?;
         driver::for_runtime(&meta.runtime, &self.docker).logs(&meta, &dir, tail)
     }
 
     /// Remove the app: release runtime resources, then delete its directory.
     pub fn remove(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let meta = self.get_authorized(ctx, id)?;
-        let dir = self.store.app_dir(id)?;
+        let dir = self.store.app_dir(&meta.id)?;
         driver::for_runtime(&meta.runtime, &self.docker).remove(&meta, &dir)?;
-        self.store.remove(id)
+        self.store.remove(&meta.id)
     }
 
     /// Startup recovery: bring every app back to its desired state
@@ -289,10 +308,15 @@ mod tests {
     }
 
     fn install(mgr: &AppManager, id: &str, uid: u32) {
+        install_named(mgr, id, uid, None);
+    }
+
+    fn install_named(mgr: &AppManager, id: &str, uid: u32, custom_name: Option<&str>) {
         mgr.store()
             .save(&AppMeta {
                 id: id.into(),
                 name: id.into(),
+                custom_name: custom_name.map(Into::into),
                 owner: Owner {
                     uid,
                     name: format!("user{uid}"),
@@ -369,6 +393,7 @@ mod tests {
             .save(&AppMeta {
                 id: "sleeper".into(),
                 name: "sleeper".into(),
+                custom_name: None,
                 owner: Owner {
                     uid: 1000,
                     name: "user1000".into(),
@@ -406,5 +431,50 @@ mod tests {
         assert!(mgr.get_authorized(&user(1001), "alice-app").is_err());
         assert!(mgr.get_authorized(&user(1000), "alice-app").is_ok());
         assert!(mgr.get_authorized(&root(), "alice-app").is_ok());
+    }
+
+    #[test]
+    fn custom_name_resolves_like_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install_named(&mgr, "cs2-server", 1000, Some("My CS2 Server"));
+
+        // Both the id and the custom name reach the same app.
+        assert_eq!(
+            mgr.get_authorized(&user(1000), "cs2-server").unwrap().id,
+            "cs2-server"
+        );
+        assert_eq!(
+            mgr.get_authorized(&user(1000), "My CS2 Server")
+                .unwrap()
+                .id,
+            "cs2-server"
+        );
+        // Foreign users cannot resolve the name either.
+        assert!(mgr.get_authorized(&user(1001), "My CS2 Server").is_err());
+        assert!(mgr.get_authorized(&root(), "My CS2 Server").is_ok());
+    }
+
+    #[test]
+    fn id_wins_over_a_colliding_custom_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install(&mgr, "nginx", 1000);
+        // A second app whose custom name shadows the first app's id.
+        install_named(&mgr, "other", 1000, Some("nginx"));
+
+        assert_eq!(mgr.get_authorized(&user(1000), "nginx").unwrap().id, "nginx");
+        assert_eq!(mgr.get_authorized(&user(1000), "other").unwrap().id, "other");
+    }
+
+    #[test]
+    fn ambiguous_custom_name_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install_named(&mgr, "app-a", 1000, Some("Server"));
+        install_named(&mgr, "app-b", 1000, Some("Server"));
+
+        assert!(mgr.get_authorized(&user(1000), "Server").is_err());
+        assert!(mgr.get_authorized(&user(1000), "app-a").is_ok());
     }
 }

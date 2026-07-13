@@ -39,7 +39,7 @@ fn to_status(err: anyhow::Error) -> Status {
 fn to_pb(status: &AppStatus) -> pb::App {
     pb::App {
         id: status.meta.id.clone(),
-        name: status.meta.name.clone(),
+        name: status.meta.display_name().to_string(),
         kind: status.meta.runtime.kind().to_string(),
         state: match status.state {
             RuntimeState::Running => pb::AppState::Running as i32,

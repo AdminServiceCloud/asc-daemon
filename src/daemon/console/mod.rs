@@ -54,6 +54,7 @@ mod tests {
         AppMeta {
             id: "demo".into(),
             name: "demo".into(),
+            custom_name: None,
             owner: Owner {
                 uid: 0,
                 name: "root".into(),

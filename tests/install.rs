@@ -95,7 +95,7 @@ fn install_from_file_registry() {
         restricted.daemon.data_dir = config.daemon.data_dir.clone();
         restricted.daemon.apps_dir = config.daemon.apps_dir.clone();
         restricted.policy.user_install = asc_daemon::daemon::config::UserInstall::Docker;
-        let err = pkg::install(&restricted, &ctx, "demo@1.0.0", None).unwrap_err();
+        let err = pkg::install(&restricted, &ctx, "demo@1.0.0", None, None).unwrap_err();
         assert!(err.to_string().contains("Docker"), "got: {err:#}");
         let store = AppStore::new(restricted.daemon.apps_dir.clone());
         assert!(!store.app_dir("demo").unwrap().exists());
@@ -106,12 +106,12 @@ fn install_from_file_registry() {
             name: "root".into(),
             is_root: true,
         };
-        pkg::install(&restricted, &root_ctx, "demo@1.0.0", None).unwrap();
+        pkg::install(&restricted, &root_ctx, "demo@1.0.0", None, None).unwrap();
         store.remove("demo").unwrap();
     }
 
     // Requested tag is `1.0.0`, the repo has `v1.0.0` — the fallback must hit.
-    let pkg::InstallOutcome::App(report) = pkg::install(&config, &ctx, "demo@1.0.0", None).unwrap()
+    let pkg::InstallOutcome::App(report) = pkg::install(&config, &ctx, "demo@1.0.0", None, None).unwrap()
     else {
         panic!("expected a single-app install");
     };
@@ -129,11 +129,11 @@ fn install_from_file_registry() {
     assert!(app_dir.join("data").is_dir());
 
     // Installing on top of an existing app must fail cleanly.
-    let err = pkg::install(&config, &ctx, "demo", None).unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo", None, None).unwrap_err();
     assert!(err.to_string().contains("demo"));
 
     // Unknown packages fail with the "not found" error, not a panic/partial state.
-    assert!(pkg::install(&config, &ctx, "ghost", None).is_err());
+    assert!(pkg::install(&config, &ctx, "ghost", None, None).is_err());
     assert!(!store.app_dir("ghost").unwrap().exists());
 
     // ── Upgrade: a new tag in the package repository ─────────────────────

@@ -36,7 +36,7 @@ healthcheck: { http: /health }
 
 **Volumes** (docker apps) come in two forms:
 
-- `/container/path` — private app data: mapped to a host directory under `/asc/apps/<id>/data/`;
+- `/container/path` — private app data: mapped to a host directory under `/asc/apps/<id>/data/`. The directory is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. Per-app uid mapping will tighten this later;
 - `name:/container/path[:ro|:rw]` — a Docker **named volume**, created by the Engine on first use. Named volumes are how several apps share data: one app writes the volume, others mount it `:ro` (see the cs2 stack in [asc-example-apps](../../../asc-example-apps) — a master installation shared by every server instance). Named volumes are not removed with the app.
 
 > 📐 JSON schemas of the manifests: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) and [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) in the `registry` repository.

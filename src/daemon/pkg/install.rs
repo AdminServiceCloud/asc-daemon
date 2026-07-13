@@ -605,6 +605,15 @@ fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
         let host = app_dir.join("data").join(volume_dir_name(volume));
         fs::create_dir_all(&host)
             .with_context(|| format!("cannot create volume directory {}", host.display()))?;
+        // Images run under arbitrary non-root uids (`steam`, `www-data`, …)
+        // and bind mounts keep host ownership — a root-owned 0755 directory
+        // is read-only for them. World-writable applies to this leaf
+        // directory only; the app directory above stays restrictive.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
+                .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
+        }
         return Ok(format!("{}:{}", host.display(), volume));
     }
     let invalid = || {
@@ -699,6 +708,11 @@ mod tests {
         let host = dir.path().join("data").join("data");
         assert_eq!(bind, format!("{}:/data", host.display()));
         assert!(host.is_dir(), "the host directory must be created");
+        // Container images run under arbitrary uids: the data directory
+        // must be writable for them despite bind-mount host ownership.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&host).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o777, "volume dir must be world-writable");
     }
 
     #[test]

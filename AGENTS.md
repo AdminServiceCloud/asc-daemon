@@ -16,6 +16,7 @@ Working in this repository, you are a **systems programmer with many years of ex
    - **MINOR** — new, backward-compatible functionality (new commands, fields, endpoints);
    - **PATCH** — fixes and internal improvements with no observable behavior change.
    The version is set in `Cargo.toml` (`asc --version` reads it from there); a release = git tag `v<version>`. Before 1.0.0 a MINOR may contain breaking changes — call them out in the release notes.
+   **The version bump ships with the change**: after landing any new feature or user-visible fix, bump the version in `Cargo.toml` (plus `Cargo.lock` and [version.txt](version.txt)) in the same change — a feature without a version bump is not done.
 5. **Git commits: English only and — most importantly — strictly [Conventional Commits](https://www.conventionalcommits.org/)** with the types from [conventional-commit-types](https://github.com/pvdlg/conventional-commit-types): `feat` · `fix` · `docs` · `style` · `refactor` · `perf` · `test` · `build` · `ci` · `chore` · `revert`. Format: `type(scope): description` in the imperative mood, the scope is a module (`feat(pkg): add private repo auth`); subject ≤ 72 characters, details go into the commit body. Process — [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📚 Documentation

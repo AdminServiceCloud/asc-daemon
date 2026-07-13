@@ -1,7 +1,7 @@
-# 🦀 asc-daemon — AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
+# рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -43,7 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic-prost = "0.14.6"
 
 [build-dependencies]
-# protox компилирует .proto без внешнего protoc — сборка герметична
+# protox РєРѕРјРїРёР»РёСЂСѓРµС‚ .proto Р±РµР· РІРЅРµС€РЅРµРіРѕ protoc вЂ” СЃР±РѕСЂРєР° РіРµСЂРјРµС‚РёС‡РЅР°
 protox = "0.9"
 tonic-build = "0.14"
 tonic-prost-build = "0.14.6"

@@ -232,6 +232,9 @@ pub struct CreateSpec<'a> {
     pub nano_cpus: Option<i64>,
     /// Memory limit in bytes (Engine `Memory`); `None` = unlimited.
     pub memory_bytes: Option<i64>,
+    /// Start command override (`start_command` from asc.settings.yaml):
+    /// replaces the image entrypoint, runs through `/bin/sh -c`.
+    pub command: Option<String>,
 }
 
 /// Split an image reference into the `fromImage` and `tag` query parameters
@@ -300,6 +303,14 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
 
         let config = ContainerCreateBody {
             image: Some(spec.image.to_string()),
+            // A start_command replaces whatever the image would run: the
+            // entrypoint becomes the shell so the command can use arguments
+            // and env references.
+            entrypoint: spec
+                .command
+                .as_ref()
+                .map(|_| vec!["/bin/sh".to_string(), "-c".to_string()]),
+            cmd: spec.command.as_ref().map(|c| vec![c.clone()]),
             env: (!spec.env.is_empty()).then(|| spec.env.clone()),
             exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
             host_config: Some(host_config),

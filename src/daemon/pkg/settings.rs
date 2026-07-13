@@ -27,8 +27,9 @@ pub struct SettingsFile {
     /// User-adjustable settings (DMN-017).
     #[serde(default)]
     pub settings: Vec<SettingDef>,
-    /// Start command override with `${VAR}` interpolation — accepted here so
-    /// packages can already ship it; applied with DMN-018.
+    /// Start command override with `${VAR}` interpolation from the package
+    /// env defaults (DMN-018). Docker: replaces the container command (runs
+    /// through `/bin/sh -c`); native: replaces `runtime.start`.
     #[serde(default)]
     pub start_command: Option<String>,
 }

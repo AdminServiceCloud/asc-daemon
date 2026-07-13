@@ -276,6 +276,7 @@ fn install_one(
         &manifest_dir,
         &config.docker,
         quota.as_ref(),
+        settings.as_ref().and_then(|s| s.start_command.as_deref()),
     )?;
 
     let effective_version = cloned_tag.unwrap_or_else(|| manifest.version.clone());
@@ -463,6 +464,8 @@ pub(super) fn load_quota(settings: Option<&SettingsFile>) -> Result<Option<Quota
 /// Prepare the runtime described by the manifest and return its meta form.
 /// The quota is enforced for Docker at container creation; native/process
 /// runtimes record it in meta.json (cgroup enforcement is a next increment).
+/// A `start_command` (asc.settings.yaml, DMN-018) overrides what the runtime
+/// runs: the container command for Docker, `runtime.start` for native.
 pub(super) fn provision(
     manifest: &Manifest,
     id: &str,
@@ -470,7 +473,11 @@ pub(super) fn provision(
     manifest_dir: &Path,
     docker_cfg: &DockerConfig,
     quota: Option<&Quota>,
+    start_command: Option<&str>,
 ) -> Result<Runtime> {
+    let start_command = start_command
+        .map(|c| interpolate_env(c, &manifest.env))
+        .transpose()?;
     match manifest.app_type {
         AppType::Docker => {
             let image = manifest
@@ -479,15 +486,56 @@ pub(super) fn provision(
                 .as_deref()
                 .expect("validated: docker manifests have an image");
             let container = format!("asc-{id}");
-            docker_create(manifest, image, &container, app_dir, docker_cfg, quota)?;
+            docker_create(
+                manifest,
+                image,
+                &container,
+                app_dir,
+                docker_cfg,
+                quota,
+                start_command,
+            )?;
             Ok(Runtime::Docker { container })
         }
         AppType::Native | AppType::Utility => {
             run_install_commands(&manifest.runtime.install, manifest_dir)?;
-            let start = manifest.runtime.start.clone().unwrap_or_default();
+            let start = start_command
+                .or_else(|| manifest.runtime.start.clone())
+                .unwrap_or_default();
             Ok(process_runtime(&start))
         }
     }
+}
+
+/// Substitute `${VAR}` references in a start_command with the app's env
+/// defaults (asc.yaml `env:`, including stack-shared entries). A reference
+/// to an unknown variable — or one without a default — fails the install:
+/// a typo must not reach the runtime as a broken command.
+fn interpolate_env(command: &str, env: &[super::manifest::EnvVar]) -> Result<String> {
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            bail!("start_command has an unterminated ${{...}} reference");
+        };
+        let name = &after[..end];
+        let value = env
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| e.default.as_ref())
+            .map(yaml_scalar)
+            .with_context(|| {
+                format!(
+                    "start_command references ${{{name}}}, which has no default in the package env"
+                )
+            })?;
+        out.push_str(&value);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// Start command → process runtime. Runs through `sh -c` so packages can use
@@ -508,6 +556,7 @@ fn docker_create(
     app_dir: &Path,
     docker_cfg: &DockerConfig,
     quota: Option<&Quota>,
+    command: Option<String>,
 ) -> Result<()> {
     let env: Vec<String> = manifest
         .env
@@ -537,6 +586,7 @@ fn docker_create(
                 .and_then(|q| q.cpu_cores)
                 .map(|cores| (cores * 1_000_000_000.0) as i64),
             memory_bytes: quota.and_then(|q| q.ram_bytes).map(|bytes| bytes as i64),
+            command,
         },
     )
     .context("cannot create docker container")
@@ -664,6 +714,55 @@ mod tests {
         );
         for bad in ["vol", "vol:data", ":/data", "-vol:/data", "a b:/data"] {
             assert!(volume_bind(bad, app).is_err(), "must reject '{bad}'");
+        }
+    }
+
+    #[test]
+    fn start_command_interpolates_env_defaults() {
+        let env: Vec<super::super::manifest::EnvVar> = serde_yaml::from_str(
+            "- { name: STEAM_APP_ID, default: 730 }\n- { name: DIR, default: /data }\n- { name: TOKEN, secret: true }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            interpolate_env(
+                "steamcmd +force_install_dir ${DIR} +app_update ${STEAM_APP_ID} +quit",
+                &env
+            )
+            .unwrap(),
+            "steamcmd +force_install_dir /data +app_update 730 +quit"
+        );
+        assert_eq!(interpolate_env("no refs", &env).unwrap(), "no refs");
+        // Unknown vars and vars without defaults must fail, not launch broken.
+        assert!(interpolate_env("run ${MISSING}", &env).is_err());
+        assert!(interpolate_env("run ${TOKEN}", &env).is_err());
+        assert!(interpolate_env("run ${UNTERMINATED", &env).is_err());
+    }
+
+    #[test]
+    fn start_command_overrides_native_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: Manifest = serde_yaml::from_str(
+            "name: tool\nversion: '1'\ntype: native\nruntime:\n  start: ./run.sh\nenv:\n  - { name: PORT, default: 8080 }\n",
+        )
+        .unwrap();
+        let docker_cfg = DockerConfig {
+            socket: dir.path().join("docker.sock"),
+        };
+        let runtime = provision(
+            &manifest,
+            "tool",
+            dir.path(),
+            dir.path(),
+            &docker_cfg,
+            None,
+            Some("serve --port ${PORT}"),
+        )
+        .unwrap();
+        match runtime {
+            Runtime::Process { args, .. } => {
+                assert_eq!(args, ["-c", "serve --port 8080"]);
+            }
+            other => panic!("expected a process runtime, got {other:?}"),
         }
     }
 

@@ -130,6 +130,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         &locate_manifest(&repo_dir, entry_path, stack_app)?.0,
         &config.docker,
         quota.as_ref(),
+        settings.as_ref().and_then(|s| s.start_command.as_deref()),
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -202,8 +203,17 @@ fn rollback(
         if let Some(stack) = &stack {
             manifest.merge_stack_env(&stack.env);
         }
-        let quota = load_quota(SettingsFile::load_for(&dir, &manifest)?.as_ref())?;
-        provision(&manifest, id, app_dir, &dir, &config.docker, quota.as_ref())
+        let settings = SettingsFile::load_for(&dir, &manifest)?;
+        let quota = load_quota(settings.as_ref())?;
+        provision(
+            &manifest,
+            id,
+            app_dir,
+            &dir,
+            &config.docker,
+            quota.as_ref(),
+            settings.as_ref().and_then(|s| s.start_command.as_deref()),
+        )
     });
     if let Err(err) = restore {
         warn!(app = id, error = %format!("{err:#}"), "rollback: cannot re-provision the previous version");

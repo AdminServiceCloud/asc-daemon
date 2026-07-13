@@ -93,16 +93,16 @@ quota:
 
 ### 🚀 The start command (start_command)
 
-The application's start command is configured in `asc.settings.yaml` (it overrides `runtime.start` from `asc.yaml`). The string can **interpolate the application's environment variables** — `${VAR}` syntax:
+The application's start command is configured in `asc.settings.yaml`. The string can **interpolate the package's environment variables** — `${VAR}` syntax:
 
 ```yaml
-start_command: "java -Xmx${MEM_LIMIT}M -jar server.jar --port ${PORT} --level ${LOG_LEVEL}"
+start_command: "steamcmd +force_install_dir /data +login anonymous +app_update ${STEAM_APP_ID} validate +quit"
 ```
 
-- The substitution is performed by the daemon at launch from the application's final environment (settings + org/node/application env levels, see [🌱 environments](../../../asc-platform/docs/features/environments.md)).
-- An unresolved variable is a launch error naming the variable.
-- The platform UI shows a computed preview of the command (secrets are masked).
-- Changing the command works like changing settings: applied after an application restart.
+- The substitution is performed by the daemon at install/upgrade time from the package env defaults (`env:` in `asc.yaml`, including the stack's shared entries). An unresolved variable — or one without a default — fails the install naming the variable.
+- **Docker apps**: the command replaces what the image would run (the entrypoint becomes `/bin/sh -c`, so arguments and quoting work as in a shell).
+- **native apps**: the command overrides `runtime.start` from `asc.yaml`.
+- Interpolation from the application's *final* environment (settings values, org/node/application env levels — [🌱 environments](../../../asc-platform/docs/features/environments.md)) and a UI preview of the computed command arrive with the settings→env pass-through (DMN-017).
 
 ### 🐳 install/update scripts: native or docker
 

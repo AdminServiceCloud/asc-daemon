@@ -34,6 +34,11 @@ requirements: { ram: 256M, disk: 1G }
 healthcheck: { http: /health }
 ```
 
+**Тома** (docker-приложения) бывают двух видов:
+
+- `/путь/в/контейнере` — приватные данные приложения: маппятся в каталог хоста под `/asc/apps/<id>/data/`;
+- `имя:/путь/в/контейнере[:ro|:rw]` — **именованный том** Docker, Engine создаёт его при первом использовании. Именованные тома — способ разделить данные между приложениями: одно приложение пишет в том, остальные монтируют его `:ro` (см. стек cs2 в [asc-example-apps](../../../asc-example-apps) — общая master-установка для всех инстансов сервера). Именованные тома не удаляются вместе с приложением.
+
 > 📐 JSON-схемы манифестов: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) и [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) в репозитории `registry`.
 
 ### Настройки приложения: asc.settings.yaml

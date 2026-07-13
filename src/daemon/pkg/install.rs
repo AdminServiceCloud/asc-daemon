@@ -521,10 +521,7 @@ fn docker_create(
 
     let mut binds = Vec::new();
     for volume in &manifest.volumes {
-        let host = app_dir.join("data").join(volume_dir_name(volume));
-        fs::create_dir_all(&host)
-            .with_context(|| format!("cannot create volume directory {}", host.display()))?;
-        binds.push(format!("{}:{}", host.display(), volume));
+        binds.push(volume_bind(volume, app_dir)?);
     }
 
     docker::create(
@@ -543,6 +540,45 @@ fn docker_create(
         },
     )
     .context("cannot create docker container")
+}
+
+/// Bind string for one manifest `volumes` entry. Two forms are supported:
+///
+/// - `/container/path` — private app data: mapped to a host directory under
+///   `<app_dir>/data/` (created here);
+/// - `name:/container/path[:ro|:rw]` — a Docker **named volume**, passed to
+///   the Engine verbatim (it creates the volume on first use). Named volumes
+///   are how several apps share data — e.g. one game-files volume written by
+///   a master app and mounted read-only by every server instance.
+fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
+    if volume.starts_with('/') {
+        let host = app_dir.join("data").join(volume_dir_name(volume));
+        fs::create_dir_all(&host)
+            .with_context(|| format!("cannot create volume directory {}", host.display()))?;
+        return Ok(format!("{}:{}", host.display(), volume));
+    }
+    let invalid = || {
+        anyhow::anyhow!(
+            "invalid volume '{volume}': expected /container/path or name:/container/path[:ro]"
+        )
+    };
+    let (name, target) = volume.split_once(':').ok_or_else(invalid)?;
+    // Docker volume names: [a-zA-Z0-9][a-zA-Z0-9_.-]*
+    let name_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    let path = match target.rsplit_once(':') {
+        Some((path, mode)) if mode == "ro" || mode == "rw" => path,
+        _ => target,
+    };
+    if !name_ok || !path.starts_with('/') {
+        return Err(invalid());
+    }
+    Ok(volume.to_string())
 }
 
 /// Host directory name for a container volume path: `/var/lib/data` → `var_lib_data`.
@@ -604,6 +640,31 @@ mod tests {
         assert_eq!(volume_dir_name("/data"), "data");
         assert_eq!(volume_dir_name("/var/lib/data"), "var_lib_data");
         assert_eq!(volume_dir_name("/"), "volume");
+    }
+
+    #[test]
+    fn container_path_volumes_bind_under_app_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let bind = volume_bind("/data", dir.path()).unwrap();
+        let host = dir.path().join("data").join("data");
+        assert_eq!(bind, format!("{}:/data", host.display()));
+        assert!(host.is_dir(), "the host directory must be created");
+    }
+
+    #[test]
+    fn named_volumes_pass_through_verbatim() {
+        let app = Path::new("/nonexistent");
+        assert_eq!(
+            volume_bind("cs2-master-data:/data", app).unwrap(),
+            "cs2-master-data:/data"
+        );
+        assert_eq!(
+            volume_bind("cs2-master-data:/home/steam/cs2-dedicated:ro", app).unwrap(),
+            "cs2-master-data:/home/steam/cs2-dedicated:ro"
+        );
+        for bad in ["vol", "vol:data", ":/data", "-vol:/data", "a b:/data"] {
+            assert!(volume_bind(bad, app).is_err(), "must reject '{bad}'");
+        }
     }
 
     #[test]

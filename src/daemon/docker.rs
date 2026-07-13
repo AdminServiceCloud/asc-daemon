@@ -17,10 +17,11 @@ use bollard::models::{
     ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    AttachContainerOptions, CreateContainerOptions, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, StatsOptions, StopContainerOptions,
+    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, LogsOptions,
+    RemoveContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
+use tracing::info;
 
 use crate::daemon::config::DockerConfig;
 use crate::daemon::i18n::{Msg, t, tf};
@@ -40,10 +41,15 @@ pub fn connect(cfg: &DockerConfig) -> Result<Docker> {
         .map_err(|err| friendly(cfg, err))
 }
 
-/// Map a Docker error to a user-facing one. A host without the docker binary
-/// has Docker missing, not stopped — say that and how to install it instead
-/// of asking whether the daemon is running.
+/// Map a Docker error to a user-facing one. An Engine response (any HTTP
+/// status) proves Docker is reachable — pass its own message through instead
+/// of blaming the socket. A host without the docker binary has Docker
+/// missing, not stopped — say that and how to install it instead of asking
+/// whether the daemon is running.
 fn friendly(cfg: &DockerConfig, err: BollardError) -> anyhow::Error {
+    if status_of(&err).is_some() {
+        return anyhow!("{err}");
+    }
     if !docker_binary_present() {
         return anyhow!("{}: {err}", t(Msg::ErrDockerNotFound));
     }
@@ -228,7 +234,40 @@ pub struct CreateSpec<'a> {
     pub memory_bytes: Option<i64>,
 }
 
+/// Split an image reference into the `fromImage` and `tag` query parameters
+/// of the Engine pull endpoint. A bare name gets an explicit `latest` — an
+/// empty tag makes the Engine pull every tag of the repository. Digest
+/// references go through whole: the Engine pulls by digest, no tag needed.
+fn image_ref(image: &str) -> (&str, Option<&str>) {
+    if image.contains('@') {
+        return (image, None);
+    }
+    // A colon is the tag separator only after the last slash; earlier it is
+    // a registry port (localhost:5000/app).
+    let name_start = image.rfind('/').map_or(0, |i| i + 1);
+    match image[name_start..].rfind(':') {
+        Some(i) => (&image[..name_start + i], Some(&image[name_start + i + 1..])),
+        None => (image, Some("latest")),
+    }
+}
+
+/// Pull an image from its registry, waiting until the Engine finishes.
+async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardError> {
+    let (from_image, tag) = image_ref(image);
+    let opts = CreateImageOptions {
+        from_image: Some(from_image.to_string()),
+        tag: tag.map(str::to_string),
+        ..Default::default()
+    };
+    let mut progress = docker.create_image(Some(opts), None, None);
+    while let Some(step) = progress.next().await {
+        step?;
+    }
+    Ok(())
+}
+
 /// Create (but do not start) a container from a spec. Used by the installer.
+/// An image missing on the host is pulled from its registry automatically.
 pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
@@ -267,16 +306,28 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             ..Default::default()
         };
 
-        docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: Some(spec.name.to_string()),
-                    ..Default::default()
-                }),
-                config,
-            )
+        let options = CreateContainerOptions {
+            name: Some(spec.name.to_string()),
+            ..Default::default()
+        };
+        match docker
+            .create_container(Some(options.clone()), config.clone())
             .await
-            .map_err(|e| friendly(cfg, e))?;
+        {
+            Ok(_) => {}
+            // 404 = the image is not on the host: pull it and retry once.
+            Err(e) if status_of(&e) == Some(404) => {
+                info!(image = spec.image, "image not found locally, pulling");
+                pull(&docker, spec.image)
+                    .await
+                    .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, spec.image)))?;
+                docker
+                    .create_container(Some(options), config)
+                    .await
+                    .map_err(|e| friendly(cfg, e))?;
+            }
+            Err(e) => return Err(friendly(cfg, e)),
+        }
         Ok(())
     })
 }
@@ -328,4 +379,28 @@ pub async fn attach(cfg: &DockerConfig, container: &str) -> Result<AttachContain
         .attach_container(container, Some(opts))
         .await
         .map_err(|e| friendly(cfg, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_ref;
+
+    #[test]
+    fn image_refs_split_into_name_and_tag() {
+        assert_eq!(image_ref("nginx"), ("nginx", Some("latest")));
+        assert_eq!(image_ref("nginx:1.27"), ("nginx", Some("1.27")));
+        assert_eq!(
+            image_ref("steamcmd/steamcmd:latest"),
+            ("steamcmd/steamcmd", Some("latest"))
+        );
+        assert_eq!(
+            image_ref("localhost:5000/app"),
+            ("localhost:5000/app", Some("latest"))
+        );
+        assert_eq!(
+            image_ref("localhost:5000/app:v2"),
+            ("localhost:5000/app", Some("v2"))
+        );
+        assert_eq!(image_ref("redis@sha256:abc"), ("redis@sha256:abc", None));
+    }
 }

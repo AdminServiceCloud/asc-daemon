@@ -48,7 +48,8 @@ fn spawn_mock(socket: PathBuf) -> Hits {
                     let path = parts.next().unwrap_or("");
                     hits.lock().unwrap().push(format!("{method} {path}"));
 
-                    let (code, body) = route(method, path);
+                    let seen = hits.lock().unwrap().clone();
+                    let (code, body) = route(method, path, &seen);
                     let response = format!(
                         "HTTP/1.1 {code}\r\nContent-Type: application/json\r\n\
                          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -65,10 +66,31 @@ fn spawn_mock(socket: PathBuf) -> Hits {
 
 /// Minimal Docker Engine routing, matched loosely by path suffix so any API
 /// version prefix works. Query string is ignored (e.g. `/stop?t=10`).
-fn route(method: &str, raw_path: &str) -> (&'static str, String) {
+/// `seen` holds the previously recorded requests: creating a container 404s
+/// until the image has been pulled, exercising the auto-pull retry.
+fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String) {
     let path = raw_path.split('?').next().unwrap_or(raw_path);
+    if path.contains("/images/create") {
+        return (
+            "200 OK",
+            r#"{"status":"Pulling from library/nginx"}"#.into(),
+        );
+    }
     if path.contains("/containers/create") {
+        if !seen.iter().any(|h| h.contains("/images/create")) {
+            return (
+                "404 Not Found",
+                r#"{"message":"No such image: nginx:1.27"}"#.into(),
+            );
+        }
         return ("201 Created", r#"{"Id":"deadbeef","Warnings":[]}"#.into());
+    }
+    // A named engine-side failure, for error classification tests.
+    if path.contains("/containers/boom/") {
+        return (
+            "500 Internal Server Error",
+            r#"{"message":"server exploded"}"#.into(),
+        );
     }
     if path.ends_with("/start") {
         return ("204 No Content", String::new());
@@ -156,6 +178,34 @@ fn create_sends_container_spec() {
     assert!(
         seen.iter().any(|h| h.contains("/containers/create")),
         "create must hit the Engine create endpoint, saw: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|h| h.contains("/images/create") && h.contains("fromImage=nginx")),
+        "a missing image must be pulled automatically, saw: {seen:?}"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|h| h.contains("/containers/create"))
+            .count(),
+        2,
+        "create must be retried after the pull, saw: {seen:?}"
+    );
+}
+
+#[test]
+fn engine_errors_are_not_reported_as_unreachable() {
+    let (cfg, _dir, _hits) = test_cfg();
+
+    let err = docker::start(&cfg, "boom").unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("server exploded"),
+        "the Engine's own message must survive, got: {msg}"
+    );
+    assert!(
+        !msg.contains("cannot reach Docker"),
+        "an Engine response is not a connectivity failure, got: {msg}"
     );
 }
 

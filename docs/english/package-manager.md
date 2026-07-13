@@ -125,6 +125,7 @@ Installing an application = **cloning its repository**:
 1. `asc install <package>` → the daemon clones the package repository into `/asc/apps/<id>/repository/`.
 2. **Application versions = git tags** (GitHub tags): installing a specific version — `asc install <package>@1.2.0` (tag checkout), updating — `asc app upgrade <name>` (checkout of the new tag).
 3. From then on the daemon works with the local copy: reads `asc.yaml`/`asc.settings.yaml`, builds/launches according to the application type.
+4. For Docker applications the container is created through the Engine API; an image missing on the host is **pulled automatically** from its registry (`runtime.image`; a name without a tag means `latest`) — both at install and at upgrade.
 
 **Updating** (`asc app upgrade <name>[@version]`, synonym — `asc upgrade`): the application must be stopped; the new tag is cloned **next to** the current copy (`repository.new`), the manifest is validated, and only then are the directories swapped and the runtime recreated (for Docker the container is recreated with the new image). A failure before the swap does not touch the installed application; a failure while recreating the runtime rolls back to the previous version. Without an explicit version, `latest` from the registry is used.
 

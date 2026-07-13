@@ -126,6 +126,7 @@ pub enum Msg {
     ErrUnsupportedOs,
     ErrDockerNotFound,
     ErrDockerUnreachable,
+    ErrImagePull,
     ErrCurlNotFound,
     UpdSettingsHeader,
     UpdSettingLanguage,
@@ -369,6 +370,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ErrDockerNotFound => (
             "Docker is not installed — container apps need it; install: curl -fsSL https://get.docker.com | sh",
             "Docker не установлен — он нужен контейнерным приложениям; установка: curl -fsSL https://get.docker.com | sh",
+        ),
+        Msg::ErrImagePull => (
+            "cannot pull image '{}' from its registry (check the image name and registry access)",
+            "не удаётся скачать образ '{}' из реестра (проверьте имя образа и доступ к реестру)",
         ),
         Msg::ErrDockerUnreachable => (
             "cannot reach Docker at {} (is Docker running? set the socket path in [docker] socket)",

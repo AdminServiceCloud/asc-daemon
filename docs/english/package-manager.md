@@ -71,6 +71,7 @@ settings:
     default: [27015]
     limits: { min: 1024, max: 65535 }
     env: CS2_PORT               # exposed comma-joined; one port — as is
+    protocol: both               # tcp (default) | udp | both
 
   - key: game_data
     type: volumes               # app volumes (a list, forms below)
@@ -79,7 +80,7 @@ settings:
 
 - Setting values are saved in `/asc/apps/<id>/config/settings.json` (0600 — the file may hold secrets); at install time it is seeded with the defaults, an upgrade adds defaults for new keys without touching the user's choices.
 - **Env pass-through**: every setting that declares `env: VAR_NAME` lands in the application's environment (secrets included — that is what their `env:` is for). For Docker apps the variables go into the container env at creation. List values (`ports`, `volumes`) are exposed comma-joined.
-- **`type: ports`** — the published container ports (host port == container port). Declaring the same setting with `env:` keeps the app and Docker in sync: the server listens exactly where the port is forwarded.
+- **`type: ports`** — the published container ports (host port == container port). Declaring the same setting with `env:` keeps the app and Docker in sync: the server listens exactly where the port is forwarded. **`protocol`** picks the transport(s) to forward: `tcp` (default), `udp`, or `both` (the same host==container port on TCP and UDP).
 - **`type: volumes`** — the app's volumes; every entry takes one of three forms:
   - `/container/path` — private app data: the app's **data folder** (`/asc/apps/<id>/data`) is mounted at that container path. The folder is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. Per-app uid mapping will tighten this later;
   - `/container/path:host` — same, but the host side after the colon is used **instead of `data`**: a plain folder name lands inside the app directory (`/asc/apps/<id>/<folder>`; `repository`, `config` and `meta.json` are reserved), an **absolute path** is a host machine path mounted verbatim (a pre-existing directory keeps its ownership and mode);

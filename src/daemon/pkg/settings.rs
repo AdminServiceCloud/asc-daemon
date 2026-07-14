@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::manifest::Manifest;
 use crate::daemon::apps::meta::Quota;
 use crate::daemon::config::Config;
+use crate::daemon::docker::PortProtocol;
 use crate::daemon::i18n::{Msg, t, tf};
 
 /// Root of `asc.settings.yaml`.
@@ -114,6 +115,9 @@ pub struct SettingDef {
     /// Environment variable to expose the value as.
     #[serde(default)]
     pub env: Option<String>,
+    /// Transport(s) to publish on (kind: ports only). Defaults to `tcp`.
+    #[serde(default)]
+    pub protocol: Option<PortProtocol>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +240,12 @@ impl SettingsFile {
             if def.kind == SettingKind::Enum && def.values.is_empty() {
                 bail!("setting '{}' is an enum but has no values", def.key);
             }
+            if def.protocol.is_some() && def.kind != SettingKind::Ports {
+                bail!(
+                    "setting '{}' has 'protocol' but is not of type ports",
+                    def.key
+                );
+            }
             // Ports/volumes hold lists: a scalar default is a manifest bug.
             if matches!(def.kind, SettingKind::Ports | SettingKind::Volumes)
                 && let Some(default) = &def.default
@@ -292,6 +302,11 @@ fn valid_key(key: &str) -> bool {
 }
 
 impl SettingDef {
+    /// Transport(s) a `type: ports` setting publishes on; `tcp` when unset.
+    pub fn port_protocol(&self) -> PortProtocol {
+        self.protocol.unwrap_or_default()
+    }
+
     /// Validate raw user input against this definition and return the typed
     /// value to store. Errors are user-facing (translated).
     pub fn parse_value(&self, raw: &str) -> Result<serde_json::Value> {
@@ -785,6 +800,24 @@ settings:
         let limited = def("{ key: p, type: ports, limits: { min: 1024, max: 2048 } }");
         assert!(limited.parse_value("80").is_err());
         assert!(limited.parse_value("1024 2048").is_ok());
+    }
+
+    #[test]
+    fn ports_protocol_defaults_to_tcp_and_is_ports_only() {
+        let tcp_only = def("{ key: p, type: ports }");
+        assert_eq!(tcp_only.port_protocol(), PortProtocol::Tcp);
+
+        let udp = def("{ key: p, type: ports, protocol: udp }");
+        assert_eq!(udp.port_protocol(), PortProtocol::Udp);
+
+        let both = def("{ key: p, type: ports, protocol: both }");
+        assert_eq!(both.port_protocol(), PortProtocol::Both);
+
+        // 'protocol' only makes sense on 'type: ports'.
+        let file: SettingsFile =
+            serde_yaml::from_str("settings:\n  - { key: p, type: number, protocol: udp }\n")
+                .unwrap();
+        assert!(file.validate().is_err());
     }
 
     #[test]

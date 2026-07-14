@@ -679,8 +679,9 @@ fn process_runtime(start: &str) -> Runtime {
 pub(super) struct RuntimeInputs {
     /// `(ENV_NAME, value)` for every setting with an `env:` key.
     pub env: Vec<(String, String)>,
-    /// Flattened values of every `type: ports` setting.
-    pub ports: Vec<u16>,
+    /// Flattened values of every `type: ports` setting, each with its
+    /// transport(s) (`protocol:`, default `tcp`).
+    pub ports: Vec<(u16, docker::PortProtocol)>,
     /// Flattened values of every `type: volumes` setting.
     pub volumes: Vec<String>,
     /// The user's `$start_command` override, else the package's.
@@ -718,7 +719,7 @@ pub(super) fn runtime_inputs(
                         .and_then(|p| u16::try_from(p).ok())
                         .filter(|p| *p != 0)
                         .with_context(|| format!("setting '{}': invalid port {item}", def.key))?;
-                    ports.push(port);
+                    ports.push((port, def.port_protocol()));
                 }
             }
             SettingKind::Volumes => {
@@ -1057,7 +1058,7 @@ mod tests {
                 ("CS2_PORT".to_string(), "27015".to_string())
             ]
         );
-        assert_eq!(inputs.ports, [27015]);
+        assert_eq!(inputs.ports, [(27015, docker::PortProtocol::Tcp)]);
         assert_eq!(inputs.volumes, ["/home/steam/cs2-dedicated"]);
         assert_eq!(inputs.start_command, None);
 
@@ -1081,7 +1082,13 @@ mod tests {
                 ("CS2_PORT".to_string(), "27016,27017".to_string())
             ]
         );
-        assert_eq!(inputs.ports, [27016, 27017]);
+        assert_eq!(
+            inputs.ports,
+            [
+                (27016, docker::PortProtocol::Tcp),
+                (27017, docker::PortProtocol::Tcp)
+            ]
+        );
         assert_eq!(inputs.start_command.as_deref(), Some("./cs2 -override"));
 
         // No settings file — nothing but the overrides.

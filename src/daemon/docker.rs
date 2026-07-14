@@ -21,6 +21,7 @@ use bollard::query_parameters::{
     RemoveContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::daemon::config::DockerConfig;
@@ -28,6 +29,28 @@ use crate::daemon::i18n::{Msg, t, tf};
 
 /// Seconds the Engine waits on stop before killing the container.
 const STOP_TIMEOUT_SECS: i64 = 10;
+
+/// Transport(s) a published port is forwarded on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortProtocol {
+    #[default]
+    Tcp,
+    Udp,
+    /// Both TCP and UDP, forwarded on the same host==container port.
+    Both,
+}
+
+impl PortProtocol {
+    /// Docker transport keywords (`"tcp"`, `"udp"`) this protocol publishes.
+    pub fn transports(self) -> &'static [&'static str] {
+        match self {
+            PortProtocol::Tcp => &["tcp"],
+            PortProtocol::Udp => &["udp"],
+            PortProtocol::Both => &["tcp", "udp"],
+        }
+    }
+}
 /// Client connect/request timeout, seconds.
 const CONNECT_TIMEOUT_SECS: u64 = 120;
 
@@ -273,8 +296,8 @@ pub struct CreateSpec<'a> {
     pub image: &'a str,
     /// Environment entries as `KEY=value`.
     pub env: Vec<String>,
-    /// Ports to publish (host==container).
-    pub ports: Vec<u16>,
+    /// Ports to publish (host==container), each with its transport(s).
+    pub ports: Vec<(u16, PortProtocol)>,
     /// Volume binds as `host_path:container_path`.
     pub binds: Vec<String>,
     /// CPU quota in units of 1e-9 cores (Engine `NanoCpus`); `None` = unlimited.
@@ -331,16 +354,18 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
 
         let mut exposed_ports: Vec<String> = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-        for port in &spec.ports {
-            let key = format!("{port}/tcp");
-            exposed_ports.push(key.clone());
-            port_bindings.insert(
-                key,
-                Some(vec![PortBinding {
-                    host_ip: None,
-                    host_port: Some(port.to_string()),
-                }]),
-            );
+        for (port, protocol) in &spec.ports {
+            for transport in protocol.transports() {
+                let key = format!("{port}/{transport}");
+                exposed_ports.push(key.clone());
+                port_bindings.insert(
+                    key,
+                    Some(vec![PortBinding {
+                        host_ip: None,
+                        host_port: Some(port.to_string()),
+                    }]),
+                );
+            }
         }
 
         let host_config = HostConfig {

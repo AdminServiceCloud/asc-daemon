@@ -35,12 +35,14 @@ Existing panels solve only part of the problem: Portainer manages Docker, Pterod
 ## ⚡ Installation
 
 ```bash
-# interactive: shows the default settings and asks — accept or change
 curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/install.sh | sudo bash
+```
+> interactive: shows the default settings and asks — accept or change
 
-# silent mode: one command, everything installed with defaults and no questions
+```bash
 curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/install.sh | sudo bash -s -- --silent
 ```
+> silent mode: one command, everything installed with defaults and no questions
 
 You can also configure it after a silent install: `asc-updater` + `/etc/asc/config.toml`.
 
@@ -54,27 +56,68 @@ You can also configure it after a silent install: `asc-updater` + `/etc/asc/conf
 ## ⌨️ Quick start
 
 ```bash
-asc service install        # ⚙️ install the daemon's API service as a systemd unit (autostart)
-asc service start|status   # 🚀 start the service / check its state
-asc status                 # 📊 server and application status
-asc install helloworld     # 📦 install an application from the registry
-asc app logs helloworld    # 📜 application logs
-asc app clone helloworld   # 🧬 clone an application instance (data, env, settings)
-asc app settings helloworld # 🎛️ interactive settings editor (types, limits and enums from asc.settings.yaml)
-asc config lang ru         # 🌍 change the CLI output language (en|ru)
-asc connect <token>        # ☁️ connect to the AdminService.Cloud platform
-asc mcp serve              # 🤖 run the MCP server for AI clients
+asc service install
 ```
+> ⚙️ install the daemon's API service as a systemd unit (autostart)
+
+```bash
+asc service start|status
+```
+> 🚀 start the service / check its state
+
+```bash
+asc status
+```
+> 📊 server and application status
+
+```bash
+asc install helloworld
+```
+> 📦 install an application from the registry
+
+```bash
+asc app logs helloworld
+```
+> 📜 application logs
+
+```bash
+asc app clone helloworld
+```
+> 🧬 clone an application instance (data, env, settings)
+
+```bash
+asc app settings helloworld
+```
+> 🎛️ interactive settings editor (types, limits and enums from asc.settings.yaml)
+
+```bash
+asc config lang ru
+```
+> 🌍 change the CLI output language (en|ru)
+
+```bash
+asc connect <token>
+```
+> ☁️ connect to the AdminService.Cloud platform
+
+```bash
+asc mcp serve
+```
+> 🤖 run the MCP server for AI clients
 
 ## 🧠 Skills for Claude Code and other models
 
 The [skills/](skills/README.md) directory contains ready-made Agent Skills that teach AI agents to manage the server through `asc`:
 
 ```bash
-# Claude Code: install the skills for yourself (all projects) or in a project
-cp -r skills/* ~/.claude/skills/       # globally
-cp -r skills/* .claude/skills/         # current project only
+cp -r skills/* ~/.claude/skills/
 ```
+> Claude Code: install the skills globally (for all projects)
+
+```bash
+cp -r skills/* .claude/skills/
+```
+> Claude Code: install the skills for the current project only
 
 | Skill | What it does |
 |---|---|

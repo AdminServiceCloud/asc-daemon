@@ -35,12 +35,14 @@
 ## ⚡ Установка
 
 ```bash
-# интерактивно: покажет настройки по умолчанию и спросит — принять или изменить
 curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/install.sh | sudo bash
+```
+> интерактивно: покажет настройки по умолчанию и спросит — принять или изменить
 
-# silent-режим: одна команда, всё ставится с настройками по умолчанию без вопросов
+```bash
 curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/install.sh | sudo bash -s -- --silent
 ```
+> silent-режим: одна команда, всё ставится с настройками по умолчанию без вопросов
 
 Настроить можно и после silent-установки: `asc-updater` + `/etc/asc/config.toml`.
 
@@ -54,27 +56,68 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 ## ⌨️ Быстрый старт
 
 ```bash
-asc service install        # ⚙️ установить API-сервис демона как systemd-юнит (автозапуск)
-asc service start|status   # 🚀 запустить сервис / проверить состояние
-asc status                 # 📊 состояние сервера и приложений
-asc install helloworld     # 📦 установка приложения из реестра
-asc app logs helloworld    # 📜 логи приложения
-asc app clone helloworld   # 🧬 клонировать инстанс приложения (данные, env, настройки)
-asc app settings helloworld # 🎛️ интерактивный редактор настроек (типы, лимиты и enum из asc.settings.yaml)
-asc config lang ru         # 🌍 сменить язык вывода команд (en|ru)
-asc connect <token>        # ☁️ подключение к платформе AdminService.Cloud
-asc mcp serve              # 🤖 запуск MCP-сервера для AI-клиентов
+asc service install
 ```
+> ⚙️ установить API-сервис демона как systemd-юнит (автозапуск)
+
+```bash
+asc service start|status
+```
+> 🚀 запустить сервис / проверить состояние
+
+```bash
+asc status
+```
+> 📊 состояние сервера и приложений
+
+```bash
+asc install helloworld
+```
+> 📦 установка приложения из реестра
+
+```bash
+asc app logs helloworld
+```
+> 📜 логи приложения
+
+```bash
+asc app clone helloworld
+```
+> 🧬 клонировать инстанс приложения (данные, env, настройки)
+
+```bash
+asc app settings helloworld
+```
+> 🎛️ интерактивный редактор настроек (типы, лимиты и enum из asc.settings.yaml)
+
+```bash
+asc config lang ru
+```
+> 🌍 сменить язык вывода команд (en|ru)
+
+```bash
+asc connect <token>
+```
+> ☁️ подключение к платформе AdminService.Cloud
+
+```bash
+asc mcp serve
+```
+> 🤖 запуск MCP-сервера для AI-клиентов
 
 ## 🧠 Skills для Claude Code и других нейронок
 
 В каталоге [skills/](../../skills/README.md) — готовые навыки (Agent Skills), которые учат AI-агентов управлять сервером через `asc`:
 
 ```bash
-# Claude Code: подключить скиллы себе (все проекты) или в проект
-cp -r skills/* ~/.claude/skills/       # глобально
-cp -r skills/* .claude/skills/         # только текущий проект
+cp -r skills/* ~/.claude/skills/
 ```
+> Claude Code: подключить скиллы себе глобально (все проекты)
+
+```bash
+cp -r skills/* .claude/skills/
+```
+> Claude Code: подключить скиллы только в текущий проект
 
 | Скилл | Что умеет |
 |---|---|

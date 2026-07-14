@@ -99,7 +99,16 @@ impl Desired {
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
             .collect();
-        let mut ports: Vec<String> = inputs.ports.iter().map(|p| format!("{p}/tcp")).collect();
+        let mut ports: Vec<String> = inputs
+            .ports
+            .iter()
+            .flat_map(|(port, protocol)| {
+                protocol
+                    .transports()
+                    .iter()
+                    .map(move |transport| format!("{port}/{transport}"))
+            })
+            .collect();
         ports.sort();
         ports.dedup();
         let mut binds = inputs

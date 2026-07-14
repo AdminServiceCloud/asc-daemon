@@ -433,19 +433,43 @@ impl SettingValues {
             None => "-".into(),
         }
     }
+
+    /// `(ENV_NAME, value)` pairs for the settings that declare `env:` and
+    /// have a value (chosen by the user or seeded from the defaults).
+    /// Secrets are included — exposing them to the app is what their `env:`
+    /// is for; required settings without a value are simply absent.
+    pub fn env_pairs(&self, defs: &[SettingDef]) -> Vec<(String, String)> {
+        defs.iter()
+            .filter_map(|def| {
+                let name = def.env.clone()?;
+                let value = self.get(&def.key)?;
+                Some((name, json_scalar(value)))
+            })
+            .collect()
+    }
 }
 
 /// Manifest directory of an installed app: the repository root, or — for
 /// monorepo and stack packages — located through the registry entry and the
 /// origin recorded in meta.json (`package: "stack/app"`), preferring the
 /// source the app was installed from.
-pub fn manifest_dir_of(config: &Config, id: &str, app_dir: &Path) -> Result<PathBuf> {
+pub fn manifest_dir_of(config: &Config, app_dir: &Path) -> Result<PathBuf> {
+    let meta = crate::daemon::apps::meta::AppMeta::load(app_dir)?;
+    locate_installed(config, &meta, app_dir).map(|(dir, _)| dir)
+}
+
+/// Like [`manifest_dir_of`], but for callers that already hold the meta and
+/// need the stack manifest too (its shared env merges into the app manifest).
+pub fn locate_installed(
+    config: &Config,
+    meta: &crate::daemon::apps::meta::AppMeta,
+    app_dir: &Path,
+) -> Result<(PathBuf, Option<super::manifest::StackManifest>)> {
     let repo = app_dir.join("repository");
     if repo.join(Manifest::FILE).exists() {
-        return Ok(repo);
+        return Ok((repo, None));
     }
-    let meta = crate::daemon::apps::meta::AppMeta::load(app_dir)?;
-    let package_spec = meta.package.clone().unwrap_or_else(|| id.to_string());
+    let package_spec = meta.package.clone().unwrap_or_else(|| meta.id.clone());
     let (package, stack_app) = match package_spec.split_once('/') {
         Some((package, app)) => (package, Some(app)),
         None => (package_spec.as_str(), None),
@@ -457,9 +481,7 @@ pub fn manifest_dir_of(config: &Config, id: &str, app_dir: &Path) -> Result<Path
         .map(|(name, _)| name);
     let resolved = super::registry::RegistryClient::new(config)?
         .resolve_preferring(package, installed_from)?;
-    let (dir, _) =
-        super::install::locate_manifest(&repo, resolved.entry.source.path.as_deref(), stack_app)?;
-    Ok(dir)
+    super::install::locate_manifest(&repo, resolved.entry.source.path.as_deref(), stack_app)
 }
 
 #[cfg(test)]
@@ -606,6 +628,28 @@ settings:
         let reloaded = SettingValues::load(dir.path()).unwrap();
         assert_eq!(reloaded.get("players"), Some(&serde_json::json!(50)));
         assert!(!dir.path().join("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn env_pairs_cover_typed_values_and_skip_unset() {
+        let defs = [
+            def("{ key: name, type: string, default: My Server, env: SERVER_NAME }"),
+            def("{ key: players, type: number, default: 10, env: MAX_PLAYERS }"),
+            def("{ key: pvp, type: boolean, default: true, env: PVP }"),
+            def("{ key: token, type: secret, env: TOKEN }"), // no value yet
+            def("{ key: internal, type: string, default: x }"), // no env
+        ];
+        let mut values = SettingValues::default();
+        values.merge_defaults(&defs);
+        values.set("players", serde_json::json!(50));
+        assert_eq!(
+            values.env_pairs(&defs),
+            [
+                ("SERVER_NAME".to_string(), "My Server".to_string()),
+                ("MAX_PLAYERS".to_string(), "50".to_string()),
+                ("PVP".to_string(), "true".to_string()),
+            ]
+        );
     }
 
     #[test]

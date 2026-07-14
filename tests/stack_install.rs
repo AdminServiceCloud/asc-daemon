@@ -56,9 +56,6 @@ apps:
   - { name: master, path: ./master }
   - { name: server, path: ./server, depends_on: [master] }
   - { name: extras, path: ./extras, optional: true }
-env:
-  - name: SHARED
-    default: from-stack
 "#,
     )
     .unwrap();
@@ -113,7 +110,7 @@ env:
         stack,
         installed,
         skipped,
-    } = pkg::install(&config, &ctx, "demo-stack", None, None).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None, None, true).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -136,8 +133,6 @@ env:
         .join("repository/server/asc.yaml");
     assert!(repo_yaml.exists(), "every app owns a full repository clone");
 
-    // Stack env is merged into the app env (docker apps would receive it;
-    // for native apps it is at least recorded in the cloned manifest dir).
     // The master app has no stack spec suffix mixup:
     assert_eq!(
         store
@@ -152,7 +147,7 @@ env:
     // ── Re-install: everything is skipped, nothing breaks ────────────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack", None, None).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None, None, true).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -162,7 +157,7 @@ env:
     // ── Single app from the stack (optional installs when asked) ─────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack/extras", None, None).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack/extras", None, None, true).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -171,7 +166,7 @@ env:
     assert!(skipped.is_empty());
 
     // Unknown stack app fails cleanly.
-    let err = pkg::install(&config, &ctx, "demo-stack/ghost", None, None).unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo-stack/ghost", None, None, true).unwrap_err();
     assert!(err.to_string().contains("ghost"), "got: {err:#}");
 
     // ── Upgrade one app of the stack to a new tag ─────────────────────────

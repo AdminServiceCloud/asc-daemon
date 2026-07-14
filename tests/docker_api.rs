@@ -105,7 +105,10 @@ fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String
         return ("404 Not Found", r#"{"message":"no such container"}"#.into());
     }
     if path.ends_with("/json") {
-        return ("200 OK", r#"{"State":{"Running":true}}"#.into());
+        return (
+            "200 OK",
+            r#"{"State":{"Running":true},"Config":{"Env":["PATH=/usr/bin","CS2_STARTMAP=de_dust2"]}}"#.into(),
+        );
     }
     if method == "DELETE" {
         return ("204 No Content", String::new());
@@ -171,6 +174,8 @@ fn create_sends_container_spec() {
             nano_cpus: Some(1_500_000_000),
             memory_bytes: Some(512 << 20),
             command: Some("echo ready".into()),
+            open_stdin: true,
+            tty: true,
         },
     )
     .unwrap();
@@ -195,6 +200,16 @@ fn create_sends_container_spec() {
 }
 
 #[test]
+fn container_env_reads_inspect_and_tolerates_missing() {
+    let (cfg, _dir, _hits) = test_cfg();
+
+    let env = docker::container_env(&cfg, "asc-demo").unwrap().unwrap();
+    assert_eq!(env, ["PATH=/usr/bin", "CS2_STARTMAP=de_dust2"]);
+    // A missing container (404) reads as None — the caller recreates it.
+    assert!(docker::container_env(&cfg, "missing").unwrap().is_none());
+}
+
+#[test]
 fn engine_errors_are_not_reported_as_unreachable() {
     let (cfg, _dir, _hits) = test_cfg();
 
@@ -207,6 +222,87 @@ fn engine_errors_are_not_reported_as_unreachable() {
     assert!(
         !msg.contains("cannot reach Docker"),
         "an Engine response is not a connectivity failure, got: {msg}"
+    );
+}
+
+/// DMN-017: a stopped container whose env drifted from settings.json is
+/// recreated on refresh; matching env is left alone.
+#[test]
+fn settings_drift_recreates_the_container() {
+    use asc_daemon::daemon::apps::meta::{Owner, Runtime};
+    use asc_daemon::daemon::apps::{AppMeta, AppStore, DesiredState};
+    use asc_daemon::daemon::pkg::refresh;
+
+    let (docker_cfg, _dir, hits) = test_cfg();
+    let apps = tempfile::tempdir().unwrap();
+    let mut config = asc_daemon::daemon::config::Config::default();
+    config.daemon.apps_dir = apps.path().to_path_buf();
+    config.docker = docker_cfg;
+
+    let store = AppStore::new(apps.path().to_path_buf());
+    let meta = AppMeta {
+        id: "web".into(),
+        name: "web".into(),
+        custom_name: None,
+        owner: Owner {
+            uid: 1000,
+            name: "user".into(),
+        },
+        version: None,
+        source: None,
+        package: None,
+        desired_state: DesiredState::Stopped,
+        quota: None,
+        runtime: Runtime::Docker {
+            container: "asc-web".into(),
+        },
+    };
+    store.save(&meta).unwrap();
+    let app_dir = store.app_dir("web").unwrap();
+    std::fs::create_dir_all(app_dir.join("repository")).unwrap();
+    std::fs::create_dir_all(app_dir.join("config")).unwrap();
+    std::fs::write(
+        app_dir.join("repository/asc.yaml"),
+        "name: web\nversion: '1'\ntype: docker\nsettings: ./asc.settings.yaml\n\
+         runtime:\n  image: nginx:1.27\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("repository/asc.settings.yaml"),
+        "settings:\n  - { key: map, type: enum, values: [de_dust2, de_mirage], \
+         default: de_dust2, env: CS2_STARTMAP }\n",
+    )
+    .unwrap();
+
+    // The value matches the container's env (the mock inspect reports
+    // CS2_STARTMAP=de_dust2): nothing to do.
+    std::fs::write(
+        app_dir.join("config/settings.json"),
+        r#"{"map":"de_dust2"}"#,
+    )
+    .unwrap();
+    refresh::apply_settings(&config, &meta, &app_dir).unwrap();
+    let seen = hits.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|h| h.starts_with("DELETE")),
+        "matching env must not recreate the container, saw: {seen:?}"
+    );
+
+    // A changed map drifts from the container env: remove + create.
+    std::fs::write(
+        app_dir.join("config/settings.json"),
+        r#"{"map":"de_mirage"}"#,
+    )
+    .unwrap();
+    refresh::apply_settings(&config, &meta, &app_dir).unwrap();
+    let seen = hits.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|h| h.starts_with("DELETE")),
+        "drifted env must remove the old container, saw: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|h| h.contains("/containers/create")),
+        "drifted env must create a fresh container, saw: {seen:?}"
     );
 }
 

@@ -24,19 +24,21 @@ description: "..."            # EN in the official registry
 settings: ./asc.settings.yaml # optional: the application settings file (see below)
 runtime:
   image: nginx:1.27           # for docker
+  stdin: true                 # docker, optional: keep stdin open (docker run -i) — `asc attach` input reaches the app
+  tty: true                   # docker, optional: allocate a pseudo-TTY (docker run -t)
   # or install/start/stop commands for native
-env:
-  - name: PORT
-    default: 8080
 ports: [8080]
 volumes: [/data]
 requirements: { ram: 256M, disk: 1G }
 healthcheck: { http: /health }
 ```
 
-**Volumes** (docker apps) come in two forms:
+> ℹ️ The manifest has **no `env:` section**: every environment variable an app receives is declared in `asc.settings.yaml` — a setting with an `env:` key (see below). One source of truth: what the user can configure is exactly what the app gets.
 
-- `/container/path` — private app data: mapped to a host directory under `/asc/apps/<id>/data/`. The directory is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. Per-app uid mapping will tighten this later;
+**Volumes** (docker apps) come in three forms:
+
+- `/container/path` — private app data: the app's **data folder** (`/asc/apps/<id>/data`) is mounted at that container path. The folder is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. Per-app uid mapping will tighten this later;
+- `/container/path:folder` — same, but the host folder named after the colon is used **instead of `data`** (`/asc/apps/<id>/<folder>`) — for packages that need several private volumes. The name must be a plain folder name; `repository`, `config` and `meta.json` are reserved;
 - `name:/container/path[:ro|:rw]` — a Docker **named volume**, created by the Engine on first use. Named volumes are how several apps share data: one app writes the volume, others mount it `:ro` (see the cs2 stack in [asc-example-apps](../../../asc-example-apps) — a master installation shared by every server instance). Named volumes are not removed with the app.
 
 > 📐 JSON schemas of the manifests: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) and [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) in the `registry` repository.
@@ -52,6 +54,7 @@ settings:
     title: "Server name"
     default: "My Server"
     required: true
+    env: SERVER_NAME            # exposed to the app as this env variable
 
   - key: max_players
     type: number
@@ -72,7 +75,9 @@ settings:
     default: true
 ```
 
-- Setting values are saved in `/asc/apps/<id>/config/settings.json` (0600 — the file may hold secrets); at install time it is seeded with the defaults, an upgrade adds defaults for new keys without touching the user's choices. They are passed to the application (env/config file — per the template from the manifest).
+- Setting values are saved in `/asc/apps/<id>/config/settings.json` (0600 — the file may hold secrets); at install time it is seeded with the defaults, an upgrade adds defaults for new keys without touching the user's choices.
+- **Env pass-through**: every setting that declares `env: VAR_NAME` lands in the application's environment (secrets included — that is what their `env:` is for). For Docker apps the variables go into the container env at creation; a setting value wins over a manifest `env:` default of the same name.
+- **Applying changes**: a container's env is fixed at creation, so on the next `asc app start` / `asc app restart` the daemon compares the desired env with the container's actual one and **recreates the container** when they differ (or when the container is missing). App data lives in volumes and survives the recreate. If the desired env cannot be computed (say, the registry source is gone), the app still starts as is — availability wins, with a warning in the log.
 - Changing settings — **`asc app settings <id>`**: an interactive editor in the terminal — pick a setting by number, enter a value, and it is validated against the definition (type, `limits`, enum `values`; secrets are masked in the list). Also via the platform UI. After a change the application is restarted (`asc app restart <id>`).
 
 ### 📏 Resource quota (quota)
@@ -99,10 +104,10 @@ The application's start command is configured in `asc.settings.yaml`. The string
 start_command: "steamcmd +force_install_dir /data +login anonymous +app_update ${STEAM_APP_ID} validate +quit"
 ```
 
-- The substitution is performed by the daemon at install/upgrade time from the package env defaults (`env:` in `asc.yaml`, including the stack's shared entries). An unresolved variable — or one without a default — fails the install naming the variable.
+- The substitution is performed by the daemon at install/upgrade time from the app's env — the setting values with `env:` keys, defaults included. An unresolved variable fails the install naming the variable.
 - **Docker apps**: the command replaces what the image would run (the entrypoint becomes `/bin/sh -c`, so arguments and quoting work as in a shell).
 - **native apps**: the command overrides `runtime.start` from `asc.yaml`.
-- Interpolation from the application's *final* environment (settings values, org/node/application env levels — [🌱 environments](../../../asc-platform/docs/features/environments.md)) and a UI preview of the computed command arrive with the settings→env pass-through (DMN-017).
+- Interpolation from the application's *final* environment (org/node/application env levels — [🌱 environments](../../../asc-platform/docs/features/environments.md)) and a UI preview of the computed command are a next increment; setting values already reach the app as env variables (see the settings section above).
 
 ### 🐳 install/update scripts: native or docker
 
@@ -129,9 +134,12 @@ Installing an application = **cloning its repository**:
 
 1. `asc install <package>` → the daemon clones the package repository into `/asc/apps/<id>/repository/`.
 2. **Application versions = git tags** (GitHub tags): installing a specific version — `asc install <package>@1.2.0` (tag checkout), updating — `asc app upgrade <name>` (checkout of the new tag).
-3. **Custom name** (DMN-024): in a terminal `asc install` asks for an application name — Enter keeps the default (the name from the package manifest), any other input becomes the app's name. Non-interactively, pass `--name "My Server"`. The name is stored in `meta.json` (`custom_name`), must be unique among the user's apps, survives upgrades, and every command accepts it interchangeably with the id. A custom name applies to a single application — not to a whole stack.
-4. From then on the daemon works with the local copy: reads `asc.yaml`/`asc.settings.yaml`, builds/launches according to the application type.
-5. For Docker applications the container is created through the Engine API; an image missing on the host is **pulled automatically** from its registry (`runtime.image`; a name without a tag means `latest`) — both at install and at upgrade.
+3. **License consent** (DMN-028): when the cloned repository ships a license (`LICENSE.md` / `LICENSE` / `LICENSE.txt` at its root), the CLI shows where the package comes from (registry source + repository), prints the license text and asks for acceptance — declining aborts the install and leaves nothing behind. Non-interactive input accepts automatically with a printed notice; API callers receive a structured error with the source, the repository and the license text (the platform UI renders its own consent dialog). A stack asks once per repository. Repositories without a license file install without the prompt.
+4. **Custom name** (DMN-024): in a terminal `asc install` asks for an application name — Enter keeps the default (the name from the package manifest), any other input becomes the app's name. Non-interactively, pass `--name "My Server"`. The name is stored in `meta.json` (`custom_name`), must be unique among the user's apps, survives upgrades, and every command accepts it interchangeably with the id. A custom name applies to a single application — not to a whole stack.
+5. From then on the daemon works with the local copy: reads `asc.yaml`/`asc.settings.yaml`, builds/launches according to the application type.
+6. For Docker applications the container is created through the Engine API; an image missing on the host is **pulled automatically** from its registry (`runtime.image`; a name without a tag means `latest`) — both at install and at upgrade.
+
+**Requirements at start** (DMN-029): the manifest's `requirements` (`ram`, `disk`, `cpu`) are compared with what the host has free when the app starts. When short, `asc app start` warns with the exact figures and — in a terminal — asks whether to start anyway at the user's own risk; non-interactive callers get the warning on stderr and proceed. The check is advice, not enforcement: read failures never block the start.
 
 **Updating** (`asc app upgrade <name>[@version]`, synonym — `asc upgrade`): the application must be stopped; the new tag is cloned **next to** the current copy (`repository.new`), the manifest is validated, and only then are the directories swapped and the runtime recreated (for Docker the container is recreated with the new image). A failure before the swap does not touch the installed application; a failure while recreating the runtime rolls back to the previous version. Without an explicit version, `latest` from the registry is used.
 
@@ -163,7 +171,7 @@ apps:
 ```
 
 - `asc install my-stack` — install the whole stack; `asc install my-stack/web` — just one application from it.
-- A stack can declare shared `env` and dependencies between applications (`depends_on` — the startup order); components can be `optional`.
+- A stack can declare dependencies between applications (`depends_on` — the startup order); components can be `optional`. Environment variables live in each app's own `asc.settings.yaml`.
 - Registries and the platform store index both single `asc.yaml` files and `asc.stack.yaml` stacks.
 - Examples — in the [asc-example-apps](../../../asc-example-apps) repository.
 
@@ -172,7 +180,7 @@ apps:
 - **The app id** is the `name` from the app's own `asc.yaml` (in the example above the stack's `web` app may be named `my-stack-web`); the origin is recorded in meta.json as `package: "my-stack/web"` — `asc app upgrade` resolves the package through it.
 - **Order**: dependencies (`depends_on`) install first; cycles are rejected at validation. `asc install my-stack` installs every non-`optional` component; `asc install my-stack/db` installs the requested component (even an `optional` one) plus its dependencies.
 - **Idempotency**: already-installed apps of the stack are skipped and left untouched; every app installs atomically (a failure removes only its own directory, previously installed components stay).
-- **The stack's shared `env`** is appended to every app's `env`; the app's own declaration wins.
+- **License consent** is asked once per repository (one repo = one license), not per stack app.
 
 ### Registries
 

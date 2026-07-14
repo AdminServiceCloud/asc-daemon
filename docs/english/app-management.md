@@ -7,9 +7,9 @@ The core of the daemon: a single interface for managing applications of three ki
 ## 🎯 Scenarios
 
 - `asc app install helloworld` — install from a registry (Docker or native — the manifest decides).
-- `asc app start|stop|restart|status|logs <name>` — lifecycle management. `start` attaches to the app's console right away (Docker apps, interactive terminal — like `docker run` without `-d`); `asc app start -d <name>` starts detached, without attaching.
+- `asc app start|stop|restart|status|logs <name>` — lifecycle management. `start` attaches to the app's console right away (Docker apps, interactive terminal — like `docker run` without `-d`); `asc app start -d <name>` starts detached, without attaching. When the host is short on the resources the manifest `requirements` declare, `start` warns with the figures and asks to continue at the user's own risk (DMN-029).
 - **Custom names** (DMN-024): `asc install` asks for an app name (Enter keeps the default; non-interactively — `--name`). `asc app list` shows both the original ID and the NAME, and every command accepts either one: `asc app start "My Server"` = `asc app start cs2-server`. When an id and a name collide, the id wins; an ambiguous name (several apps named alike) is an error suggesting the id.
-- `asc app list` — a user sees **only their own** applications; `sudo asc app list` — the applications of all users.
+- `asc app list` — a user sees **only their own** applications; `sudo asc app list` — the applications of all users. Short aliases (DMN-025): `asc ls` and `asc ps` — same output and same permissions.
 - `asc stats` — CPU and memory consumption per application (like `docker stats`, see [📊 monitoring](monitoring.md)).
 - The platform performs the same operations through the daemon API.
 - After a server reboot the daemon restores the application states (running/stopped).
@@ -45,7 +45,7 @@ Every application lives in a directory named after its ID:
 - **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple instances of one application.
-- **MVP CLI commands**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info|settings`, `asc service` (managing the daemon itself).
+- **MVP CLI commands**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info|settings` (+ the `asc ls`/`asc ps` aliases for the list), `asc service` (managing the daemon itself).
 
 ## 🔗 Related tasks
 

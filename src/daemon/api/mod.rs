@@ -106,7 +106,17 @@ impl ApiState {
         source: Option<String>,
     ) -> Result<pkg::InstallOutcome> {
         self.blocking(move |s| {
-            pkg::install(&s.config, &api_context(), &spec, source.as_deref(), None)
+            // No license consent over the API yet: a repository shipping a
+            // LICENSE returns the typed error, and the platform UI will
+            // render its own consent dialog from it (DMN-028 follow-up).
+            pkg::install(
+                &s.config,
+                &api_context(),
+                &spec,
+                source.as_deref(),
+                None,
+                false,
+            )
         })
         .await
     }

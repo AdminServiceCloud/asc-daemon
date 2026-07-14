@@ -103,11 +103,8 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     let cloned_tag = clone_repository(&resolved.entry.source.git, Some(&version), &new_dir)?
         .expect("a version was requested, so a tag was checked out");
     let entry_path = resolved.entry.source.path.as_deref();
-    let (new_manifest_dir, stack) = locate_manifest(&new_dir, entry_path, stack_app)?;
-    let mut manifest = Manifest::load(&new_manifest_dir)?;
-    if let Some(stack) = &stack {
-        manifest.merge_stack_env(&stack.env);
-    }
+    let (new_manifest_dir, _) = locate_manifest(&new_dir, entry_path, stack_app)?;
+    let manifest = Manifest::load(&new_manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, &id)?;
     let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
     let quota = load_quota(settings.as_ref())?;
@@ -133,7 +130,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         &locate_manifest(&repo_dir, entry_path, stack_app)?.0,
         &config.docker,
         quota.as_ref(),
-        settings.as_ref().and_then(|s| s.start_command.as_deref()),
+        settings.as_ref(),
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -203,11 +200,8 @@ fn rollback(
         warn!(app = id, error = %err, "rollback: cannot restore the previous repository");
         return;
     }
-    let restore = locate_manifest(repo_dir, entry_path, stack_app).and_then(|(dir, stack)| {
-        let mut manifest = Manifest::load(&dir)?;
-        if let Some(stack) = &stack {
-            manifest.merge_stack_env(&stack.env);
-        }
+    let restore = locate_manifest(repo_dir, entry_path, stack_app).and_then(|(dir, _)| {
+        let manifest = Manifest::load(&dir)?;
         let settings = SettingsFile::load_for(&dir, &manifest)?;
         let quota = load_quota(settings.as_ref())?;
         provision(
@@ -217,7 +211,7 @@ fn rollback(
             &dir,
             &config.docker,
             quota.as_ref(),
-            settings.as_ref().and_then(|s| s.start_command.as_deref()),
+            settings.as_ref(),
         )
     });
     if let Err(err) = restore {

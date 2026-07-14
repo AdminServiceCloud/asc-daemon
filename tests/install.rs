@@ -40,6 +40,7 @@ fn install_from_file_registry() {
         "name: demo\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
     )
     .unwrap();
+    fs::write(repo.join("LICENSE.md"), "MIT License\n\nDemo terms.\n").unwrap();
     git(&repo, &["init", "-q"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
@@ -95,7 +96,7 @@ fn install_from_file_registry() {
         restricted.daemon.data_dir = config.daemon.data_dir.clone();
         restricted.daemon.apps_dir = config.daemon.apps_dir.clone();
         restricted.policy.user_install = asc_daemon::daemon::config::UserInstall::Docker;
-        let err = pkg::install(&restricted, &ctx, "demo@1.0.0", None, None).unwrap_err();
+        let err = pkg::install(&restricted, &ctx, "demo@1.0.0", None, None, true).unwrap_err();
         assert!(err.to_string().contains("Docker"), "got: {err:#}");
         let store = AppStore::new(restricted.daemon.apps_dir.clone());
         assert!(!store.app_dir("demo").unwrap().exists());
@@ -106,13 +107,27 @@ fn install_from_file_registry() {
             name: "root".into(),
             is_root: true,
         };
-        pkg::install(&restricted, &root_ctx, "demo@1.0.0", None, None).unwrap();
+        pkg::install(&restricted, &root_ctx, "demo@1.0.0", None, None, true).unwrap();
         store.remove("demo").unwrap();
+    }
+
+    // The repository ships LICENSE.md: installing without acceptance raises
+    // the typed error (source + repository + text), leaving nothing behind.
+    {
+        let err = pkg::install(&config, &ctx, "demo@1.0.0", None, None, false).unwrap_err();
+        let required = err
+            .downcast_ref::<pkg::LicenseRequired>()
+            .expect("expected the typed license error");
+        assert_eq!(required.source, "local");
+        assert_eq!(required.package, "demo");
+        assert!(required.license.contains("MIT License"));
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        assert!(!store.app_dir("demo").unwrap().exists());
     }
 
     // Requested tag is `1.0.0`, the repo has `v1.0.0` — the fallback must hit.
     let pkg::InstallOutcome::App(report) =
-        pkg::install(&config, &ctx, "demo@1.0.0", None, None).unwrap()
+        pkg::install(&config, &ctx, "demo@1.0.0", None, None, true).unwrap()
     else {
         panic!("expected a single-app install");
     };
@@ -130,11 +145,11 @@ fn install_from_file_registry() {
     assert!(app_dir.join("data").is_dir());
 
     // Installing on top of an existing app must fail cleanly.
-    let err = pkg::install(&config, &ctx, "demo", None, None).unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo", None, None, true).unwrap_err();
     assert!(err.to_string().contains("demo"));
 
     // Unknown packages fail with the "not found" error, not a panic/partial state.
-    assert!(pkg::install(&config, &ctx, "ghost", None, None).is_err());
+    assert!(pkg::install(&config, &ctx, "ghost", None, None, true).is_err());
     assert!(!store.app_dir("ghost").unwrap().exists());
 
     // ── Upgrade: a new tag in the package repository ─────────────────────

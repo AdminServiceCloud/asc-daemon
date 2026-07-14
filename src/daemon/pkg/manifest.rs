@@ -30,8 +30,6 @@ pub struct Manifest {
     #[serde(default)]
     pub runtime: RuntimeSpec,
     #[serde(default)]
-    pub env: Vec<EnvVar>,
-    #[serde(default)]
     pub ports: Vec<u16>,
     #[serde(default)]
     pub volumes: Vec<String>,
@@ -59,6 +57,14 @@ pub struct RuntimeSpec {
     /// Docker image (type: docker).
     #[serde(default)]
     pub image: Option<String>,
+    /// Keep the container's stdin open (Engine `OpenStdin`, like `docker run
+    /// -i`) so console input from `asc attach` reaches the app (type: docker).
+    #[serde(default)]
+    pub stdin: bool,
+    /// Allocate a pseudo-TTY (Engine `Tty`, like `docker run -t`) — for apps
+    /// whose console expects a terminal (type: docker).
+    #[serde(default)]
+    pub tty: bool,
     /// Install commands (type: native/utility).
     #[serde(default)]
     pub install: Vec<String>,
@@ -69,20 +75,6 @@ pub struct RuntimeSpec {
     pub stop: Option<String>,
     #[serde(default)]
     pub uninstall: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnvVar {
-    pub name: String,
-    #[serde(default)]
-    pub default: Option<serde_yaml::Value>,
-    #[serde(default)]
-    pub secret: bool,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,9 +132,6 @@ pub struct StackManifest {
     #[serde(default)]
     pub category: Option<String>,
     pub apps: Vec<StackApp>,
-    /// Shared environment defaults for every app of the stack.
-    #[serde(default)]
-    pub env: Vec<EnvVar>,
 }
 
 /// One application of a stack.
@@ -245,16 +234,6 @@ impl StackManifest {
 impl Manifest {
     pub const FILE: &'static str = "asc.yaml";
 
-    /// Add stack-level env defaults the app does not define itself
-    /// (the app's own declaration wins).
-    pub fn merge_stack_env(&mut self, stack_env: &[EnvVar]) {
-        for var in stack_env {
-            if !self.env.iter().any(|e| e.name == var.name) {
-                self.env.push(var.clone());
-            }
-        }
-    }
-
     /// Load and validate the manifest from a package directory.
     pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join(Self::FILE);
@@ -301,9 +280,8 @@ type: docker
 description: "Web server"
 runtime:
   image: nginx:1.27
-env:
-  - name: PORT
-    default: 8080
+  stdin: true
+  tty: true
 ports: [8080]
 volumes: [/data]
 "#;
@@ -311,6 +289,7 @@ volumes: [/data]
         m.validate().unwrap();
         assert_eq!(m.app_type, AppType::Docker);
         assert_eq!(m.runtime.image.as_deref(), Some("nginx:1.27"));
+        assert!(m.runtime.stdin && m.runtime.tty);
         assert_eq!(m.ports, [8080]);
     }
 
@@ -353,9 +332,6 @@ apps:
   - { name: master, path: ./master }
   - { name: server, path: ./server, depends_on: [master] }
   - { name: extras, path: ./extras, optional: true }
-env:
-  - name: STEAM_APP_ID
-    default: 730
 "#,
         );
         let all: Vec<&str> = s
@@ -399,16 +375,10 @@ apps:
     }
 
     #[test]
-    fn stack_env_merges_without_overriding() {
-        let mut m: Manifest =
-            serde_yaml::from_str("name: web\nversion: '1'\ntype: docker\nruntime:\n  image: x\nenv:\n  - name: PORT\n    default: 80\n").unwrap();
-        let stack_env: Vec<EnvVar> =
-            serde_yaml::from_str("- name: PORT\n  default: 9999\n- name: TZ\n  default: UTC\n")
-                .unwrap();
-        m.merge_stack_env(&stack_env);
-        assert_eq!(m.env.len(), 2);
-        let port = m.env.iter().find(|e| e.name == "PORT").unwrap();
-        assert_eq!(port.default, Some(serde_yaml::Value::from(80)), "app wins");
-        assert!(m.env.iter().any(|e| e.name == "TZ"), "stack default added");
+    fn env_in_manifest_is_rejected() {
+        // env moved to asc.settings.yaml (settings with `env:` keys) —
+        // a manifest still declaring it must fail loudly, not silently.
+        let yaml = "name: x\nversion: '1'\ntype: docker\nruntime:\n  image: i\nenv:\n  - name: PORT\n    default: 80\n";
+        assert!(serde_yaml::from_str::<Manifest>(yaml).is_err());
     }
 }

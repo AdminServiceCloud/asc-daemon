@@ -143,6 +143,20 @@ pub fn running(cfg: &DockerConfig, container: &str) -> Result<bool> {
     })
 }
 
+/// Environment the container was created with (`Config.Env` from inspect —
+/// includes the image's own variables, not just the ones passed at create).
+/// `None` when the container does not exist (404).
+pub fn container_env(cfg: &DockerConfig, container: &str) -> Result<Option<Vec<String>>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_container(container, None).await {
+            Ok(info) => Ok(Some(info.config.and_then(|c| c.env).unwrap_or_default())),
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
 /// Force-remove the container. A missing container (404) is success.
 pub fn remove(cfg: &DockerConfig, container: &str) -> Result<()> {
     block_on(async {
@@ -235,6 +249,11 @@ pub struct CreateSpec<'a> {
     /// Start command override (`start_command` from asc.settings.yaml):
     /// replaces the image entrypoint, runs through `/bin/sh -c`.
     pub command: Option<String>,
+    /// Keep the container's stdin open (Engine `OpenStdin`, like `docker run
+    /// -i`) so attach input reaches the app.
+    pub open_stdin: bool,
+    /// Allocate a pseudo-TTY (Engine `Tty`, like `docker run -t`).
+    pub tty: bool,
 }
 
 /// Split an image reference into the `fromImage` and `tag` query parameters
@@ -312,6 +331,8 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
                 .map(|_| vec!["/bin/sh".to_string(), "-c".to_string()]),
             cmd: spec.command.as_ref().map(|c| vec![c.clone()]),
             env: (!spec.env.is_empty()).then(|| spec.env.clone()),
+            open_stdin: spec.open_stdin.then_some(true),
+            tty: spec.tty.then_some(true),
             exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
             host_config: Some(host_config),
             ..Default::default()

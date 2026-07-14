@@ -88,14 +88,16 @@ fn cpu_percent(first: &ResourceUsage, second: &ResourceUsage, elapsed_micros: u6
 
 pub struct AppManager {
     store: AppStore,
-    docker: crate::daemon::config::DockerConfig,
+    /// The full config: drivers need `[docker]`, the settings refresh on
+    /// start (DMN-017) resolves stack manifests through the registries.
+    config: Config,
 }
 
 impl AppManager {
     pub fn new(config: &Config) -> Self {
         Self {
             store: AppStore::new(config.daemon.apps_dir.clone()),
-            docker: config.docker.clone(),
+            config: config.clone(),
         }
     }
 
@@ -152,7 +154,7 @@ impl AppManager {
             Ok(dir) => dir,
             Err(_) => return RuntimeState::Stopped,
         };
-        match driver::for_runtime(&meta.runtime, &self.docker).state(meta, &dir) {
+        match driver::for_runtime(&meta.runtime, &self.config.docker).state(meta, &dir) {
             Ok(state) => state,
             Err(err) => {
                 warn!(app = %meta.id, error = %format!("{err:#}"), "cannot query app state");
@@ -166,7 +168,7 @@ impl AppManager {
     /// a broken Docker socket must not fail the whole stats table.
     fn usage_of(&self, meta: &AppMeta) -> Option<ResourceUsage> {
         let dir = self.store.app_dir(&meta.id).ok()?;
-        match driver::for_runtime(&meta.runtime, &self.docker).usage(meta, &dir) {
+        match driver::for_runtime(&meta.runtime, &self.config.docker).usage(meta, &dir) {
             Ok(usage) => usage,
             Err(err) => {
                 warn!(app = %meta.id, error = %format!("{err:#}"), "cannot query app usage");
@@ -215,7 +217,10 @@ impl AppManager {
         let outcome = if self.state_of(&meta) == RuntimeState::Running {
             Outcome::AlreadyInState
         } else {
-            driver::for_runtime(&meta.runtime, &self.docker).start(&meta, &dir)?;
+            // Changed settings (DMN-017) land here: a stopped container
+            // whose env drifted from settings.json is recreated first.
+            crate::daemon::pkg::refresh::apply_settings(&self.config, &meta, &dir)?;
+            driver::for_runtime(&meta.runtime, &self.config.docker).start(&meta, &dir)?;
             Outcome::Done
         };
         // Persist intent even when already running: survive the next reboot.
@@ -232,7 +237,7 @@ impl AppManager {
         let outcome = if self.state_of(&meta) == RuntimeState::Stopped {
             Outcome::AlreadyInState
         } else {
-            driver::for_runtime(&meta.runtime, &self.docker).stop(&meta, &dir)?;
+            driver::for_runtime(&meta.runtime, &self.config.docker).stop(&meta, &dir)?;
             Outcome::Done
         };
         if meta.desired_state != DesiredState::Stopped {
@@ -245,7 +250,17 @@ impl AppManager {
     pub fn restart(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
-        driver::for_runtime(&meta.runtime, &self.docker).restart(&meta, &dir)?;
+        let driver = driver::for_runtime(&meta.runtime, &self.config.docker);
+        // Docker restart runs as stop + start so changed settings (DMN-017)
+        // apply through the recreate in `apply_settings` — restart is the
+        // documented way to pick up new setting values.
+        if matches!(meta.runtime, meta::Runtime::Docker { .. }) {
+            driver.stop(&meta, &dir)?;
+            crate::daemon::pkg::refresh::apply_settings(&self.config, &meta, &dir)?;
+            driver.start(&meta, &dir)?;
+        } else {
+            driver.restart(&meta, &dir)?;
+        }
         if meta.desired_state != DesiredState::Running {
             meta.desired_state = DesiredState::Running;
             self.store.save(&meta)?;
@@ -256,14 +271,14 @@ impl AppManager {
     pub fn logs(&self, ctx: &UserContext, id: &str, tail: usize) -> Result<String> {
         let meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
-        driver::for_runtime(&meta.runtime, &self.docker).logs(&meta, &dir, tail)
+        driver::for_runtime(&meta.runtime, &self.config.docker).logs(&meta, &dir, tail)
     }
 
     /// Remove the app: release runtime resources, then delete its directory.
     pub fn remove(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
-        driver::for_runtime(&meta.runtime, &self.docker).remove(&meta, &dir)?;
+        driver::for_runtime(&meta.runtime, &self.config.docker).remove(&meta, &dir)?;
         self.store.remove(&meta.id)
     }
 
@@ -285,7 +300,13 @@ impl AppManager {
                     continue;
                 }
             };
-            match driver::for_runtime(&meta.runtime, &self.docker).start(&meta, &dir) {
+            // Settings changed while the daemon was down still apply.
+            if let Err(err) = crate::daemon::pkg::refresh::apply_settings(&self.config, &meta, &dir)
+            {
+                warn!(app = %meta.id, error = %format!("{err:#}"), "reconcile: cannot apply settings");
+                continue;
+            }
+            match driver::for_runtime(&meta.runtime, &self.config.docker).start(&meta, &dir) {
                 Ok(()) => info!(app = %meta.id, "reconcile: app started"),
                 Err(err) => {
                     warn!(app = %meta.id, error = %format!("{err:#}"), "reconcile: cannot start app");

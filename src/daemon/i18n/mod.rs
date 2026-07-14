@@ -102,6 +102,13 @@ pub enum Msg {
     PkgUpToDate,
     PkgUpgradeStopFirst,
     PkgAuthRequired,
+    PkgLicenseRequired,
+    PkgLicenseNotice,
+    PkgLicensePrompt,
+    PkgLicenseAutoAccepted,
+    AppLowResources,
+    AppStartRiskPrompt,
+    AppStartDeclined,
     AuthPromptConfigure,
     AuthPromptToken,
     AuthPromptKey,
@@ -303,6 +310,28 @@ pub fn t(msg: Msg) -> &'static str {
             "repository {} looks private and no authorization is configured — set it up: asc auth add <host> --token <token> (https) or asc auth add <host> --ssh-key (git@/ssh)",
             "репозиторий {} похож на приватный, авторизация не настроена — настройте: asc auth add <хост> --token <токен> (https) или asc auth add <хост> --ssh-key (git@/ssh)",
         ),
+        Msg::PkgLicenseRequired => (
+            "installing '{}' from source '{}' ({}) requires accepting the repository license",
+            "установка '{}' из источника '{}' ({}) требует принятия лицензии репозитория",
+        ),
+        Msg::PkgLicenseNotice => (
+            "Installing '{}' from registry source '{}' — repository {}. The repository license:",
+            "Установка '{}' из источника реестра '{}' — репозиторий {}. Лицензия репозитория:",
+        ),
+        Msg::PkgLicensePrompt => ("Accept the license? [y/N] ", "Принимаете лицензию? [y/N] "),
+        Msg::PkgLicenseAutoAccepted => (
+            "License accepted automatically (non-interactive input); the full text is in the repository's LICENSE file",
+            "Лицензия принята автоматически (неинтерактивный ввод); полный текст — в файле LICENSE репозитория",
+        ),
+        Msg::AppLowResources => (
+            "warning: the host may not have enough resources for '{}': {}",
+            "внимание: хосту может не хватить ресурсов для '{}': {}",
+        ),
+        Msg::AppStartRiskPrompt => (
+            "Start anyway at your own risk? [y/N] ",
+            "Всё равно запустить на свой страх и риск? [y/N] ",
+        ),
+        Msg::AppStartDeclined => ("start of '{}' cancelled", "запуск '{}' отменён"),
         Msg::AuthPromptConfigure => (
             "Repository {} looks private. Configure authorization for '{}' now? [y/N] ",
             "Репозиторий {} похож на приватный. Настроить авторизацию для '{}' сейчас? [y/N] ",

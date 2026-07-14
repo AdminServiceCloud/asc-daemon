@@ -49,6 +49,9 @@ enum Command {
         #[command(subcommand)]
         action: AppAction,
     },
+    /// List apps, shorthand for `asc app list` (root sees all users' apps)
+    #[command(visible_alias = "ps")]
+    Ls,
     /// Install from a registry: <name>, <stack> or <stack>/<app>, with optional @<version>
     Install {
         spec: String,
@@ -244,6 +247,7 @@ fn run() -> anyhow::Result<()> {
         Command::Status => status_cmd(&config),
         Command::Stats { sort } => stats_cmd(sort, &config),
         Command::App { action } => app_cmd(action, &config),
+        Command::Ls => app_cmd(AppAction::List, &config),
         Command::Install { spec, source, name } => {
             install_cmd(&spec, source.as_deref(), name, &config)
         }
@@ -294,21 +298,25 @@ fn install_cmd(
         None => prompt_app_name(spec)?,
     };
     let name = name.as_deref();
-    let outcome = match pkg::install(config, &ctx, spec, source, name) {
-        Ok(outcome) => outcome,
-        // Private repository: offer to set up auth right here, then retry.
-        Err(err) if offer_auth_setup(&err) => pkg::install(config, &ctx, spec, source, name)?,
-        // Several sources provide the package: let the user pick a number.
-        Err(err) => {
-            let Some(chosen) = pick_source(&err)? else {
-                return Err(err);
-            };
-            match pkg::install(config, &ctx, spec, Some(&chosen), name) {
-                Ok(outcome) => outcome,
-                Err(err) if offer_auth_setup(&err) => {
-                    pkg::install(config, &ctx, spec, Some(&chosen), name)?
+    let mut source = source.map(str::to_string);
+    let mut license_ack = false;
+    // Interactive recoveries loop until the install passes or the user
+    // declines: auth setup for private repositories, a source pick when
+    // several provide the package, license consent (DMN-028).
+    let outcome = loop {
+        match pkg::install(config, &ctx, spec, source.as_deref(), name, license_ack) {
+            Ok(outcome) => break outcome,
+            Err(err) if offer_auth_setup(&err) => continue,
+            Err(err) => {
+                if let Some(chosen) = pick_source(&err)? {
+                    source = Some(chosen);
+                    continue;
                 }
-                Err(err) => return Err(err),
+                if accept_license(&err)? {
+                    license_ack = true;
+                    continue;
+                }
+                return Err(err);
             }
         }
     };
@@ -457,6 +465,39 @@ fn pick_source(err: &anyhow::Error) -> anyhow::Result<Option<String>> {
         .filter(|n| (1..=ambiguous.candidates.len()).contains(n))
         .ok_or_else(|| anyhow::anyhow!(t(Msg::AuthInvalidChoice)))?;
     Ok(Some(ambiguous.candidates[index - 1].0.clone()))
+}
+
+/// When `err` says the package repository ships a license (DMN-028), print
+/// where the package comes from (source + repository), the license text, and
+/// ask for consent. Non-interactive stdin accepts automatically with a
+/// notice, so scripted installs keep working. `Ok(false)` = not that error,
+/// or the user declined.
+fn accept_license(err: &anyhow::Error) -> anyhow::Result<bool> {
+    let Some(required) = err.downcast_ref::<pkg::LicenseRequired>() else {
+        return Ok(false);
+    };
+    println!(
+        "{}",
+        tf3(
+            Msg::PkgLicenseNotice,
+            &required.package,
+            &required.source,
+            &required.git
+        )
+    );
+    println!();
+    println!("{}", required.license.trim_end());
+    println!();
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        println!("{}", t(Msg::PkgLicenseAutoAccepted));
+        return Ok(true);
+    }
+    let answer = read_line(t(Msg::PkgLicensePrompt))?;
+    Ok(matches!(
+        answer.to_lowercase().as_str(),
+        "y" | "yes" | "д" | "да"
+    ))
 }
 
 fn offer_auth_setup(err: &anyhow::Error) -> bool {
@@ -622,6 +663,7 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
         AppAction::Attach { id } => attach_cmd(&id, config)?,
         AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
         AppAction::Start { id, detach } => {
+            confirm_start_resources(&manager, &ctx, &id, config)?;
             match manager.start(&ctx, &id)? {
                 Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
                 Outcome::AlreadyInState => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
@@ -670,6 +712,104 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Requirements check before start (DMN-029): compare the manifest
+/// `requirements` with what the host has free right now; when short, warn
+/// and — interactively — ask to continue at the user's own risk. Read
+/// failures (manifest, metrics) never block the start: the check is advice,
+/// not enforcement.
+fn confirm_start_resources(
+    manager: &AppManager,
+    ctx: &UserContext,
+    reference: &str,
+    config: &Config,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::manifest::Manifest;
+    use asc_daemon::daemon::pkg::settings::locate_installed;
+
+    // Missing/foreign apps: let `start` report the proper error.
+    let Ok(meta) = manager.get_authorized(ctx, reference) else {
+        return Ok(());
+    };
+    let Ok(app_dir) = manager.store().app_dir(&meta.id) else {
+        return Ok(());
+    };
+    let Ok((manifest_dir, _)) = locate_installed(config, &meta, &app_dir) else {
+        return Ok(());
+    };
+    let Ok(manifest) = Manifest::load(&manifest_dir) else {
+        return Ok(());
+    };
+    let Some(req) = &manifest.requirements else {
+        return Ok(());
+    };
+    let Ok(metrics) = monitor::system::snapshot_blocking() else {
+        return Ok(());
+    };
+    let shortages = resource_shortages(req, &metrics, &app_dir);
+    if shortages.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "{}",
+        tf2(Msg::AppLowResources, &meta.id, shortages.join(", "))
+    );
+    // Scripts get the warning on stderr and proceed; a human decides.
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(());
+    }
+    let answer = read_line(t(Msg::AppStartRiskPrompt))?;
+    if !matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
+        anyhow::bail!(tf(Msg::AppStartDeclined, &meta.id));
+    }
+    Ok(())
+}
+
+/// Requirements the host cannot cover right now, as language-neutral
+/// `need > have` figures ("RAM 4.0 GiB > 1.2 GiB"). Unparsable requirement
+/// strings are skipped — a broken manifest must not block the start.
+fn resource_shortages(
+    req: &asc_daemon::daemon::pkg::manifest::Requirements,
+    metrics: &monitor::system::SystemMetrics,
+    app_dir: &std::path::Path,
+) -> Vec<String> {
+    use asc_daemon::daemon::pkg::settings::parse_size;
+    let mut short = Vec::new();
+    if let Some(need) = req.ram.as_deref().and_then(|s| parse_size(s).ok())
+        && need > metrics.memory.available
+    {
+        short.push(format!(
+            "RAM {} > {}",
+            monitor::human_bytes(need),
+            monitor::human_bytes(metrics.memory.available)
+        ));
+    }
+    if let Some(need) = req.cpu
+        && need > metrics.cpu.cores as f64
+    {
+        short.push(format!("CPU {need} > {}", metrics.cpu.cores));
+    }
+    if let Some(need) = req.disk.as_deref().and_then(|s| parse_size(s).ok()) {
+        // The filesystem the app directory lives on: longest matching mount.
+        let disk = metrics
+            .disks
+            .iter()
+            .filter(|d| app_dir.starts_with(&d.mount))
+            .max_by_key(|d| d.mount.len());
+        if let Some(disk) = disk
+            && need > disk.available
+        {
+            short.push(format!(
+                "disk {} > {} ({})",
+                monitor::human_bytes(need),
+                monitor::human_bytes(disk.available),
+                disk.mount
+            ));
+        }
+    }
+    short
+}
+
 /// "cpu ≤ 2, ram ≤ 512.0 MiB, disk ≤ 10.0 GiB" — set quota limits only.
 fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
     let mut parts = Vec::new();
@@ -701,7 +841,7 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     let id = &manager.get_authorized(&ctx, reference)?.id;
     let app_dir = manager.store().app_dir(id)?;
 
-    let manifest_dir = manifest_dir_of(config, id, &app_dir)?;
+    let manifest_dir = manifest_dir_of(config, &app_dir)?;
     let manifest = Manifest::load(&manifest_dir)?;
     let defs = match SettingsFile::load_for(&manifest_dir, &manifest)? {
         Some(file) if !file.settings.is_empty() => file.settings,
@@ -1112,4 +1252,66 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resource_shortages;
+    use asc_daemon::daemon::monitor::system::{
+        CpuMetrics, DiskMetrics, MemoryMetrics, SystemMetrics,
+    };
+
+    #[test]
+    fn shortages_cover_ram_cpu_and_the_apps_filesystem() {
+        let req: asc_daemon::daemon::pkg::manifest::Requirements =
+            serde_yaml::from_str("{ ram: 4G, disk: 80G, cpu: 4 }").unwrap();
+        let metrics = SystemMetrics {
+            timestamp: 0,
+            cpu: CpuMetrics {
+                usage_percent: None,
+                cores: 2,
+                load1: 0.0,
+                load5: 0.0,
+                load15: 0.0,
+            },
+            memory: MemoryMetrics {
+                total: 8 << 30,
+                used: 7 << 30,
+                available: 1 << 30,
+                swap_total: 0,
+                swap_used: 0,
+            },
+            disks: vec![
+                DiskMetrics {
+                    mount: "/".into(),
+                    filesystem: "ext4".into(),
+                    total: 100 << 30,
+                    used: 50 << 30,
+                    available: 50 << 30,
+                },
+                DiskMetrics {
+                    mount: "/asc".into(),
+                    filesystem: "ext4".into(),
+                    total: 200 << 30,
+                    used: 100 << 30,
+                    available: 100 << 30,
+                },
+            ],
+            network: vec![],
+            uptime_secs: 0,
+        };
+        // RAM 4G > 1G free and CPU 4 > 2 cores are short; the disk check
+        // uses the longest matching mount (/asc, 100G free) — enough for 80G.
+        let short = resource_shortages(&req, &metrics, std::path::Path::new("/asc/apps/cs2"));
+        assert_eq!(short.len(), 2, "got: {short:?}");
+        assert!(short[0].starts_with("RAM"), "got: {short:?}");
+        assert!(short[1].starts_with("CPU"), "got: {short:?}");
+
+        // The same app on the root filesystem (50G free) is short on disk.
+        let short = resource_shortages(&req, &metrics, std::path::Path::new("/opt/apps/cs2"));
+        assert!(
+            short.iter().any(|s| s.starts_with("disk")),
+            "got: {short:?}"
+        );
+    }
 }

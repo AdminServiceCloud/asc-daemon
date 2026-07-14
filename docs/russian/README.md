@@ -9,7 +9,7 @@
 
 ## 📌 О проекте
 
-**Open source утилита для управления runtime-приложениями в Linux**: демон и CLI на Rust, которые запускают и обслуживают приложения любого рантайма — Docker-контейнеры, нативные приложения (systemd) и обычные процессы. В комплекте: пакетный менеджер, бекапы, мониторинг, MCP-сервер для AI. Работает автономно через CLI или как агент SaaS-платформы [AdminService.Cloud](https://adminservice.cloud).
+**Open source утилита для управления runtime-приложениями в Linux**: демон и CLI на Rust, которые запускают и обслуживают приложения любого рантайма — Docker-контейнеры, нативные приложения (systemd) и обычные процессы. В комплекте: пакетный менеджер, бекапы, мониторинг, MCP-сервер для AI. Работает автономно через CLI или как агент SaaS-платформы [AdminService.Cloud](https://adminservice.cloud). Запускается в любом Linux-окружении, включая **WSL** (Windows Subsystem for Linux).
 
 ### ✨ Возможности
 
@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 
 ### 📋 Требования
 
-- 🐧 **ОС**: сейчас поддерживаются **Debian и Ubuntu**; в перспективе — остальные дистрибутивы (CentOS/RHEL, Fedora, Arch и др.) и macOS
+- 🐧 **ОС**: сейчас поддерживаются **Debian и Ubuntu**, в том числе под **WSL** (Windows Subsystem for Linux); в перспективе — остальные дистрибутивы (CentOS/RHEL, Fedora, Arch и др.) и macOS
 - 🧬 **Архитектуры**: x86_64, ARM64, ARMv7
 - 🔑 Root/sudo для установки; Docker ставится автоматически при необходимости
 - ⚙️ systemd (для `asc service` и автозапуска)
@@ -130,7 +130,7 @@ Roadmap всего проекта ведётся в репозитории **asc
 
 ## 🤝 Контрибьют
 
-Правила участия — в [CONTRIBUTING.md](CONTRIBUTING.md) ([English](../../CONTRIBUTING.md)); CI и релизы — GitHub Actions (`.github/workflows/`). Каждый pull request автоматически получает ревью от владельца кода ([@statebyte](https://github.com/statebyte)) через [CODEOWNERS](../../.github/CODEOWNERS).
+Правила участия — в [CONTRIBUTING.md](CONTRIBUTING.md) ([English](../../CONTRIBUTING.md)); CI и релизы — GitHub Actions (`.github/workflows/`). Разрабатываете на Windows? Используйте **WSL** (Ubuntu) для сборки и тестов проекта: `cargo build` / `cargo test` выполняются в WSL, а `cargo check` / `clippy` работают с хоста под Linux-таргет (см. `.cargo/config.toml`). Каждый pull request автоматически получает ревью от владельца кода ([@statebyte](https://github.com/statebyte)) через [CODEOWNERS](../../.github/CODEOWNERS).
 
 Перед участием прочитайте наш [🤝 Кодекс поведения](CODE_OF_CONDUCT.md) — мы за доброжелательное сообщество без харассмента.
 

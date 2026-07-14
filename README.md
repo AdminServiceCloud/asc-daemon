@@ -9,7 +9,7 @@
 
 ## 📌 About
 
-**Open source utility for managing runtime applications on Linux**: a daemon and CLI written in Rust that launch and maintain applications of any runtime — Docker containers, native applications (systemd) and plain processes. Included: a package manager, backups, monitoring, and an MCP server for AI. Works standalone via the CLI or as an agent of the [AdminService.Cloud](https://adminservice.cloud) SaaS platform.
+**Open source utility for managing runtime applications on Linux**: a daemon and CLI written in Rust that launch and maintain applications of any runtime — Docker containers, native applications (systemd) and plain processes. Included: a package manager, backups, monitoring, and an MCP server for AI. Works standalone via the CLI or as an agent of the [AdminService.Cloud](https://adminservice.cloud) SaaS platform. Runs in any Linux environment, including **WSL** (Windows Subsystem for Linux).
 
 ### ✨ Key features
 
@@ -46,7 +46,7 @@ You can also configure it after a silent install: `asc-updater` + `/etc/asc/conf
 
 ### 📋 Requirements
 
-- 🐧 **OS**: **Debian and Ubuntu** are supported today; other distributions (CentOS/RHEL, Fedora, Arch, etc.) and macOS are planned
+- 🐧 **OS**: **Debian and Ubuntu** are supported today, including under **WSL** (Windows Subsystem for Linux); other distributions (CentOS/RHEL, Fedora, Arch, etc.) and macOS are planned
 - 🧬 **Architectures**: x86_64, ARM64, ARMv7
 - 🔑 Root/sudo for installation; Docker is installed automatically when needed
 - ⚙️ systemd (for `asc service` and autostart)
@@ -128,7 +128,7 @@ If you want to say **thank you** or support the active development of asc-daemon
 
 ## 🤝 Contributing
 
-Contribution rules are in [CONTRIBUTING.md](CONTRIBUTING.md); CI and releases run on GitHub Actions (`.github/workflows/`). Every pull request automatically gets a review from the code owner ([@statebyte](https://github.com/statebyte)) via [CODEOWNERS](.github/CODEOWNERS).
+Contribution rules are in [CONTRIBUTING.md](CONTRIBUTING.md); CI and releases run on GitHub Actions (`.github/workflows/`). Developing on Windows? Use **WSL** (Ubuntu) to build and test the project: `cargo build` / `cargo test` run in WSL, while `cargo check` / `clippy` work from the host against the Linux target (see `.cargo/config.toml`). Every pull request automatically gets a review from the code owner ([@statebyte](https://github.com/statebyte)) via [CODEOWNERS](.github/CODEOWNERS).
 
 Please read our [🤝 Code of Conduct](docs/english/CODE_OF_CONDUCT.md) before participating — we are committed to a welcoming and harassment-free community.
 

@@ -107,7 +107,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     let manifest = Manifest::load(&new_manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, &id)?;
     let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
-    let quota = load_quota(settings.as_ref())?;
+    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
 
     // Point of no return: swap the repository, keeping the old one around
     // until the new runtime is provisioned.
@@ -203,7 +203,7 @@ fn rollback(
     let restore = locate_manifest(repo_dir, entry_path, stack_app).and_then(|(dir, _)| {
         let manifest = Manifest::load(&dir)?;
         let settings = SettingsFile::load_for(&dir, &manifest)?;
-        let quota = load_quota(settings.as_ref())?;
+        let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
         provision(
             &manifest,
             id,

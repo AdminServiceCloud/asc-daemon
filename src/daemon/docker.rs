@@ -143,14 +143,49 @@ pub fn running(cfg: &DockerConfig, container: &str) -> Result<bool> {
     })
 }
 
-/// Environment the container was created with (`Config.Env` from inspect —
-/// includes the image's own variables, not just the ones passed at create).
-/// `None` when the container does not exist (404).
-pub fn container_env(cfg: &DockerConfig, container: &str) -> Result<Option<Vec<String>>> {
+/// The parts of a container's configuration the daemon manages, read back
+/// from inspect for settings-drift detection (see `pkg::refresh`).
+#[derive(Debug)]
+pub struct AppliedConfig {
+    /// `Config.Env` — includes the image's own variables.
+    pub env: Vec<String>,
+    /// `HostConfig.Binds`, sorted.
+    pub binds: Vec<String>,
+    /// Published port keys (`"27015/tcp"`), sorted.
+    pub ports: Vec<String>,
+    /// `HostConfig.NanoCpus`; 0 = unlimited.
+    pub nano_cpus: i64,
+    /// `HostConfig.Memory`, bytes; 0 = unlimited.
+    pub memory: i64,
+    /// `Config.Cmd` — a `start_command` override lands here.
+    pub cmd: Option<Vec<String>>,
+}
+
+/// Inspect the daemon-managed configuration of a container. `None` when the
+/// container does not exist (404).
+pub fn container_applied(cfg: &DockerConfig, container: &str) -> Result<Option<AppliedConfig>> {
     block_on(async {
         let docker = connect(cfg)?;
         match docker.inspect_container(container, None).await {
-            Ok(info) => Ok(Some(info.config.and_then(|c| c.env).unwrap_or_default())),
+            Ok(info) => {
+                let config = info.config.unwrap_or_default();
+                let host = info.host_config.unwrap_or_default();
+                let mut ports: Vec<String> = host
+                    .port_bindings
+                    .map(|map| map.into_keys().collect())
+                    .unwrap_or_default();
+                ports.sort();
+                let mut binds = host.binds.unwrap_or_default();
+                binds.sort();
+                Ok(Some(AppliedConfig {
+                    env: config.env.unwrap_or_default(),
+                    binds,
+                    ports,
+                    nano_cpus: host.nano_cpus.unwrap_or(0),
+                    memory: host.memory.unwrap_or(0),
+                    cmd: config.cmd,
+                }))
+            }
             Err(e) if status_of(&e) == Some(404) => Ok(None),
             Err(e) => Err(friendly(cfg, e)),
         }

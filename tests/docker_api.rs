@@ -107,7 +107,7 @@ fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String
     if path.ends_with("/json") {
         return (
             "200 OK",
-            r#"{"State":{"Running":true},"Config":{"Env":["PATH=/usr/bin","CS2_STARTMAP=de_dust2"]}}"#.into(),
+            r#"{"State":{"Running":true},"Config":{"Env":["PATH=/usr/bin","CS2_STARTMAP=de_dust2"]},"HostConfig":{"PortBindings":{"27015/tcp":[{"HostIp":"","HostPort":"27015"}]},"NanoCpus":0,"Memory":0}}"#.into(),
         );
     }
     if method == "DELETE" {
@@ -200,13 +200,22 @@ fn create_sends_container_spec() {
 }
 
 #[test]
-fn container_env_reads_inspect_and_tolerates_missing() {
+fn container_applied_reads_inspect_and_tolerates_missing() {
     let (cfg, _dir, _hits) = test_cfg();
 
-    let env = docker::container_env(&cfg, "asc-demo").unwrap().unwrap();
-    assert_eq!(env, ["PATH=/usr/bin", "CS2_STARTMAP=de_dust2"]);
+    let applied = docker::container_applied(&cfg, "asc-demo")
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.env, ["PATH=/usr/bin", "CS2_STARTMAP=de_dust2"]);
+    assert_eq!(applied.ports, ["27015/tcp"]);
+    assert!(applied.binds.is_empty());
+    assert_eq!((applied.nano_cpus, applied.memory), (0, 0));
     // A missing container (404) reads as None — the caller recreates it.
-    assert!(docker::container_env(&cfg, "missing").unwrap().is_none());
+    assert!(
+        docker::container_applied(&cfg, "missing")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -225,8 +234,9 @@ fn engine_errors_are_not_reported_as_unreachable() {
     );
 }
 
-/// DMN-017: a stopped container whose env drifted from settings.json is
-/// recreated on refresh; matching env is left alone.
+/// DMN-017/030: a stopped container whose configuration (env, ports, quota
+/// override…) drifted from settings.json is recreated on refresh; a
+/// matching configuration is left alone.
 #[test]
 fn settings_drift_recreates_the_container() {
     use asc_daemon::daemon::apps::meta::{Owner, Runtime};
@@ -240,7 +250,7 @@ fn settings_drift_recreates_the_container() {
     config.docker = docker_cfg;
 
     let store = AppStore::new(apps.path().to_path_buf());
-    let meta = AppMeta {
+    let mut meta = AppMeta {
         id: "web".into(),
         name: "web".into(),
         custom_name: None,
@@ -270,39 +280,63 @@ fn settings_drift_recreates_the_container() {
     std::fs::write(
         app_dir.join("repository/asc.settings.yaml"),
         "settings:\n  - { key: map, type: enum, values: [de_dust2, de_mirage], \
-         default: de_dust2, env: CS2_STARTMAP }\n",
+         default: de_dust2, env: CS2_STARTMAP }\n  - { key: game_port, type: ports, \
+         default: [27015] }\n",
     )
     .unwrap();
+    let deletes = || {
+        hits.lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.starts_with("DELETE"))
+            .count()
+    };
 
-    // The value matches the container's env (the mock inspect reports
-    // CS2_STARTMAP=de_dust2): nothing to do.
+    // Everything matches what the mock inspect reports (CS2_STARTMAP=
+    // de_dust2, port 27015/tcp published, no quota): nothing to do.
     std::fs::write(
         app_dir.join("config/settings.json"),
-        r#"{"map":"de_dust2"}"#,
+        r#"{"map":"de_dust2","game_port":[27015]}"#,
     )
     .unwrap();
-    refresh::apply_settings(&config, &meta, &app_dir).unwrap();
-    let seen = hits.lock().unwrap().clone();
-    assert!(
-        !seen.iter().any(|h| h.starts_with("DELETE")),
-        "matching env must not recreate the container, saw: {seen:?}"
-    );
+    assert!(!refresh::apply_settings(&config, &mut meta, &app_dir).unwrap());
+    assert_eq!(deletes(), 0, "matching config must not recreate");
 
     // A changed map drifts from the container env: remove + create.
     std::fs::write(
         app_dir.join("config/settings.json"),
-        r#"{"map":"de_mirage"}"#,
+        r#"{"map":"de_mirage","game_port":[27015]}"#,
     )
     .unwrap();
-    refresh::apply_settings(&config, &meta, &app_dir).unwrap();
+    assert!(refresh::apply_settings(&config, &mut meta, &app_dir).unwrap());
+    assert_eq!(deletes(), 1, "drifted env must recreate the container");
     let seen = hits.lock().unwrap().clone();
-    assert!(
-        seen.iter().any(|h| h.starts_with("DELETE")),
-        "drifted env must remove the old container, saw: {seen:?}"
-    );
     assert!(
         seen.iter().any(|h| h.contains("/containers/create")),
         "drifted env must create a fresh container, saw: {seen:?}"
+    );
+
+    // Changed published ports drift too (DMN-030).
+    std::fs::write(
+        app_dir.join("config/settings.json"),
+        r#"{"map":"de_dust2","game_port":[27016]}"#,
+    )
+    .unwrap();
+    assert!(refresh::apply_settings(&config, &mut meta, &app_dir).unwrap());
+    assert_eq!(deletes(), 2, "changed ports must recreate the container");
+
+    // A quota override drifts as well: the mock reports no limits.
+    std::fs::write(
+        app_dir.join("config/settings.json"),
+        r#"{"map":"de_dust2","game_port":[27015],"$quota":{"max_ram":"1G"}}"#,
+    )
+    .unwrap();
+    assert!(refresh::apply_settings(&config, &mut meta, &app_dir).unwrap());
+    assert_eq!(deletes(), 3, "quota override must recreate the container");
+    assert_eq!(
+        meta.quota.as_ref().and_then(|q| q.ram_bytes),
+        Some(1 << 30),
+        "meta.quota must reflect the applied override"
     );
 }
 

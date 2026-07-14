@@ -30,10 +30,6 @@ pub struct Manifest {
     #[serde(default)]
     pub runtime: RuntimeSpec,
     #[serde(default)]
-    pub ports: Vec<u16>,
-    #[serde(default)]
-    pub volumes: Vec<String>,
-    #[serde(default)]
     pub database: Option<DatabaseSpec>,
     #[serde(default)]
     pub requirements: Option<Requirements>,
@@ -282,15 +278,24 @@ runtime:
   image: nginx:1.27
   stdin: true
   tty: true
-ports: [8080]
-volumes: [/data]
 "#;
         let m: Manifest = serde_yaml::from_str(yaml).unwrap();
         m.validate().unwrap();
         assert_eq!(m.app_type, AppType::Docker);
         assert_eq!(m.runtime.image.as_deref(), Some("nginx:1.27"));
         assert!(m.runtime.stdin && m.runtime.tty);
-        assert_eq!(m.ports, [8080]);
+    }
+
+    #[test]
+    fn ports_and_volumes_in_manifest_are_rejected() {
+        // Ports and volumes moved to asc.settings.yaml (setting types
+        // `ports` / `volumes`) — a manifest still declaring them must fail
+        // loudly, not silently ignore the sections.
+        for extra in ["ports: [8080]", "volumes: [/data]"] {
+            let yaml =
+                format!("name: x\nversion: '1'\ntype: docker\nruntime:\n  image: i\n{extra}\n");
+            assert!(serde_yaml::from_str::<Manifest>(&yaml).is_err(), "{extra}");
+        }
     }
 
     #[test]

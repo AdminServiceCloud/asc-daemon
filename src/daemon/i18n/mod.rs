@@ -171,14 +171,20 @@ pub enum Msg {
     SettingsNone,
     SettingsHeader,
     SettingsPromptSelect,
+    SettingsPromptCategory,
+    SettingsCategoryEmpty,
     SettingsPromptValue,
+    SettingsValueOrReset,
     SettingsSaved,
+    SettingsReset,
     SettingsRestartHint,
     ErrSettingNumber,
     ErrSettingRange,
     ErrSettingBool,
     ErrSettingEnum,
     ErrSettingLength,
+    ErrSettingPort,
+    ErrSettingVolume,
     ErrQuotaSize,
     ErrQuotaCpu,
 }
@@ -506,8 +512,24 @@ pub fn t(msg: Msg) -> &'static str {
             "Setting number to change (Enter — done): ",
             "Номер настройки для изменения (Enter — готово): ",
         ),
+        Msg::SettingsPromptCategory => (
+            "Category number (Enter — done): ",
+            "Номер категории (Enter — готово): ",
+        ),
+        Msg::SettingsCategoryEmpty => (
+            "the package defines no settings in this category",
+            "пакет не определяет настроек в этой категории",
+        ),
         Msg::SettingsPromptValue => ("New value for '{}'{}: ", "Новое значение '{}'{}: "),
+        Msg::SettingsValueOrReset => (
+            "New value for {} (Enter — keep, '-' — reset to the package default): ",
+            "Новое значение {} (Enter — оставить, '-' — сброс к значению пакета): ",
+        ),
         Msg::SettingsSaved => ("Setting '{}' = {} saved", "Настройка '{}' = {} сохранена"),
+        Msg::SettingsReset => (
+            "Setting '{}' reset to the package default",
+            "Настройка '{}' сброшена к значению пакета",
+        ),
         Msg::SettingsRestartHint => (
             "Restart the app to apply the changes: asc app restart {}",
             "Перезапустите приложение, чтобы применить изменения: asc app restart {}",
@@ -528,6 +550,14 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ErrSettingLength => (
             "value length must be in range {}",
             "длина значения должна быть в диапазоне {}",
+        ),
+        Msg::ErrSettingPort => (
+            "enter port numbers 1–65535, separated by spaces or commas",
+            "введите номера портов 1–65535 через пробел или запятую",
+        ),
+        Msg::ErrSettingVolume => (
+            "invalid volume '{}': expected /container/path[:host_folder|:/host/path] or name:/container/path[:ro]",
+            "неверный том '{}': ожидается /путь/в/контейнере[:папка|:/путь/хоста] или имя:/путь/в/контейнере[:ro]",
         ),
         Msg::ErrQuotaSize => (
             "invalid size '{}' in quota (expected e.g. 512M, 2G, 1T)",

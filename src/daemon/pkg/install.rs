@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
-use super::settings::{SettingValues, SettingsFile};
+use super::settings::{SettingKind, SettingValues, SettingsFile};
 use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Quota, Runtime};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
@@ -364,7 +364,7 @@ fn install_one(
     enforce_install_policy(config, ctx, &manifest, name)?;
 
     let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
-    let quota = load_quota(settings.as_ref())?;
+    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
 
     for sub in ["config", "data"] {
         fs::create_dir_all(app_dir.join(sub))
@@ -565,21 +565,33 @@ pub(super) fn locate_manifest(
     Ok((dir, Some(stack)))
 }
 
-/// Normalized quota from a parsed settings file, if any.
-pub(super) fn load_quota(settings: Option<&SettingsFile>) -> Result<Option<Quota>> {
-    settings
-        .and_then(|s| s.quota.as_ref())
-        .map(|q| q.normalize())
-        .transpose()
+/// Normalized quota: the package `quota:` section with the user's `$quota`
+/// overrides (the quota category of `asc app settings`) applied field-wise.
+pub(super) fn load_quota(
+    settings: Option<&SettingsFile>,
+    config_dir: &Path,
+) -> Result<Option<Quota>> {
+    let package = settings.and_then(|s| s.quota.as_ref());
+    let user = SettingValues::load(config_dir)?.quota_override()?;
+    let merged = match (package, user) {
+        (None, None) => return Ok(None),
+        (Some(package), None) => package.clone(),
+        (None, Some(user)) => user,
+        (Some(package), Some(user)) => super::settings::QuotaSpec {
+            max_cpu: user.max_cpu.or(package.max_cpu),
+            max_ram: user.max_ram.clone().or_else(|| package.max_ram.clone()),
+            max_disk: user.max_disk.clone().or_else(|| package.max_disk.clone()),
+        },
+    };
+    merged.normalize().map(Some)
 }
 
 /// Prepare the runtime described by the manifest and return its meta form.
 /// The quota is enforced for Docker at container creation; native/process
 /// runtimes record it in meta.json (cgroup enforcement is a next increment).
-/// From `settings` (asc.settings.yaml) two things apply: a `start_command`
-/// (DMN-018) overrides what the runtime runs — the container command for
-/// Docker, `runtime.start` for native — and setting values with `env:` go
-/// into the container environment (DMN-017).
+/// Everything user-adjustable comes from the settings (asc.settings.yaml +
+/// settings.json): env, published ports, volumes, the quota and the start
+/// command — asc.yaml describes only the runtime itself.
 pub(super) fn provision(
     manifest: &Manifest,
     id: &str,
@@ -589,17 +601,18 @@ pub(super) fn provision(
     quota: Option<&Quota>,
     settings: Option<&SettingsFile>,
 ) -> Result<Runtime> {
-    let env_pairs = settings_env_pairs(settings, &app_dir.join("config"))?;
-    let start_command = settings
-        .and_then(|s| s.start_command.as_deref())
-        .map(|c| interpolate_env(c, &env_pairs))
+    let inputs = runtime_inputs(settings, &app_dir.join("config"))?;
+    let start_command = inputs
+        .start_command
+        .as_deref()
+        .map(|c| interpolate_env(c, &inputs.env))
         .transpose()?;
     match manifest.app_type {
         AppType::Docker => {
             let container = format!("asc-{id}");
             docker_create(
                 manifest,
-                env_pairs,
+                &inputs,
                 &container,
                 app_dir,
                 docker_cfg,
@@ -622,7 +635,7 @@ pub(super) fn provision(
 /// (setting values with `env:` keys, defaults included). A reference to an
 /// unknown variable — or one without a value — fails the install: a typo
 /// must not reach the runtime as a broken command.
-fn interpolate_env(command: &str, env: &[(String, String)]) -> Result<String> {
+pub(super) fn interpolate_env(command: &str, env: &[(String, String)]) -> Result<String> {
     let mut out = String::with_capacity(command.len());
     let mut rest = command;
     while let Some(start) = rest.find("${") {
@@ -657,29 +670,88 @@ fn process_runtime(start: &str) -> Runtime {
     }
 }
 
-/// The app's environment (DMN-017): `(ENV_NAME, value)` for every setting
-/// that declares `env:`. Values come from `<config_dir>/settings.json` with
-/// the package defaults filled in for keys the user has not set — so the env
-/// is complete even before the first settings edit. The settings file is the
-/// **only** env source: asc.yaml has no `env:` section.
-pub(super) fn settings_env_pairs(
-    settings: Option<&SettingsFile>,
-    config_dir: &Path,
-) -> Result<Vec<(String, String)>> {
-    let Some(settings) = settings.filter(|s| !s.settings.is_empty()) else {
-        return Ok(Vec::new());
-    };
-    let mut values = SettingValues::load(config_dir)?;
-    values.merge_defaults(&settings.settings);
-    Ok(values.env_pairs(&settings.settings))
+/// Everything the runtime takes from the settings (DMN-017, DMN-030): env
+/// pairs, published ports, volume entries and the effective start command.
+/// Values come from `<config_dir>/settings.json` with the package defaults
+/// filled in for keys the user has not set — so the inputs are complete even
+/// before the first settings edit. The settings are the **only** source:
+/// asc.yaml has no `env:`, `ports:` or `volumes:` sections.
+pub(super) struct RuntimeInputs {
+    /// `(ENV_NAME, value)` for every setting with an `env:` key.
+    pub env: Vec<(String, String)>,
+    /// Flattened values of every `type: ports` setting.
+    pub ports: Vec<u16>,
+    /// Flattened values of every `type: volumes` setting.
+    pub volumes: Vec<String>,
+    /// The user's `$start_command` override, else the package's.
+    pub start_command: Option<String>,
 }
 
-/// Create (but do not start) the container via the Docker Engine API: ports,
-/// env (from the settings), volumes mapped under the app directory, quota
-/// limits.
+pub(super) fn runtime_inputs(
+    settings: Option<&SettingsFile>,
+    config_dir: &Path,
+) -> Result<RuntimeInputs> {
+    let mut values = SettingValues::load(config_dir)?;
+    let Some(settings) = settings else {
+        return Ok(RuntimeInputs {
+            env: Vec::new(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
+            start_command: values.start_command_override().map(str::to_string),
+        });
+    };
+    values.merge_defaults(&settings.settings);
+    let mut ports = Vec::new();
+    let mut volumes = Vec::new();
+    for def in &settings.settings {
+        let Some(value) = values.get(&def.key) else {
+            continue;
+        };
+        match def.kind {
+            SettingKind::Ports => {
+                let list = value
+                    .as_array()
+                    .with_context(|| format!("setting '{}' must be a list of ports", def.key))?;
+                for item in list {
+                    let port = item
+                        .as_u64()
+                        .and_then(|p| u16::try_from(p).ok())
+                        .filter(|p| *p != 0)
+                        .with_context(|| format!("setting '{}': invalid port {item}", def.key))?;
+                    ports.push(port);
+                }
+            }
+            SettingKind::Volumes => {
+                let list = value
+                    .as_array()
+                    .with_context(|| format!("setting '{}' must be a list of volumes", def.key))?;
+                for item in list {
+                    let entry = item
+                        .as_str()
+                        .with_context(|| format!("setting '{}': invalid volume {item}", def.key))?;
+                    volumes.push(entry.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let start_command = values
+        .start_command_override()
+        .map(str::to_string)
+        .or_else(|| settings.start_command.clone());
+    Ok(RuntimeInputs {
+        env: values.env_pairs(&settings.settings),
+        ports,
+        volumes,
+        start_command,
+    })
+}
+
+/// Create (but do not start) the container via the Docker Engine API: env,
+/// published ports, volumes and quota limits all come from the settings.
 fn docker_create(
     manifest: &Manifest,
-    env_pairs: Vec<(String, String)>,
+    inputs: &RuntimeInputs,
     container: &str,
     app_dir: &Path,
     docker_cfg: &DockerConfig,
@@ -691,13 +763,14 @@ fn docker_create(
         .image
         .as_deref()
         .expect("validated: docker manifests have an image");
-    let env: Vec<String> = env_pairs
-        .into_iter()
+    let env: Vec<String> = inputs
+        .env
+        .iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
 
     let mut binds = Vec::new();
-    for volume in &manifest.volumes {
+    for volume in &inputs.volumes {
         binds.push(volume_bind(volume, app_dir)?);
     }
 
@@ -707,7 +780,7 @@ fn docker_create(
             name: container,
             image,
             env,
-            ports: manifest.ports.clone(),
+            ports: inputs.ports.clone(),
             binds,
             // 1 core = 1e9 NanoCpus (Docker's own `--cpus` scale).
             nano_cpus: quota
@@ -726,51 +799,75 @@ fn docker_create(
 /// files inside the app directory.
 const RESERVED_VOLUME_DIRS: [&str; 3] = ["repository", "config", "meta.json"];
 
-/// Bind string for one manifest `volumes` entry. Three forms are supported:
+/// One parsed volume entry. Three forms are supported:
 ///
 /// - `/container/path` — private app data: mounted from the `data` folder of
-///   the app directory (`/asc/apps/<id>/data`, created here);
-/// - `/container/path:folder` — same, but the host folder after the colon is
-///   used instead of `data` (for packages with several volumes);
+///   the app directory (`/asc/apps/<id>/data`);
+/// - `/container/path:host` — same, but the host side after the colon is
+///   used instead of `data`: a plain folder name lands inside the app
+///   directory (`/asc/apps/<id>/<folder>`), an absolute path is a host
+///   machine path used verbatim;
 /// - `name:/container/path[:ro|:rw]` — a Docker **named volume**, passed to
 ///   the Engine verbatim (it creates the volume on first use). Named volumes
 ///   are how several apps share data — e.g. one game-files volume written by
 ///   a master app and mounted read-only by every server instance.
-fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
+enum Volume<'a> {
+    /// `(container path, host side)`.
+    Private(&'a str, HostSide<'a>),
+    Named(&'a str),
+}
+
+enum HostSide<'a> {
+    /// A folder inside the app directory (`data` by default).
+    AppFolder(&'a str),
+    /// An absolute host path, mounted verbatim.
+    HostPath(&'a str),
+}
+
+/// Syntax check shared by the installer and the settings editor: parses one
+/// volume entry without touching the filesystem.
+pub(super) fn validate_volume(volume: &str) -> Result<()> {
+    parse_volume(volume).map(|_| ())
+}
+
+fn parse_volume(volume: &str) -> Result<Volume<'_>> {
     let invalid = || {
         anyhow::anyhow!(
-            "invalid volume '{volume}': expected /container/path[:host_folder] \
+            "invalid volume '{volume}': expected /container/path[:host_folder|:/host/path] \
              or name:/container/path[:ro]"
         )
     };
     if volume.starts_with('/') {
-        let (target, folder) = match volume.split_once(':') {
-            Some((target, folder)) => (target, folder),
+        let (target, host) = match volume.split_once(':') {
+            Some((target, host)) => (target, host),
             None => (volume, "data"),
         };
-        let folder_ok = !folder.is_empty()
-            && folder
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-            && folder != "."
-            && folder != ".."
-            && !RESERVED_VOLUME_DIRS.contains(&folder);
-        if !folder_ok || target.len() < 2 {
+        if target.len() < 2 {
             return Err(invalid());
         }
-        let host = app_dir.join(folder);
-        fs::create_dir_all(&host)
-            .with_context(|| format!("cannot create volume directory {}", host.display()))?;
-        // Images run under arbitrary non-root uids (`steam`, `www-data`, …)
-        // and bind mounts keep host ownership — a root-owned 0755 directory
-        // is read-only for them. World-writable applies to this leaf
-        // directory only; the app directory above stays restrictive.
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
-                .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
+        if host.starts_with('/') {
+            // An absolute host path: reject traversal, require a real path.
+            let clean = Path::new(host);
+            if host.len() < 2
+                || clean
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(invalid());
+            }
+            return Ok(Volume::Private(target, HostSide::HostPath(host)));
         }
-        return Ok(format!("{}:{}", host.display(), target));
+        let folder_ok = !host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            && host != "."
+            && host != ".."
+            && !RESERVED_VOLUME_DIRS.contains(&host);
+        if !folder_ok {
+            return Err(invalid());
+        }
+        return Ok(Volume::Private(target, HostSide::AppFolder(host)));
     }
     let (name, target) = volume.split_once(':').ok_or_else(invalid)?;
     // Docker volume names: [a-zA-Z0-9][a-zA-Z0-9_.-]*
@@ -788,7 +885,42 @@ fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
     if !name_ok || !path.starts_with('/') {
         return Err(invalid());
     }
-    Ok(volume.to_string())
+    Ok(Volume::Named(volume))
+}
+
+/// Bind string for one volume entry; creates the host directory when needed.
+pub(super) fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
+    let (host, target) = match parse_volume(volume)? {
+        Volume::Named(entry) => return Ok(entry.to_string()),
+        Volume::Private(target, HostSide::AppFolder(folder)) => (app_dir.join(folder), target),
+        Volume::Private(target, HostSide::HostPath(path)) => {
+            let host = PathBuf::from(path);
+            // A pre-existing host directory keeps its ownership and mode —
+            // the admin manages it; only a freshly created one is opened up
+            // for the container's arbitrary uid.
+            if !host.exists() {
+                fs::create_dir_all(&host).with_context(|| {
+                    format!("cannot create volume directory {}", host.display())
+                })?;
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
+                    .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
+            }
+            return Ok(format!("{path}:{target}"));
+        }
+    };
+    fs::create_dir_all(&host)
+        .with_context(|| format!("cannot create volume directory {}", host.display()))?;
+    // Images run under arbitrary non-root uids (`steam`, `www-data`, …)
+    // and bind mounts keep host ownership — a root-owned 0755 directory
+    // is read-only for them. World-writable applies to this leaf
+    // directory only; the app directory above stays restrictive.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
+            .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
+    }
+    Ok(format!("{}:{}", host.display(), target))
 }
 
 /// Run package install commands (native/utility) from the manifest directory.
@@ -847,8 +979,15 @@ mod tests {
         assert_eq!(bind, format!("{}:/var/lib/postgresql", host.display()));
         assert!(host.is_dir(), "the host directory must be created");
 
+        // An absolute path after the colon is a host machine path, verbatim.
+        let host_dir = dir.path().join("srv").join("maps");
+        let entry = format!("/opt/maps:{}", host_dir.display());
+        let bind = volume_bind(&entry, dir.path()).unwrap();
+        assert_eq!(bind, format!("{}:/opt/maps", host_dir.display()));
+        assert!(host_dir.is_dir(), "the host directory must be created");
+
         // Folder names that would collide with the daemon's own files — or
-        // escape the app directory — are rejected.
+        // escape the app directory — are rejected; so is host-path traversal.
         for bad in [
             "/data:repository",
             "/data:config",
@@ -856,6 +995,7 @@ mod tests {
             "/data:..",
             "/data:a/b",
             "/data:",
+            "/data:/srv/../etc",
         ] {
             assert!(volume_bind(bad, dir.path()).is_err(), "must reject '{bad}'");
         }
@@ -898,34 +1038,87 @@ mod tests {
     }
 
     #[test]
-    fn settings_are_the_only_env_source() {
+    fn settings_are_the_only_runtime_input_source() {
         use super::super::settings::SettingValues;
         let settings: SettingsFile = serde_yaml::from_str(
-            "settings:\n  - { key: map, type: enum, values: [de_dust2, de_mirage], default: de_dust2, env: CS2_STARTMAP }\n  - { key: rcon, type: secret, env: CS2_RCONPW }\n",
+            "settings:\n  - { key: map, type: enum, values: [de_dust2, de_mirage], default: de_dust2, env: CS2_STARTMAP }\n  - { key: rcon, type: secret, env: CS2_RCONPW }\n  - { key: game_port, type: ports, default: [27015], env: CS2_PORT }\n  - { key: game_data, type: volumes, default: [/home/steam/cs2-dedicated] }\n",
         )
         .unwrap();
+        settings.validate().unwrap();
         let dir = tempfile::tempdir().unwrap();
 
-        // No values chosen yet: defaults fill in; valueless settings are absent.
-        let env = settings_env_pairs(Some(&settings), dir.path()).unwrap();
-        assert_eq!(env, [("CS2_STARTMAP".to_string(), "de_dust2".to_string())]);
+        // No values chosen yet: defaults fill in; valueless settings are
+        // absent. A single-port list reaches env as the bare number.
+        let inputs = runtime_inputs(Some(&settings), dir.path()).unwrap();
+        assert_eq!(
+            inputs.env,
+            [
+                ("CS2_STARTMAP".to_string(), "de_dust2".to_string()),
+                ("CS2_PORT".to_string(), "27015".to_string())
+            ]
+        );
+        assert_eq!(inputs.ports, [27015]);
+        assert_eq!(inputs.volumes, ["/home/steam/cs2-dedicated"]);
+        assert_eq!(inputs.start_command, None);
 
-        // User-chosen values win over the defaults.
+        // User-chosen values win over the defaults; the `$start_command`
+        // override becomes the effective start command.
         let mut values = SettingValues::load(dir.path()).unwrap();
         values.set("map", serde_json::json!("de_mirage"));
         values.set("rcon", serde_json::json!("hunter2"));
+        values.set("game_port", serde_json::json!([27016, 27017]));
+        values.set(
+            SettingValues::START_COMMAND_KEY,
+            serde_json::json!("./cs2 -override"),
+        );
         values.save(dir.path()).unwrap();
-        let env = settings_env_pairs(Some(&settings), dir.path()).unwrap();
+        let inputs = runtime_inputs(Some(&settings), dir.path()).unwrap();
         assert_eq!(
-            env,
+            inputs.env,
             [
                 ("CS2_STARTMAP".to_string(), "de_mirage".to_string()),
-                ("CS2_RCONPW".to_string(), "hunter2".to_string())
+                ("CS2_RCONPW".to_string(), "hunter2".to_string()),
+                ("CS2_PORT".to_string(), "27016,27017".to_string())
             ]
         );
+        assert_eq!(inputs.ports, [27016, 27017]);
+        assert_eq!(inputs.start_command.as_deref(), Some("./cs2 -override"));
 
-        // No settings file — no env at all.
-        assert!(settings_env_pairs(None, dir.path()).unwrap().is_empty());
+        // No settings file — nothing but the overrides.
+        let inputs = runtime_inputs(None, dir.path()).unwrap();
+        assert!(inputs.env.is_empty() && inputs.ports.is_empty() && inputs.volumes.is_empty());
+        assert_eq!(inputs.start_command.as_deref(), Some("./cs2 -override"));
+    }
+
+    #[test]
+    fn quota_overrides_win_field_wise() {
+        use super::super::settings::SettingValues;
+        let settings: SettingsFile =
+            serde_yaml::from_str("quota:\n  max_cpu: 2\n  max_ram: 4G\n  max_disk: 100G\n")
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Package quota alone.
+        let quota = load_quota(Some(&settings), dir.path()).unwrap().unwrap();
+        assert_eq!(quota.cpu_cores, Some(2.0));
+        assert_eq!(quota.ram_bytes, Some(4 << 30));
+
+        // A $quota override replaces only the fields it sets.
+        let mut values = SettingValues::load(dir.path()).unwrap();
+        values.set(
+            SettingValues::QUOTA_KEY,
+            serde_json::json!({ "max_ram": "8G" }),
+        );
+        values.save(dir.path()).unwrap();
+        let quota = load_quota(Some(&settings), dir.path()).unwrap().unwrap();
+        assert_eq!(quota.cpu_cores, Some(2.0), "package field survives");
+        assert_eq!(quota.ram_bytes, Some(8 << 30), "override wins");
+        assert_eq!(quota.disk_bytes, Some(100 << 30));
+
+        // An override without a package quota still limits the app.
+        let quota = load_quota(None, dir.path()).unwrap().unwrap();
+        assert_eq!(quota.ram_bytes, Some(8 << 30));
+        assert_eq!(quota.cpu_cores, None);
     }
 
     #[test]

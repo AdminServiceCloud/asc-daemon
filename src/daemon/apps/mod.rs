@@ -214,17 +214,18 @@ impl AppManager {
     pub fn start(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
+        let mut refreshed = false;
         let outcome = if self.state_of(&meta) == RuntimeState::Running {
             Outcome::AlreadyInState
         } else {
-            // Changed settings (DMN-017) land here: a stopped container
-            // whose env drifted from settings.json is recreated first.
-            crate::daemon::pkg::refresh::apply_settings(&self.config, &meta, &dir)?;
+            // Changed settings (DMN-017/030) land here: a stopped container
+            // whose configuration drifted from the settings is recreated.
+            refreshed = crate::daemon::pkg::refresh::apply_settings(&self.config, &mut meta, &dir)?;
             driver::for_runtime(&meta.runtime, &self.config.docker).start(&meta, &dir)?;
             Outcome::Done
         };
         // Persist intent even when already running: survive the next reboot.
-        if meta.desired_state != DesiredState::Running {
+        if refreshed || meta.desired_state != DesiredState::Running {
             meta.desired_state = DesiredState::Running;
             self.store.save(&meta)?;
         }
@@ -250,18 +251,18 @@ impl AppManager {
     pub fn restart(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
-        let driver = driver::for_runtime(&meta.runtime, &self.config.docker);
-        // Docker restart runs as stop + start so changed settings (DMN-017)
-        // apply through the recreate in `apply_settings` — restart is the
-        // documented way to pick up new setting values.
+        // Docker restart runs as stop + start so changed settings (DMN-017/
+        // 030) apply through the recreate in `apply_settings` — restart is
+        // the documented way to pick up new setting values.
+        let mut refreshed = false;
         if matches!(meta.runtime, meta::Runtime::Docker { .. }) {
-            driver.stop(&meta, &dir)?;
-            crate::daemon::pkg::refresh::apply_settings(&self.config, &meta, &dir)?;
-            driver.start(&meta, &dir)?;
+            driver::for_runtime(&meta.runtime, &self.config.docker).stop(&meta, &dir)?;
+            refreshed = crate::daemon::pkg::refresh::apply_settings(&self.config, &mut meta, &dir)?;
+            driver::for_runtime(&meta.runtime, &self.config.docker).start(&meta, &dir)?;
         } else {
-            driver.restart(&meta, &dir)?;
+            driver::for_runtime(&meta.runtime, &self.config.docker).restart(&meta, &dir)?;
         }
-        if meta.desired_state != DesiredState::Running {
+        if refreshed || meta.desired_state != DesiredState::Running {
             meta.desired_state = DesiredState::Running;
             self.store.save(&meta)?;
         }
@@ -286,7 +287,7 @@ impl AppManager {
     /// (e.g. after a server reboot). Failures are logged, not fatal —
     /// one broken app must not block the daemon or the other apps.
     pub fn reconcile(&self) -> Result<()> {
-        for meta in self.store.list()? {
+        for mut meta in self.store.list()? {
             if meta.desired_state != DesiredState::Running {
                 continue;
             }
@@ -301,10 +302,17 @@ impl AppManager {
                 }
             };
             // Settings changed while the daemon was down still apply.
-            if let Err(err) = crate::daemon::pkg::refresh::apply_settings(&self.config, &meta, &dir)
-            {
-                warn!(app = %meta.id, error = %format!("{err:#}"), "reconcile: cannot apply settings");
-                continue;
+            match crate::daemon::pkg::refresh::apply_settings(&self.config, &mut meta, &dir) {
+                Ok(true) => {
+                    if let Err(err) = self.store.save(&meta) {
+                        warn!(app = %meta.id, error = %format!("{err:#}"), "reconcile: cannot save meta");
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(app = %meta.id, error = %format!("{err:#}"), "reconcile: cannot apply settings");
+                    continue;
+                }
             }
             match driver::for_runtime(&meta.runtime, &self.config.docker).start(&meta, &dir) {
                 Ok(()) => info!(app = %meta.id, "reconcile: app started"),

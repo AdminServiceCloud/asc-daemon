@@ -124,6 +124,55 @@ pub enum SettingKind {
     Boolean,
     Enum,
     Secret,
+    /// Published container ports; the value is a list of port numbers.
+    /// With `env:` the list is exposed comma-joined (a single port — as is).
+    Ports,
+    /// App volumes; the value is a list of `/container/path[:host]` or
+    /// `name:/container/path[:ro]` entries (see the package-manager doc).
+    Volumes,
+}
+
+impl SettingKind {
+    /// The settings-editor category this kind belongs to.
+    pub fn category(self) -> SettingCategory {
+        match self {
+            SettingKind::Ports => SettingCategory::Ports,
+            SettingKind::Volumes => SettingCategory::Volumes,
+            _ => SettingCategory::Environments,
+        }
+    }
+}
+
+/// Categories of the settings editor (`asc app settings`): the user first
+/// picks a category, then edits its settings. Labels are technical
+/// identifiers and stay English by convention, like table headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingCategory {
+    Environments,
+    Ports,
+    Volumes,
+    Quota,
+    StartCommand,
+}
+
+impl SettingCategory {
+    pub const ALL: [SettingCategory; 5] = [
+        SettingCategory::Environments,
+        SettingCategory::Ports,
+        SettingCategory::Volumes,
+        SettingCategory::Quota,
+        SettingCategory::StartCommand,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingCategory::Environments => "environments",
+            SettingCategory::Ports => "ports",
+            SettingCategory::Volumes => "volumes",
+            SettingCategory::Quota => "quota",
+            SettingCategory::StartCommand => "start_command",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -186,6 +235,26 @@ impl SettingsFile {
             }
             if def.kind == SettingKind::Enum && def.values.is_empty() {
                 bail!("setting '{}' is an enum but has no values", def.key);
+            }
+            // Ports/volumes hold lists: a scalar default is a manifest bug.
+            if matches!(def.kind, SettingKind::Ports | SettingKind::Volumes)
+                && let Some(default) = &def.default
+                && !default.is_sequence()
+            {
+                bail!(
+                    "setting '{}' is of type {:?} — its default must be a list",
+                    def.key,
+                    def.kind
+                );
+            }
+            if def.kind == SettingKind::Volumes
+                && let Some(serde_yaml::Value::Sequence(items)) = &def.default
+            {
+                for item in items {
+                    let entry = yaml_scalar(item);
+                    super::install::validate_volume(&entry)
+                        .with_context(|| format!("setting '{}' default", def.key))?;
+                }
             }
             if let Some(limits) = &def.limits {
                 if let (Some(min), Some(max)) = (limits.min, limits.max)
@@ -267,6 +336,40 @@ impl SettingDef {
                 }
                 Ok(serde_json::Value::String(raw.to_string()))
             }
+            SettingKind::Ports => {
+                let mut ports = Vec::new();
+                for token in raw.split([',', ' ']).filter(|t| !t.is_empty()) {
+                    let port: u16 = token
+                        .parse()
+                        .ok()
+                        .filter(|p| *p != 0)
+                        .ok_or_else(|| anyhow!(t(Msg::ErrSettingPort)))?;
+                    if let Some(limits) = &self.limits
+                        && (limits.min.is_some_and(|min| f64::from(port) < min)
+                            || limits.max.is_some_and(|max| f64::from(port) > max))
+                    {
+                        bail!(tf(Msg::ErrSettingRange, range_hint(limits.min, limits.max)));
+                    }
+                    ports.push(serde_json::json!(port));
+                }
+                if ports.is_empty() {
+                    bail!(t(Msg::ErrSettingPort));
+                }
+                Ok(serde_json::Value::Array(ports))
+            }
+            SettingKind::Volumes => {
+                let mut volumes = Vec::new();
+                for token in raw.split([',', ' ']).filter(|t| !t.is_empty()) {
+                    if super::install::validate_volume(token).is_err() {
+                        bail!(tf(Msg::ErrSettingVolume, token));
+                    }
+                    volumes.push(serde_json::json!(token));
+                }
+                if volumes.is_empty() {
+                    bail!(tf(Msg::ErrSettingVolume, raw));
+                }
+                Ok(serde_json::Value::Array(volumes))
+            }
         }
     }
 
@@ -274,11 +377,12 @@ impl SettingDef {
     pub fn constraint_hint(&self) -> Option<String> {
         match self.kind {
             SettingKind::Enum => Some(self.values_hint()),
-            SettingKind::Number => {
+            SettingKind::Number | SettingKind::Ports => {
                 let limits = self.limits.as_ref()?;
                 (limits.min.is_some() || limits.max.is_some())
                     .then(|| range_hint(limits.min, limits.max))
             }
+            SettingKind::Volumes => None,
             SettingKind::String | SettingKind::Secret => {
                 let limits = self.limits.as_ref()?;
                 (limits.min_length.is_some() || limits.max_length.is_some()).then(|| {
@@ -304,10 +408,13 @@ impl SettingDef {
             .join("|")
     }
 
-    /// Value as shown to the user; secrets are masked.
+    /// Value as shown to the user; secrets are masked, lists are readable.
     pub fn display_of(&self, value: &serde_json::Value) -> String {
         if self.kind == SettingKind::Secret {
             return "•••".into();
+        }
+        if let serde_json::Value::Array(items) = value {
+            return items.iter().map(json_scalar).collect::<Vec<_>>().join(", ");
         }
         json_scalar(value)
     }
@@ -351,9 +458,14 @@ fn yaml_scalar(value: &serde_yaml::Value) -> String {
     }
 }
 
+/// JSON value as a plain string; lists (ports, volumes) join with a comma —
+/// a single-element list reads as the bare value (`CS2_PORT=27015`).
 fn json_scalar(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => {
+            items.iter().map(json_scalar).collect::<Vec<_>>().join(",")
+        }
         other => other.to_string(),
     }
 }
@@ -366,6 +478,28 @@ pub struct SettingValues {
 
 impl SettingValues {
     pub const FILE: &'static str = "settings.json";
+
+    /// Reserved keys for the user's app-level overrides. The `$` prefix
+    /// cannot collide with package setting keys (see [`valid_key`]).
+    pub const QUOTA_KEY: &'static str = "$quota";
+    pub const START_COMMAND_KEY: &'static str = "$start_command";
+
+    /// The user's start-command override (the `start_command` editor
+    /// category); wins over the package's `start_command`.
+    pub fn start_command_override(&self) -> Option<&str> {
+        self.get(Self::START_COMMAND_KEY).and_then(|v| v.as_str())
+    }
+
+    /// The user's quota overrides (the `quota` editor category): a partial
+    /// [`QuotaSpec`] whose set fields win over the package quota.
+    pub fn quota_override(&self) -> Result<Option<QuotaSpec>> {
+        let Some(value) = self.get(Self::QUOTA_KEY) else {
+            return Ok(None);
+        };
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .context("invalid $quota override in settings.json")
+    }
 
     /// Load the values; a missing file means nothing was chosen yet.
     pub fn load(config_dir: &Path) -> Result<Self> {
@@ -424,6 +558,11 @@ impl SettingValues {
 
     pub fn set(&mut self, key: &str, value: serde_json::Value) {
         self.map.insert(key.to_string(), value);
+    }
+
+    /// Drop a stored value (used by the editor's '-' reset).
+    pub fn remove(&mut self, key: &str) {
+        self.map.remove(key);
     }
 
     /// Current value of a setting as shown in the editor (`-` when unset).
@@ -628,6 +767,76 @@ settings:
         let reloaded = SettingValues::load(dir.path()).unwrap();
         assert_eq!(reloaded.get("players"), Some(&serde_json::json!(50)));
         assert!(!dir.path().join("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn ports_values_parse_validate_and_join() {
+        let d = def("{ key: game_port, type: ports, default: [27015] }");
+        assert_eq!(d.kind.category(), SettingCategory::Ports);
+        assert_eq!(
+            d.parse_value("27015, 27020").unwrap(),
+            serde_json::json!([27015, 27020])
+        );
+        assert_eq!(d.parse_value("27016").unwrap(), serde_json::json!([27016]));
+        for bad in ["0", "70000", "abc", ""] {
+            assert!(d.parse_value(bad).is_err(), "must reject '{bad}'");
+        }
+        // Per-port limits apply to every element.
+        let limited = def("{ key: p, type: ports, limits: { min: 1024, max: 2048 } }");
+        assert!(limited.parse_value("80").is_err());
+        assert!(limited.parse_value("1024 2048").is_ok());
+    }
+
+    #[test]
+    fn volumes_values_parse_and_validate() {
+        let d = def("{ key: vols, type: volumes }");
+        assert_eq!(d.kind.category(), SettingCategory::Volumes);
+        assert_eq!(
+            d.parse_value("/data /opt/x:store shared:/srv:ro").unwrap(),
+            serde_json::json!(["/data", "/opt/x:store", "shared:/srv:ro"])
+        );
+        for bad in ["not-a-volume", "/data:a/b", ""] {
+            assert!(d.parse_value(bad).is_err(), "must reject '{bad}'");
+        }
+    }
+
+    #[test]
+    fn list_defaults_are_validated() {
+        // A scalar default for a list type is a manifest bug.
+        let bad: SettingsFile =
+            serde_yaml::from_str("settings:\n  - { key: p, type: ports, default: 27015 }\n")
+                .unwrap();
+        assert!(bad.validate().is_err());
+        // Volume defaults are syntax-checked at load time.
+        let bad: SettingsFile =
+            serde_yaml::from_str("settings:\n  - { key: v, type: volumes, default: [broken] }\n")
+                .unwrap();
+        assert!(bad.validate().is_err());
+        let ok: SettingsFile = serde_yaml::from_str(
+            "settings:\n  - { key: v, type: volumes, default: [/data, /srv:maps] }\n",
+        )
+        .unwrap();
+        ok.validate().unwrap();
+    }
+
+    #[test]
+    fn overrides_live_under_reserved_keys() {
+        let mut values = SettingValues::default();
+        assert!(values.start_command_override().is_none());
+        assert!(values.quota_override().unwrap().is_none());
+        values.set(
+            SettingValues::START_COMMAND_KEY,
+            serde_json::json!("./run --fast"),
+        );
+        values.set(
+            SettingValues::QUOTA_KEY,
+            serde_json::json!({ "max_cpu": 1.5 }),
+        );
+        assert_eq!(values.start_command_override(), Some("./run --fast"));
+        assert_eq!(values.quota_override().unwrap().unwrap().max_cpu, Some(1.5));
+        // Reserved keys cannot collide with package settings.
+        assert!(!valid_key(SettingValues::QUOTA_KEY));
+        assert!(!valid_key(SettingValues::START_COMMAND_KEY));
     }
 
     #[test]

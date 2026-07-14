@@ -825,14 +825,16 @@ fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
     parts.join(", ")
 }
 
-/// `asc app settings <id>` — interactive settings editor (DMN-017): pick a
-/// setting by number, enter a value validated against asc.settings.yaml.
-/// Values are stored in `config/settings.json`; the runtime picks them up on
-/// the next restart.
+/// `asc app settings <id>` — interactive settings editor (DMN-017/030).
+/// The user first picks a **category** — environments, ports, volumes,
+/// quota, start_command — then edits its settings. Package-defined settings
+/// are validated against asc.settings.yaml; quota and start_command take
+/// app-level overrides on top of the package values. Everything lands in
+/// `config/settings.json`; the runtime picks it up on the next restart.
 fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::manifest::Manifest;
     use asc_daemon::daemon::pkg::settings::{
-        SettingKind, SettingValues, SettingsFile, manifest_dir_of,
+        SettingCategory, SettingValues, SettingsFile, manifest_dir_of,
     };
 
     let manager = AppManager::new(config);
@@ -843,23 +845,83 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
 
     let manifest_dir = manifest_dir_of(config, &app_dir)?;
     let manifest = Manifest::load(&manifest_dir)?;
-    let defs = match SettingsFile::load_for(&manifest_dir, &manifest)? {
-        Some(file) if !file.settings.is_empty() => file.settings,
-        _ => {
-            println!("{}", tf(Msg::SettingsNone, id));
-            return Ok(());
-        }
+    let Some(file) = SettingsFile::load_for(&manifest_dir, &manifest)? else {
+        println!("{}", tf(Msg::SettingsNone, id));
+        return Ok(());
     };
 
     let config_dir = app_dir.join("config");
     let mut values = SettingValues::load(&config_dir)?;
-    values.merge_defaults(&defs);
-    let key_w = defs.iter().map(|d| d.key.len()).max().unwrap_or(4);
+    values.merge_defaults(&file.settings);
 
     let mut changed = false;
     loop {
         println!();
         println!("{}", tf(Msg::SettingsHeader, id));
+        for (i, category) in SettingCategory::ALL.iter().enumerate() {
+            let count = file
+                .settings
+                .iter()
+                .filter(|d| d.kind.category() == *category)
+                .count();
+            let suffix = match category {
+                SettingCategory::Quota | SettingCategory::StartCommand => String::new(),
+                _ => format!(" ({count})"),
+            };
+            println!("  {}) {}{suffix}", i + 1, category.label());
+        }
+        println!();
+        let line = read_line(t(Msg::SettingsPromptCategory))?;
+        if line.is_empty() || line.eq_ignore_ascii_case("q") {
+            break;
+        }
+        let Some(category) = line
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|i| SettingCategory::ALL.get(i))
+        else {
+            eprintln!("asc: {}", t(Msg::AuthInvalidChoice));
+            continue;
+        };
+        match category {
+            SettingCategory::Quota => edit_quota(&file, &mut values, &config_dir, &mut changed)?,
+            SettingCategory::StartCommand => {
+                edit_start_command(&file, &mut values, &config_dir, &mut changed)?
+            }
+            _ => {
+                let defs: Vec<_> = file
+                    .settings
+                    .iter()
+                    .filter(|d| d.kind.category() == *category)
+                    .collect();
+                edit_setting_defs(&defs, &mut values, &config_dir, &mut changed)?;
+            }
+        }
+    }
+    if changed {
+        println!("{}", tf(Msg::SettingsRestartHint, id));
+    }
+    Ok(())
+}
+
+/// One category of package-defined settings: the numbered list → pick →
+/// validate → save loop of the editor.
+fn edit_setting_defs(
+    defs: &[&asc_daemon::daemon::pkg::settings::SettingDef],
+    values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
+    config_dir: &std::path::Path,
+    changed: &mut bool,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::settings::SettingKind;
+
+    if defs.is_empty() {
+        println!("{}", t(Msg::SettingsCategoryEmpty));
+        return Ok(());
+    }
+    let key_w = defs.iter().map(|d| d.key.len()).max().unwrap_or(4);
+    loop {
+        println!();
         for (i, def) in defs.iter().enumerate() {
             let hint = def
                 .constraint_hint()
@@ -921,16 +983,162 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
             Ok(value) => {
                 let shown = def.display_of(&value);
                 values.set(&def.key, value);
-                values.save(&config_dir)?;
-                changed = true;
+                values.save(config_dir)?;
+                *changed = true;
                 println!("{}", tf2(Msg::SettingsSaved, &def.key, shown));
             }
             Err(err) => eprintln!("asc: {err:#}"),
         }
     }
-    if changed {
-        println!("{}", tf(Msg::SettingsRestartHint, id));
+    Ok(())
+}
+
+/// The quota category: max_cpu / max_ram / max_disk overrides on top of the
+/// package `quota:` section. '-' resets a field to the package value.
+fn edit_quota(
+    file: &asc_daemon::daemon::pkg::settings::SettingsFile,
+    values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
+    config_dir: &std::path::Path,
+    changed: &mut bool,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::settings::{QuotaSpec, SettingValues, parse_size};
+
+    const FIELDS: [&str; 3] = ["max_cpu", "max_ram", "max_disk"];
+    loop {
+        let over = values.quota_override()?.unwrap_or(QuotaSpec {
+            max_cpu: None,
+            max_ram: None,
+            max_disk: None,
+        });
+        let package = file.quota.as_ref();
+        let effective = [
+            over.max_cpu
+                .map(|c| c.to_string())
+                .or_else(|| package.and_then(|q| q.max_cpu).map(|c| c.to_string())),
+            over.max_ram
+                .clone()
+                .or_else(|| package.and_then(|q| q.max_ram.clone())),
+            over.max_disk
+                .clone()
+                .or_else(|| package.and_then(|q| q.max_disk.clone())),
+        ];
+        println!();
+        for (i, field) in FIELDS.iter().enumerate() {
+            println!(
+                "  {}) {:<8} = {}",
+                i + 1,
+                field,
+                effective[i].as_deref().unwrap_or("-")
+            );
+        }
+        println!();
+        let line = read_line(t(Msg::SettingsPromptSelect))?;
+        if line.is_empty() || line.eq_ignore_ascii_case("q") {
+            break;
+        }
+        let Some(index) = line
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|i| *i < FIELDS.len())
+        else {
+            eprintln!("asc: {}", t(Msg::AuthInvalidChoice));
+            continue;
+        };
+        let raw = read_line(&tf(Msg::SettingsValueOrReset, FIELDS[index]))?;
+        if raw.is_empty() {
+            continue;
+        }
+        let mut over = over;
+        if raw == "-" {
+            match index {
+                0 => over.max_cpu = None,
+                1 => over.max_ram = None,
+                _ => over.max_disk = None,
+            }
+        } else {
+            // Validate before storing: max_cpu is a positive core count,
+            // sizes must parse like the quota section does.
+            match index {
+                0 => match raw.parse::<f64>() {
+                    Ok(cores) if cores > 0.0 => over.max_cpu = Some(cores),
+                    _ => {
+                        eprintln!("asc: {}", t(Msg::ErrQuotaCpu));
+                        continue;
+                    }
+                },
+                _ => {
+                    if let Err(err) = parse_size(&raw) {
+                        eprintln!("asc: {err:#}");
+                        continue;
+                    }
+                    if index == 1 {
+                        over.max_ram = Some(raw.clone());
+                    } else {
+                        over.max_disk = Some(raw.clone());
+                    }
+                }
+            }
+        }
+        // Store only the set fields; an all-default override disappears.
+        let mut object = serde_json::Map::new();
+        if let Some(cpu) = over.max_cpu {
+            object.insert("max_cpu".into(), serde_json::json!(cpu));
+        }
+        if let Some(ram) = &over.max_ram {
+            object.insert("max_ram".into(), serde_json::json!(ram));
+        }
+        if let Some(disk) = &over.max_disk {
+            object.insert("max_disk".into(), serde_json::json!(disk));
+        }
+        if object.is_empty() {
+            values.remove(SettingValues::QUOTA_KEY);
+        } else {
+            values.set(SettingValues::QUOTA_KEY, serde_json::Value::Object(object));
+        }
+        values.save(config_dir)?;
+        *changed = true;
+        if raw == "-" {
+            println!("{}", tf(Msg::SettingsReset, FIELDS[index]));
+        } else {
+            println!("{}", tf2(Msg::SettingsSaved, FIELDS[index], &raw));
+        }
     }
+    Ok(())
+}
+
+/// The start_command category: an app-level override of the package's start
+/// command ('${VAR}' references resolve from the settings env at apply time).
+fn edit_start_command(
+    file: &asc_daemon::daemon::pkg::settings::SettingsFile,
+    values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
+    config_dir: &std::path::Path,
+    changed: &mut bool,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::settings::SettingValues;
+
+    let effective = values
+        .start_command_override()
+        .or(file.start_command.as_deref())
+        .unwrap_or("-");
+    println!();
+    println!("  start_command = {effective}");
+    println!();
+    let raw = read_line(&tf(Msg::SettingsValueOrReset, "start_command"))?;
+    if raw.is_empty() {
+        return Ok(());
+    }
+    if raw == "-" {
+        values.remove(SettingValues::START_COMMAND_KEY);
+        values.save(config_dir)?;
+        *changed = true;
+        println!("{}", tf(Msg::SettingsReset, "start_command"));
+        return Ok(());
+    }
+    values.set(SettingValues::START_COMMAND_KEY, serde_json::json!(raw));
+    values.save(config_dir)?;
+    *changed = true;
+    println!("{}", tf2(Msg::SettingsSaved, "start_command", &raw));
     Ok(())
 }
 

@@ -27,19 +27,11 @@ runtime:
   stdin: true                 # docker, optional: keep stdin open (docker run -i) — `asc attach` input reaches the app
   tty: true                   # docker, optional: allocate a pseudo-TTY (docker run -t)
   # or install/start/stop commands for native
-ports: [8080]
-volumes: [/data]
 requirements: { ram: 256M, disk: 1G }
 healthcheck: { http: /health }
 ```
 
-> ℹ️ The manifest has **no `env:` section**: every environment variable an app receives is declared in `asc.settings.yaml` — a setting with an `env:` key (see below). One source of truth: what the user can configure is exactly what the app gets.
-
-**Volumes** (docker apps) come in three forms:
-
-- `/container/path` — private app data: the app's **data folder** (`/asc/apps/<id>/data`) is mounted at that container path. The folder is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. Per-app uid mapping will tighten this later;
-- `/container/path:folder` — same, but the host folder named after the colon is used **instead of `data`** (`/asc/apps/<id>/<folder>`) — for packages that need several private volumes. The name must be a plain folder name; `repository`, `config` and `meta.json` are reserved;
-- `name:/container/path[:ro|:rw]` — a Docker **named volume**, created by the Engine on first use. Named volumes are how several apps share data: one app writes the volume, others mount it `:ro` (see the cs2 stack in [asc-example-apps](../../../asc-example-apps) — a master installation shared by every server instance). Named volumes are not removed with the app.
+> ℹ️ The manifest has **no `env:`, `ports:` or `volumes:` sections** (DMN-027/030): environment variables, published ports and volumes are all declared in `asc.settings.yaml` — settings with an `env:` key and the `ports` / `volumes` setting types (see below). One source of truth: what the user can configure is exactly what the app gets.
 
 > 📐 JSON schemas of the manifests: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) and [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) in the `registry` repository.
 
@@ -73,12 +65,27 @@ settings:
   - key: enable_backups
     type: boolean
     default: true
+
+  - key: game_port
+    type: ports                 # published container ports (a list)
+    default: [27015]
+    limits: { min: 1024, max: 65535 }
+    env: CS2_PORT               # exposed comma-joined; one port — as is
+
+  - key: game_data
+    type: volumes               # app volumes (a list, forms below)
+    default: [/home/steam/cs2-dedicated]
 ```
 
 - Setting values are saved in `/asc/apps/<id>/config/settings.json` (0600 — the file may hold secrets); at install time it is seeded with the defaults, an upgrade adds defaults for new keys without touching the user's choices.
-- **Env pass-through**: every setting that declares `env: VAR_NAME` lands in the application's environment (secrets included — that is what their `env:` is for). For Docker apps the variables go into the container env at creation; a setting value wins over a manifest `env:` default of the same name.
-- **Applying changes**: a container's env is fixed at creation, so on the next `asc app start` / `asc app restart` the daemon compares the desired env with the container's actual one and **recreates the container** when they differ (or when the container is missing). App data lives in volumes and survives the recreate. If the desired env cannot be computed (say, the registry source is gone), the app still starts as is — availability wins, with a warning in the log.
-- Changing settings — **`asc app settings <id>`**: an interactive editor in the terminal — pick a setting by number, enter a value, and it is validated against the definition (type, `limits`, enum `values`; secrets are masked in the list). Also via the platform UI. After a change the application is restarted (`asc app restart <id>`).
+- **Env pass-through**: every setting that declares `env: VAR_NAME` lands in the application's environment (secrets included — that is what their `env:` is for). For Docker apps the variables go into the container env at creation. List values (`ports`, `volumes`) are exposed comma-joined.
+- **`type: ports`** — the published container ports (host port == container port). Declaring the same setting with `env:` keeps the app and Docker in sync: the server listens exactly where the port is forwarded.
+- **`type: volumes`** — the app's volumes; every entry takes one of three forms:
+  - `/container/path` — private app data: the app's **data folder** (`/asc/apps/<id>/data`) is mounted at that container path. The folder is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. Per-app uid mapping will tighten this later;
+  - `/container/path:host` — same, but the host side after the colon is used **instead of `data`**: a plain folder name lands inside the app directory (`/asc/apps/<id>/<folder>`; `repository`, `config` and `meta.json` are reserved), an **absolute path** is a host machine path mounted verbatim (a pre-existing directory keeps its ownership and mode);
+  - `name:/container/path[:ro|:rw]` — a Docker **named volume**, created by the Engine on first use. Named volumes are how several apps share data: one app writes the volume, others mount it `:ro` (see the cs2 stack in [asc-example-apps](../../../asc-example-apps)). Named volumes are not removed with the app.
+- **Applying changes**: a container's configuration is fixed at creation, so on the next `asc app start` / `asc app restart` the daemon compares the desired state — env, published ports, volumes, quota, start command — with the container's actual one and **recreates the container** when they differ (or when the container is missing). App data lives in volumes and survives the recreate. If the desired state cannot be computed (say, the registry source is gone), the app still starts as is — availability wins, with a warning in the log.
+- Changing settings — **`asc app settings <id>`**: an interactive editor in the terminal. It first shows the **categories** — `environments` (string/number/boolean/enum/secret settings), `ports`, `volumes`, `quota`, `start_command` — then the settings of the picked category: pick one by number, enter a value, and it is validated against the definition (type, `limits`, enum `values`; secrets are masked in the list; ports and volumes take space-separated lists). Also via the platform UI. After a change the application is restarted (`asc app restart <id>`).
 
 ### 📏 Resource quota (quota)
 
@@ -95,6 +102,7 @@ quota:
 - **Docker apps**: enforced at container creation through the Engine API (`NanoCpus`, `Memory`).
 - **native/process apps**: recorded in `meta.json`; cgroup enforcement is a next increment.
 - `max_disk` is recorded for every runtime; per-runtime disk enforcement (Docker storage-opt / fs quotas) arrives incrementally.
+- **User overrides** (DMN-030): the `quota` category of `asc app settings` overrides individual fields on top of the package values (`'-'` resets a field back); the override lands in `settings.json` and applies through the container recreate on the next restart.
 
 ### 🚀 The start command (start_command)
 
@@ -108,6 +116,7 @@ start_command: "steamcmd +force_install_dir /data +login anonymous +app_update $
 - **Docker apps**: the command replaces what the image would run (the entrypoint becomes `/bin/sh -c`, so arguments and quoting work as in a shell).
 - **native apps**: the command overrides `runtime.start` from `asc.yaml`.
 - Interpolation from the application's *final* environment (org/node/application env levels — [🌱 environments](../../../asc-platform/docs/features/environments.md)) and a UI preview of the computed command are a next increment; setting values already reach the app as env variables (see the settings section above).
+- **User override** (DMN-030): the `start_command` category of `asc app settings` replaces the package's command for this instance (`'-'` resets back); `${VAR}` references resolve from the settings env when the override is applied.
 
 ### 🐳 install/update scripts: native or docker
 

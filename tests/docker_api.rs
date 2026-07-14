@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use asc_daemon::daemon::config::DockerConfig;
-use asc_daemon::daemon::docker::{self, CreateSpec};
+use asc_daemon::daemon::docker::{self, CreateSpec, PortProtocol};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -169,7 +169,7 @@ fn create_sends_container_spec() {
             name: "asc-web",
             image: "nginx:1.27",
             env: vec!["PORT=8080".into()],
-            ports: vec![8080],
+            ports: vec![(8080, PortProtocol::Tcp)],
             binds: vec!["/asc/apps/web/data/data:/data".into()],
             nano_cpus: Some(1_500_000_000),
             memory_bytes: Some(512 << 20),

@@ -18,9 +18,16 @@ use super::sources::{Source, SourceList};
 use crate::daemon::config::Config;
 use crate::daemon::http;
 use crate::daemon::i18n::{Msg, tf};
+use crate::daemon::progress::{self, IndexBars};
 
 /// How long a cached index stays fresh; `asc update` bypasses it.
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Per-request time budget for registry index files, seconds. These are a
+/// handful of small JSON files fetched in a quick, unpipelined burst (one
+/// `curl` process per file, no connection reuse) — a stalled or throttled
+/// connection must fail fast rather than sit silent for minutes.
+const INDEX_FETCH_TIMEOUT_SECS: &str = "20";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistryIndex {
@@ -120,7 +127,7 @@ impl RegistryClient {
     pub fn resolve_all(&self, name: &str) -> Result<Vec<ResolvedPackage>> {
         let mut found = Vec::new();
         for (source, _) in self.sources.list() {
-            match self.packages_of(source, false) {
+            match self.packages_of(source, false, None) {
                 Ok(packages) => {
                     if let Some(entry) = packages.into_iter().find(|p| p.name == name) {
                         found.push(ResolvedPackage {
@@ -156,7 +163,7 @@ impl RegistryClient {
         let query = query.to_lowercase();
         let mut found: Vec<ResolvedPackage> = Vec::new();
         for (source, _) in self.sources.list() {
-            let packages = match self.packages_of(source, false) {
+            let packages = match self.packages_of(source, false, None) {
                 Ok(packages) => packages,
                 Err(err) => {
                     warn!(source = %source.name, error = %format!("{err:#}"), "cannot read registry source");
@@ -186,11 +193,15 @@ impl RegistryClient {
 
     /// Force-refresh all indexes of all sources (`asc update`).
     /// Returns per-source stats so the CLI can report what was indexed.
+    /// On a terminal, each index file gets its own progress line — the
+    /// registry is fetched one small file at a time (no connection reuse),
+    /// so this is what makes a stalled file visible instead of a blank wait.
     pub fn update(&self) -> Result<Vec<SourceUpdate>> {
+        let bars = progress::interactive().then(IndexBars::new);
         let mut updated = Vec::new();
         for (source, _) in self.sources.list() {
             let packages = self
-                .packages_of(source, true)
+                .packages_of(source, true, bars.as_ref())
                 .with_context(|| format!("cannot update source '{}'", source.name))?;
             updated.push(SourceUpdate {
                 source_name: source.name.clone(),
@@ -201,8 +212,13 @@ impl RegistryClient {
     }
 
     /// All packages of a source, walking categories and children.
-    fn packages_of(&self, source: &Source, force: bool) -> Result<Vec<PackageEntry>> {
-        let raw = self.fetch(source, "registry.json", force)?;
+    fn packages_of(
+        &self,
+        source: &Source,
+        force: bool,
+        progress: Option<&IndexBars>,
+    ) -> Result<Vec<PackageEntry>> {
+        let raw = self.fetch_reported(source, "registry.json", force, progress)?;
         let index: RegistryIndex = serde_json::from_str(&raw)
             .with_context(|| format!("invalid registry.json from '{}'", source.name))?;
         let mut packages = Vec::new();
@@ -214,7 +230,7 @@ impl RegistryClient {
             if budget == 0 {
                 bail!("registry '{}' has too many index files", source.name);
             }
-            let raw = self.fetch(source, &rel, force)?;
+            let raw = self.fetch_reported(source, &rel, force, progress)?;
             let category: CategoryFile = serde_json::from_str(&raw).with_context(|| {
                 format!("invalid category index '{rel}' from '{}'", source.name)
             })?;
@@ -223,6 +239,36 @@ impl RegistryClient {
             queue.extend(category.children.into_iter().map(|c| c.index));
         }
         Ok(packages)
+    }
+
+    /// [`fetch`](Self::fetch) with a progress bar wrapped around the call —
+    /// spinning while the request is in flight, frozen on its byte size or
+    /// error once it lands.
+    fn fetch_reported(
+        &self,
+        source: &Source,
+        rel: &str,
+        force: bool,
+        progress: Option<&IndexBars>,
+    ) -> Result<String> {
+        debug!(source = %source.name, file = %rel, "fetching registry file");
+        if let Some(bars) = progress {
+            bars.start(&source.name, rel);
+        }
+        match self.fetch(source, rel, force) {
+            Ok(raw) => {
+                if let Some(bars) = progress {
+                    bars.done(rel, raw.len());
+                }
+                Ok(raw)
+            }
+            Err(err) => {
+                if let Some(bars) = progress {
+                    bars.failed(rel, &format!("{err:#}"));
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Read a registry file through the cache.
@@ -268,7 +314,7 @@ fn fetch_uncached(base_url: &str, rel: &str) -> Result<String> {
             .with_context(|| format!("cannot read {}", path.display()));
     }
     let url = format!("{}/{}", base_url.trim_end_matches('/'), rel);
-    http::get_string(&url)
+    http::get_string_with_timeout(&url, INDEX_FETCH_TIMEOUT_SECS)
 }
 
 /// Convenience: build a `file://` source URL from a local directory (tests, dev).

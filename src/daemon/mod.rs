@@ -11,5 +11,6 @@ pub mod i18n;
 pub mod logging;
 pub mod monitor;
 pub mod pkg;
+pub mod progress;
 pub mod server;
 pub mod service;

@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -41,6 +41,8 @@ tonic = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic-prost = "0.14.6"
+# Docker pull / git clone progress bars (tty-gated, see src/daemon/progress.rs).
+indicatif = "0.18.6"
 
 [build-dependencies]
 # protox РєРѕРјРїРёР»РёСЂСѓРµС‚ .proto Р±РµР· РІРЅРµС€РЅРµРіРѕ protoc вЂ” СЃР±РѕСЂРєР° РіРµСЂРјРµС‚РёС‡РЅР°

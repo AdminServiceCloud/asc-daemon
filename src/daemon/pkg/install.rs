@@ -889,9 +889,14 @@ fn docker_create(
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
 
+    // Pulling here (rather than leaving it to docker::create's own
+    // pull-on-404) lets the image's declared USER be known before its
+    // bind-mounted volumes are created, so they can be chowned to match.
+    docker::ensure_pulled(docker_cfg, image)?;
+    let owner = docker::image_uid_gid(docker_cfg, image)?;
     let mut binds = Vec::new();
     for volume in &inputs.volumes {
-        binds.push(volume_bind(volume, app_dir)?);
+        binds.push(volume_bind(volume, app_dir, owner)?);
     }
 
     docker::create(
@@ -1034,8 +1039,36 @@ pub(crate) fn classify_volume(volume: &str, app_dir: &Path) -> Result<VolumeKind
     })
 }
 
+/// Open up a freshly created volume directory for the container: world-writable
+/// so an arbitrary-uid image can write into it, and — when `owner` is known —
+/// chowned to that uid:gid so the image can also `chown` it itself. A non-root
+/// process may only chown a path it already owns, so an image that fixes up
+/// its data directory's ownership on first start (`chown -R app:app ...`)
+/// hits EPERM against a root-owned bind mount unless this pre-chown matches
+/// (DMN-038); world-writable alone only ever covered write access.
+fn open_volume_dir(dir: &Path, owner: Option<(u32, u32)>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o777))
+        .with_context(|| format!("cannot chmod volume directory {}", dir.display()))?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::chown(dir, Some(uid), Some(gid)).with_context(|| {
+            format!(
+                "cannot chown volume directory {} to {uid}:{gid}",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Bind string for one volume entry; creates the host directory when needed.
-pub(super) fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
+/// `owner` is the image's numeric `USER` ([`docker::image_uid_gid`]), when
+/// known — passed through to [`open_volume_dir`] for freshly created dirs.
+pub(super) fn volume_bind(
+    volume: &str,
+    app_dir: &Path,
+    owner: Option<(u32, u32)>,
+) -> Result<String> {
     let (host, target) = match parse_volume(volume)? {
         Volume::Named(entry) => return Ok(entry.to_string()),
         Volume::Private(target, HostSide::AppFolder(folder)) => (app_dir.join(folder), target),
@@ -1048,24 +1081,14 @@ pub(super) fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
                 fs::create_dir_all(&host).with_context(|| {
                     format!("cannot create volume directory {}", host.display())
                 })?;
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
-                    .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
+                open_volume_dir(&host, owner)?;
             }
             return Ok(format!("{path}:{target}"));
         }
     };
     fs::create_dir_all(&host)
         .with_context(|| format!("cannot create volume directory {}", host.display()))?;
-    // Images run under arbitrary non-root uids (`steam`, `www-data`, …)
-    // and bind mounts keep host ownership — a root-owned 0755 directory
-    // is read-only for them. World-writable applies to this leaf
-    // directory only; the app directory above stays restrictive.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
-            .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
-    }
+    open_volume_dir(&host, owner)?;
     Ok(format!("{}:{}", host.display(), target))
 }
 
@@ -1103,7 +1126,7 @@ mod tests {
     #[test]
     fn plain_volumes_bind_the_data_folder() {
         let dir = tempfile::tempdir().unwrap();
-        let bind = volume_bind("/home/steam/cs2-dedicated", dir.path()).unwrap();
+        let bind = volume_bind("/home/steam/cs2-dedicated", dir.path(), None).unwrap();
         let host = dir.path().join("data");
         assert_eq!(
             bind,
@@ -1118,9 +1141,25 @@ mod tests {
     }
 
     #[test]
+    fn volumes_are_chowned_to_the_image_owner_when_known() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: geteuid()/getegid() have no preconditions and cannot fail;
+        // chowning a directory this process just created to its own ids is
+        // always a permitted no-op, so the test needs no special privilege.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let bind = volume_bind("/data", dir.path(), Some((uid, gid))).unwrap();
+        let host = dir.path().join("data");
+        assert_eq!(bind, format!("{}:/data", host.display()));
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&host).unwrap();
+        assert_eq!(meta.uid(), uid);
+        assert_eq!(meta.gid(), gid);
+    }
+
+    #[test]
     fn volume_host_folder_after_the_colon_replaces_data() {
         let dir = tempfile::tempdir().unwrap();
-        let bind = volume_bind("/var/lib/postgresql:pgdata", dir.path()).unwrap();
+        let bind = volume_bind("/var/lib/postgresql:pgdata", dir.path(), None).unwrap();
         let host = dir.path().join("pgdata");
         assert_eq!(bind, format!("{}:/var/lib/postgresql", host.display()));
         assert!(host.is_dir(), "the host directory must be created");
@@ -1128,7 +1167,7 @@ mod tests {
         // An absolute path after the colon is a host machine path, verbatim.
         let host_dir = dir.path().join("srv").join("maps");
         let entry = format!("/opt/maps:{}", host_dir.display());
-        let bind = volume_bind(&entry, dir.path()).unwrap();
+        let bind = volume_bind(&entry, dir.path(), None).unwrap();
         assert_eq!(bind, format!("{}:/opt/maps", host_dir.display()));
         assert!(host_dir.is_dir(), "the host directory must be created");
 
@@ -1143,7 +1182,10 @@ mod tests {
             "/data:",
             "/data:/srv/../etc",
         ] {
-            assert!(volume_bind(bad, dir.path()).is_err(), "must reject '{bad}'");
+            assert!(
+                volume_bind(bad, dir.path(), None).is_err(),
+                "must reject '{bad}'"
+            );
         }
     }
 
@@ -1151,15 +1193,15 @@ mod tests {
     fn named_volumes_pass_through_verbatim() {
         let app = Path::new("/nonexistent");
         assert_eq!(
-            volume_bind("cs2-master-data:/data", app).unwrap(),
+            volume_bind("cs2-master-data:/data", app, None).unwrap(),
             "cs2-master-data:/data"
         );
         assert_eq!(
-            volume_bind("cs2-master-data:/home/steam/cs2-dedicated:ro", app).unwrap(),
+            volume_bind("cs2-master-data:/home/steam/cs2-dedicated:ro", app, None).unwrap(),
             "cs2-master-data:/home/steam/cs2-dedicated:ro"
         );
         for bad in ["vol", "vol:data", ":/data", "-vol:/data", "a b:/data"] {
-            assert!(volume_bind(bad, app).is_err(), "must reject '{bad}'");
+            assert!(volume_bind(bad, app, None).is_err(), "must reject '{bad}'");
         }
     }
 

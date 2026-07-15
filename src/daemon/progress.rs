@@ -4,8 +4,10 @@
 //! logged through `tracing`, this module only adds a live visual on top for
 //! interactive use, mirroring `docker pull`/`docker-compose pull` output.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
@@ -100,6 +102,69 @@ impl LayerBars {
             if !pb.is_finished() {
                 pb.finish_and_clear();
             }
+        }
+    }
+}
+
+/// One line per registry index file (`asc update`): a spinner while the
+/// fetch is in flight, frozen on its byte size or error once it lands. The
+/// registry is a handful of small JSON files fetched one `curl` process at a
+/// time (no connection reuse) — a bar stuck spinning on one file, rather
+/// than a blank terminal, is what makes a stalled/throttled fetch visible
+/// instead of indistinguishable from a frozen command.
+/// `RefCell`-backed so it can be threaded through `&self` call chains
+/// (`RegistryClient`'s methods don't take `&mut self`).
+pub struct IndexBars {
+    multi: MultiProgress,
+    bars: RefCell<HashMap<String, ProgressBar>>,
+}
+
+impl Default for IndexBars {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IndexBars {
+    pub fn new() -> Self {
+        Self {
+            multi: MultiProgress::new(),
+            bars: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn spinner_style() -> ProgressStyle {
+        ProgressStyle::with_template("{spinner:.cyan} {prefix:.bold.dim} {msg}")
+            .expect("static template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
+    }
+
+    /// Start (and start spinning) the bar for one source/file pair.
+    pub fn start(&self, source: &str, rel: &str) {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(Self::spinner_style());
+        pb.set_prefix(format!("{source}/{rel}"));
+        pb.set_message("fetching…");
+        pb.enable_steady_tick(Duration::from_millis(100));
+        self.bars
+            .borrow_mut()
+            .insert(rel.to_string(), self.multi.add(pb));
+    }
+
+    /// Freeze the bar on success — the byte count fetched.
+    pub fn done(&self, rel: &str, bytes: usize) {
+        if let Some(pb) = self.bars.borrow().get(rel) {
+            pb.disable_steady_tick();
+            pb.finish_with_message(format!("{bytes} B"));
+        }
+    }
+
+    /// Freeze the bar on failure — the error stays on screen next to the
+    /// file it belongs to instead of scrolling past in the error output.
+    pub fn failed(&self, rel: &str, err: &str) {
+        if let Some(pb) = self.bars.borrow().get(rel) {
+            pb.disable_steady_tick();
+            pb.finish_with_message(format!("failed: {err}"));
         }
     }
 }

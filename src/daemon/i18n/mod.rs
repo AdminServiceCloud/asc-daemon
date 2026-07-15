@@ -69,6 +69,8 @@ pub enum Msg {
     StateNotInstalled,
     ConfigLangCurrent,
     ConfigLangSet,
+    ConfigDebugCurrent,
+    ConfigDebugSet,
     AppNotFound,
     AppStarted,
     AppAlreadyRunning,
@@ -212,6 +214,8 @@ pub fn t(msg: Msg) -> &'static str {
         ),
         Msg::ConfigLangCurrent => ("Current language: {}", "Текущий язык: {}"),
         Msg::ConfigLangSet => ("Language set to {}", "Язык переключён на {}"),
+        Msg::ConfigDebugCurrent => ("Debug logging: {}", "Отладочные логи: {}"),
+        Msg::ConfigDebugSet => ("Debug logging set to {}", "Отладочные логи переключены: {}"),
         Msg::AppNotFound => ("app '{}' not found", "приложение '{}' не найдено"),
         Msg::AppStarted => ("App '{}' started", "Приложение '{}' запущено"),
         Msg::AppAlreadyRunning => (

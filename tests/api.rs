@@ -172,6 +172,33 @@ mod rest {
     }
 
     #[tokio::test]
+    async fn app_disk_reports_directory_sizes() {
+        let (state, _ws) = test_state();
+        install_fake_app(&state, "demo");
+        // Simulate an installed repository checkout so the breakdown is
+        // non-zero; the manifest content is irrelevant here (invalid YAML
+        // just means image/volume figures degrade to absent, not an error).
+        let app_dir = state.config.daemon.apps_dir.join("demo");
+        std::fs::create_dir_all(app_dir.join("repository")).unwrap();
+        std::fs::write(app_dir.join("repository/asc.yaml"), [0u8; 128]).unwrap();
+        std::fs::create_dir_all(app_dir.join("data")).unwrap();
+        std::fs::write(app_dir.join("data/save.dat"), [0u8; 256]).unwrap();
+
+        let (status, body) = call(&state, "GET", "/v1/apps/demo/disk", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["repository_bytes"], 128);
+        assert_eq!(body["data_bytes"], 256);
+        assert!(body["app_dir_bytes"].as_u64().unwrap() >= 128 + 256);
+        assert!(body["quota_bytes"].is_null());
+        assert!(body["image_bytes"].is_null());
+        assert!(body["volumes"].as_array().unwrap().is_empty());
+
+        let (status, body) = call(&state, "GET", "/v1/apps/ghost/disk", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("ghost"));
+    }
+
+    #[tokio::test]
     async fn metrics_snapshot_and_history() {
         let (state, _ws) = test_state();
 
@@ -324,6 +351,35 @@ mod grpc {
             .unwrap()
             .into_inner();
         assert_eq!(issued.token.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn grpc_app_disk() {
+        let (state, _ws) = test_state();
+        install_fake_app(&state, "demo");
+        let app_dir = state.config.daemon.apps_dir.join("demo");
+        std::fs::create_dir_all(app_dir.join("repository")).unwrap();
+        std::fs::write(app_dir.join("repository/asc.yaml"), [0u8; 64]).unwrap();
+        let addr = spawn_server(state).await;
+
+        let mut apps = AppServiceClient::new(channel(addr).await);
+        let usage = apps
+            .get_app_disk(with_auth(tonic::Request::new(pb::GetAppDiskRequest {
+                id: "demo".into(),
+            })))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(usage.repository_bytes, 64);
+        assert!(usage.quota_bytes.is_none());
+
+        let err = apps
+            .get_app_disk(with_auth(tonic::Request::new(pb::GetAppDiskRequest {
+                id: "ghost".into(),
+            })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]

@@ -143,6 +143,11 @@ enum AppAction {
     Info {
         id: String,
     },
+    /// Show disk usage: quota bar (if a quota is set) and a breakdown by
+    /// image, repository, data and custom volumes
+    Disk {
+        id: String,
+    },
     /// Install an app from a registry (same as top-level `asc install`)
     Install {
         spec: String,
@@ -313,7 +318,7 @@ fn install_cmd(
     let ctx = UserContext::current();
     let name = match name {
         Some(name) => Some(name),
-        None => prompt_app_name(spec)?,
+        None => prompt_app_name(spec, config)?,
     };
     let name = name.as_deref();
     let mut source = source.map(str::to_string);
@@ -367,14 +372,35 @@ fn install_cmd(
 /// Interactive custom-name prompt of `asc install` (DMN-024): Enter keeps
 /// the default (the name from the package manifest), anything else becomes
 /// the app's name — commands then accept it interchangeably with the id.
+/// When instances of the package are already installed, the default shows
+/// the suffixed instance id the install would allocate (DMN-033). For a
+/// whole-stack spec the name is a prefix (DMN-034) and the prompt says so.
 /// Skipped for non-interactive stdin, where `--name` is the way.
-fn prompt_app_name(spec: &str) -> anyhow::Result<Option<String>> {
+fn prompt_app_name(spec: &str, config: &Config) -> anyhow::Result<Option<String>> {
     // SAFETY: isatty() has no preconditions.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
         return Ok(None);
     }
-    let default = spec.split_once('@').map(|(n, _)| n).unwrap_or(spec);
-    let answer = read_line(&tf(Msg::PkgPromptName, default))?;
+    let base = spec.split_once('@').map(|(n, _)| n).unwrap_or(spec);
+    // A whole-stack install names its apps by prefix; the check is
+    // best-effort (local index only) — any doubt falls back to the app
+    // prompt, the install itself resolves the package authoritatively.
+    let is_stack = !base.contains('/')
+        && RegistryClient::new(config)
+            .and_then(|client| client.resolve_all(base))
+            .map(|candidates| {
+                !candidates.is_empty() && candidates.iter().all(|c| c.entry.package_type == "stack")
+            })
+            .unwrap_or(false);
+    // Stack specs ('stack/app') are not valid ids; fall back to the spec.
+    let store = asc_daemon::daemon::apps::AppStore::new(config.daemon.apps_dir.clone());
+    let default = pkg::instance_id(&store, base).unwrap_or_else(|_| base.to_string());
+    let msg = if is_stack {
+        Msg::PkgPromptStackName
+    } else {
+        Msg::PkgPromptName
+    };
+    let answer = read_line(&tf(msg, &default))?;
     Ok(Some(answer).filter(|a| !a.is_empty()))
 }
 
@@ -675,6 +701,7 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             }
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
+        AppAction::Disk { id } => disk_cmd(&id, config)?,
         AppAction::Install { spec, source, name } => {
             install_cmd(&spec, source.as_deref(), name, config)?
         }
@@ -841,6 +868,69 @@ fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
         parts.push(format!("disk ≤ {}", monitor::human_bytes(disk)));
     }
     parts.join(", ")
+}
+
+/// `asc app disk <id>` (DMN-035): a quota bar when a disk quota is set, then
+/// an itemized breakdown. Column labels are technical identifiers and stay
+/// English, like the rest of `asc app info`.
+fn disk_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
+    use asc_daemon::daemon::apps::disk;
+
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+    let meta = manager.get_authorized(&ctx, reference)?;
+    let usage = disk::usage(config, manager.store(), &meta)?;
+
+    println!("{}  {}", meta.id, meta.display_name());
+    match usage.quota_bytes {
+        Some(quota) => {
+            println!("  {}", usage_string(usage.app_dir_bytes, quota));
+            println!("  {}", static_bar(usage.app_dir_bytes, quota, 30));
+        }
+        None => println!("  {}", monitor::human_bytes(usage.app_dir_bytes)),
+    }
+    println!();
+    println!(
+        "  Images:      {}",
+        usage
+            .image_bytes
+            .map(monitor::human_bytes)
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "  Repository:  {}",
+        monitor::human_bytes(usage.repository_bytes)
+    );
+    println!("  Data:        {}", monitor::human_bytes(usage.data_bytes));
+    if !usage.volumes.is_empty() {
+        println!("  Volumes:");
+        for volume in &usage.volumes {
+            let size = volume
+                .bytes
+                .map(monitor::human_bytes)
+                .unwrap_or_else(|| "-".to_string());
+            let note = if volume.shared {
+                " (shared, not counted)"
+            } else if !volume.counted {
+                " (not counted)"
+            } else {
+                ""
+            };
+            println!("    {} -> {}{note}  {size}", volume.entry, volume.path);
+        }
+    }
+    Ok(())
+}
+
+/// Static `[████░░░░]`-style bar (not `indicatif` — that's for streaming
+/// operations; this renders once for a plain snapshot).
+fn static_bar(used: u64, total: u64, width: usize) -> String {
+    let filled = if total == 0 {
+        0
+    } else {
+        ((used as u128 * width as u128) / total as u128).min(width as u128) as usize
+    };
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(width - filled))
 }
 
 /// `asc app settings <id>` — interactive settings editor (DMN-017/030).

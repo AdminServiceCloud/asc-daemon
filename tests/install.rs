@@ -46,10 +46,27 @@ fn install_from_file_registry() {
     git(&repo, &["commit", "-q", "-m", "init"]);
     git(&repo, &["tag", "v1.0.0"]);
 
-    // 2. file:// registry pointing at that repository.
+    // 1b. Monorepo whose package lives in a subdirectory and is licensed
+    // there only — the clone root has no LICENSE file.
+    let mono = ws.path().join("mono-repo");
+    fs::create_dir_all(mono.join("pkg")).unwrap();
+    fs::write(
+        mono.join("pkg/asc.yaml"),
+        "name: subdemo\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    fs::write(mono.join("pkg/LICENSE"), "Sub terms.\n").unwrap();
+    fs::write(mono.join("README.md"), "no root license\n").unwrap();
+    git(&mono, &["init", "-q"]);
+    git(&mono, &["add", "."]);
+    git(&mono, &["commit", "-q", "-m", "init"]);
+    git(&mono, &["tag", "v1.0.0"]);
+
+    // 2. file:// registry pointing at those repositories.
     let reg = ws.path().join("registry");
     fs::create_dir_all(reg.join("categories")).unwrap();
     let repo_url = repo.display().to_string().replace('\\', "/");
+    let mono_url = mono.display().to_string().replace('\\', "/");
     fs::write(
         reg.join("registry.json"),
         r#"{"name":"local","categories":[{"name":"web","index":"categories/web.json"}]}"#,
@@ -58,7 +75,7 @@ fn install_from_file_registry() {
     fs::write(
         reg.join("categories/web.json"),
         format!(
-            r#"{{"category":"web","packages":[{{"name":"demo","type":"app","latest":"1.0.0","description":"Demo","source":{{"git":"{repo_url}"}}}}]}}"#
+            r#"{{"category":"web","packages":[{{"name":"demo","type":"app","latest":"1.0.0","description":"Demo","source":{{"git":"{repo_url}"}}}},{{"name":"subdemo","type":"app","latest":"1.0.0","description":"Sub","source":{{"git":"{mono_url}","path":"pkg"}}}}]}}"#
         ),
     )
     .unwrap();
@@ -125,6 +142,18 @@ fn install_from_file_registry() {
         assert!(!store.app_dir("demo").unwrap().exists());
     }
 
+    // A monorepo package licensed only in its own subdirectory (no LICENSE
+    // at the clone root) still requires acceptance.
+    {
+        let err = pkg::install(&config, &ctx, "subdemo@1.0.0", None, None, false).unwrap_err();
+        let required = err
+            .downcast_ref::<pkg::LicenseRequired>()
+            .expect("expected the typed license error for a subdir license");
+        assert!(required.license.contains("Sub terms"));
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        assert!(!store.app_dir("subdemo").unwrap().exists());
+    }
+
     // Requested tag is `1.0.0`, the repo has `v1.0.0` — the fallback must hit.
     let pkg::InstallOutcome::App(report) =
         pkg::install(&config, &ctx, "demo@1.0.0", None, None, true).unwrap()
@@ -144,9 +173,28 @@ fn install_from_file_registry() {
     assert!(app_dir.join("config").is_dir());
     assert!(app_dir.join("data").is_dir());
 
-    // Installing on top of an existing app must fail cleanly.
-    let err = pkg::install(&config, &ctx, "demo", None, None, true).unwrap_err();
-    assert!(err.to_string().contains("demo"));
+    // A second install of the same package becomes a new instance (DMN-033):
+    // the id gets the first free '-N' suffix, the id doubles as the display
+    // name, and the registry package is recorded for upgrades.
+    let pkg::InstallOutcome::App(second) =
+        pkg::install(&config, &ctx, "demo@1.0.0", None, None, true).unwrap()
+    else {
+        panic!("expected a single-app install");
+    };
+    assert_eq!(second.id, "demo-2");
+    let meta2 = store.get("demo-2").unwrap().expect("meta.json must exist");
+    assert_eq!(meta2.custom_name.as_deref(), Some("demo-2"));
+    assert_eq!(meta2.package.as_deref(), Some("demo"));
+    // An explicit --name wins over the generated one.
+    let pkg::InstallOutcome::App(third) =
+        pkg::install(&config, &ctx, "demo@1.0.0", None, Some("My Demo"), true).unwrap()
+    else {
+        panic!("expected a single-app install");
+    };
+    assert_eq!(third.id, "demo-3");
+    let meta3 = store.get("demo-3").unwrap().expect("meta.json must exist");
+    assert_eq!(meta3.custom_name.as_deref(), Some("My Demo"));
+    store.remove("demo-3").unwrap();
 
     // Unknown packages fail with the "not found" error, not a panic/partial state.
     assert!(pkg::install(&config, &ctx, "ghost", None, None, true).is_err());
@@ -183,6 +231,22 @@ fn install_from_file_registry() {
         pkg::UpgradeOutcome::UpToDate { version, .. } => assert_eq!(version, "v2.0.0"),
         other => panic!("expected up-to-date, got {other:?}"),
     }
+
+    // A suffixed instance resolves upgrades through its recorded package:
+    // 'demo-2' is not a registry name, meta.package points it at 'demo'.
+    match pkg::upgrade(&config, &ctx, "demo-2@2.0.0").unwrap() {
+        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+            assert_eq!(id, "demo-2");
+            assert_eq!(from.as_deref(), Some("v1.0.0"));
+            assert_eq!(to, "v2.0.0");
+        }
+        other => panic!("expected an upgrade of the instance, got {other:?}"),
+    }
+    store.remove("demo-2").unwrap();
+    assert!(
+        store.get("demo").unwrap().is_some(),
+        "removing an instance must not touch the first install"
+    );
 
     // A missing tag fails before touching the installed repository.
     assert!(pkg::upgrade(&config, &ctx, "demo@9.9.9").is_err());

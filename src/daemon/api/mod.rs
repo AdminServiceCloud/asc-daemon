@@ -100,6 +100,17 @@ impl ApiState {
             .await
     }
 
+    pub async fn app_disk(
+        self: &Arc<Self>,
+        id: String,
+    ) -> Result<crate::daemon::apps::disk::DiskUsage> {
+        self.blocking(move |s| {
+            let meta = s.manager.get_authorized(&api_context(), &id)?;
+            crate::daemon::apps::disk::usage(&s.config, s.manager.store(), &meta)
+        })
+        .await
+    }
+
     pub async fn install(
         self: &Arc<Self>,
         spec: String,

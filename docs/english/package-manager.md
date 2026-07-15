@@ -58,6 +58,12 @@ settings:
     values: [peaceful, easy, normal, hard]
     default: normal
 
+  - key: game_version
+    type: enum                  # presets, but a custom value is also accepted
+    values: [public, latest_experimental]
+    default: public
+    allow_custom: true           # any other branch/build id is accepted as-is
+
   - key: rcon_password
     type: secret                # stored as a secret, masked
     required: true
@@ -87,6 +93,7 @@ settings:
   - `name:/container/path[:ro|:rw]` — a Docker **named volume**, created by the Engine on first use. Named volumes are how several apps share data: one app writes the volume, others mount it `:ro` (see the cs2 stack in [asc-example-apps](../../../asc-example-apps)). Named volumes are not removed with the app.
 - **Applying changes**: a container's configuration is fixed at creation, so on the next `asc app start` / `asc app restart` the daemon compares the desired state — env, published ports, volumes, quota, start command — with the container's actual one and **recreates the container** when they differ (or when the container is missing). App data lives in volumes and survives the recreate. If the desired state cannot be computed (say, the registry source is gone), the app still starts as is — availability wins, with a warning in the log.
 - Changing settings — **`asc app settings <id>`**: an interactive editor in the terminal. It first shows the **categories** — `environments` (string/number/boolean/enum/secret settings), `ports`, `volumes`, `quota`, `start_command` — then the settings of the picked category: pick one by number, enter a value, and it is validated against the definition (type, `limits`, enum `values`; secrets are masked in the list; ports and volumes take space-separated lists). Also via the platform UI. After a change the application is restarted (`asc app restart <id>`).
+- **`allow_custom` (type: enum only)** — accepts any value outside the declared `values` list as free text, instead of rejecting it. Use it for enums that list common presets but should not lock the user out of a value the author didn't anticipate (a game branch/build id, a custom world name). The numbered picker in `asc app settings` still lists the presets; typing anything else is simply accepted.
 
 ### 📏 Resource quota (quota)
 
@@ -144,8 +151,8 @@ Installing an application = **cloning its repository**:
 
 1. `asc install <package>` → the daemon clones the package repository into `/asc/apps/<id>/repository/`.
 2. **Application versions = git tags** (GitHub tags): installing a specific version — `asc install <package>@1.2.0` (tag checkout), updating — `asc app upgrade <name>` (checkout of the new tag).
-3. **License consent** (DMN-028): when the cloned repository ships a license (`LICENSE.md` / `LICENSE` / `LICENSE.txt` at its root), the CLI shows where the package comes from (registry source + repository), prints the license text and asks for acceptance — declining aborts the install and leaves nothing behind. Non-interactive input accepts automatically with a printed notice; API callers receive a structured error with the source, the repository and the license text (the platform UI renders its own consent dialog). A stack asks once per repository. Repositories without a license file install without the prompt.
-4. **Custom name** (DMN-024): in a terminal `asc install` asks for an application name — Enter keeps the default (the name from the package manifest), any other input becomes the app's name. Non-interactively, pass `--name "My Server"`. The name is stored in `meta.json` (`custom_name`), must be unique among the user's apps, survives upgrades, and every command accepts it interchangeably with the id. A custom name applies to a single application — not to a whole stack.
+3. **License consent** (DMN-028, DMN-032): when the cloned package ships a license (`LICENSE.md` / `LICENSE` / `LICENSE.txt`), the CLI shows where the package comes from (registry source + repository), prints the license text and asks for acceptance — declining aborts the install and leaves nothing behind. The license is looked up in the **package's own directory** first (a monorepo package may ship its own license), falling back to the repository root. Non-interactive input accepts automatically with a printed notice; API callers receive a structured error with the source, the repository and the license text (the platform UI renders its own consent dialog). A stack asks once per repository. Packages without a license file install without the prompt.
+4. **Custom name and multiple instances** (DMN-024, DMN-033): in a terminal `asc install` asks for an application name — Enter keeps the default, any other input becomes the app's name. Non-interactively, pass `--name "My Server"`. Installing a package that is already installed no longer fails: it becomes a **new instance** with the next free id (`<package>-2`, `<package>-3`, …), which also becomes its `custom_name` unless `--name` overrides it. The name is stored in `meta.json` (`custom_name`), must be unique among the user's apps, survives upgrades, and every command accepts it interchangeably with the id. A suffixed instance records the registry package it came from (`meta.package`), so `asc app upgrade` keeps resolving it correctly.
 5. From then on the daemon works with the local copy: reads `asc.yaml`/`asc.settings.yaml`, builds/launches according to the application type.
 6. For Docker applications the container is created through the Engine API; an image missing on the host is **pulled automatically** from its registry (`runtime.image`; a name without a tag means `latest`) — both at install and at upgrade.
 7. **Progress bars**: on a terminal, the repository clone (`git clone --progress`) and a Docker image pull both render as live bars (`docker pull`/`docker-compose pull` style — one bar per image layer) — on by default, independent of `asc config debug`. Non-interactive callers (piped output, the daemon API) get none of this; the same events are always available as `debug`-level tracing (`asc config debug on`).
@@ -182,6 +189,7 @@ apps:
 ```
 
 - `asc install my-stack` — install the whole stack; `asc install my-stack/web` — just one application from it.
+- **Renaming a stack at install** (DMN-034): `asc install my-stack --name prod` is a **prefix** applied to every installed app — `prod-web`, `prod-worker`, `prod-db` — since a stack has no entity of its own, only its member apps. `asc install my-stack/web --name prod-web` names just the requested app, as for a single-app install.
 - A stack can declare dependencies between applications (`depends_on` — the startup order); components can be `optional`. Environment variables live in each app's own `asc.settings.yaml`.
 - Registries and the platform store index both single `asc.yaml` files and `asc.stack.yaml` stacks.
 - Examples — in the [asc-example-apps](../../../asc-example-apps) repository.
@@ -190,7 +198,7 @@ apps:
 
 - **The app id** is the `name` from the app's own `asc.yaml` (in the example above the stack's `web` app may be named `my-stack-web`); the origin is recorded in meta.json as `package: "my-stack/web"` — `asc app upgrade` resolves the package through it.
 - **Order**: dependencies (`depends_on`) install first; cycles are rejected at validation. `asc install my-stack` installs every non-`optional` component; `asc install my-stack/db` installs the requested component (even an `optional` one) plus its dependencies.
-- **Idempotency**: already-installed apps of the stack are skipped and left untouched; every app installs atomically (a failure removes only its own directory, previously installed components stay).
+- **Repeat installs**: a wanted app (the one(s) requested, not a dependency pulled in alongside them) that is already installed becomes a **new instance** (DMN-033) instead of being skipped; a dependency that is already installed is still reused, not duplicated. Every app installs atomically (a failure removes only its own directory, previously installed components stay).
 - **License consent** is asked once per repository (one repo = one license), not per stack app.
 
 ### Registries

@@ -10,7 +10,10 @@ pub mod settings;
 pub mod sources;
 pub mod upgrade;
 
-pub use install::{AmbiguousPackage, InstallOutcome, InstallReport, LicenseRequired, install};
+pub use install::{
+    AmbiguousPackage, InstallOutcome, InstallReport, LicenseRequired, install, instance_id,
+};
+pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};
 pub use registry::RegistryClient;
 pub use sources::SourceList;
 pub use upgrade::{UpgradeOutcome, upgrade};

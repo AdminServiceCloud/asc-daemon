@@ -110,6 +110,9 @@ pub struct SettingDef {
     /// Allowed values (kind: enum).
     #[serde(default)]
     pub values: Vec<serde_yaml::Value>,
+    /// Accept a value outside `values` as free text (kind: enum only).
+    #[serde(default)]
+    pub allow_custom: bool,
     #[serde(default)]
     pub limits: Option<Limits>,
     /// Environment variable to expose the value as.
@@ -240,6 +243,12 @@ impl SettingsFile {
             if def.kind == SettingKind::Enum && def.values.is_empty() {
                 bail!("setting '{}' is an enum but has no values", def.key);
             }
+            if def.allow_custom && def.kind != SettingKind::Enum {
+                bail!(
+                    "setting '{}' has 'allow_custom' but is not of type enum",
+                    def.key
+                );
+            }
             if def.protocol.is_some() && def.kind != SettingKind::Ports {
                 bail!(
                     "setting '{}' has 'protocol' but is not of type ports",
@@ -333,6 +342,9 @@ impl SettingDef {
                         return serde_json::to_value(value).context("cannot convert enum value");
                     }
                 }
+                if self.allow_custom {
+                    return Ok(serde_json::Value::String(raw.to_string()));
+                }
                 bail!(tf(Msg::ErrSettingEnum, self.values_hint()));
             }
             SettingKind::String | SettingKind::Secret => {
@@ -414,13 +426,20 @@ impl SettingDef {
         }
     }
 
-    /// `a|b|c` — the allowed enum values.
+    /// `a|b|c` — the allowed enum values (plus a note when a custom value
+    /// outside the list is also accepted).
     pub fn values_hint(&self) -> String {
-        self.values
+        let list = self
+            .values
             .iter()
             .map(yaml_scalar)
             .collect::<Vec<_>>()
-            .join("|")
+            .join("|");
+        if self.allow_custom {
+            format!("{list} ({})", t(Msg::HintEnumCustom))
+        } else {
+            list
+        }
     }
 
     /// Value as shown to the user; secrets are masked, lists are readable.
@@ -762,6 +781,30 @@ settings:
     fn enum_without_values_is_rejected() {
         let file: SettingsFile =
             serde_yaml::from_str("settings:\n  - { key: mode, type: enum }\n").unwrap();
+        assert!(file.validate().is_err());
+    }
+
+    #[test]
+    fn enum_with_allow_custom_accepts_unlisted_values() {
+        let d = def(
+            "{ key: branch, type: enum, values: [public, latest_experimental], allow_custom: true }",
+        );
+        assert_eq!(
+            d.parse_value("public").unwrap(),
+            serde_json::json!("public")
+        );
+        assert_eq!(
+            d.parse_value("my-custom-build").unwrap(),
+            serde_json::json!("my-custom-build")
+        );
+        assert!(d.values_hint().contains("public|latest_experimental"));
+    }
+
+    #[test]
+    fn allow_custom_is_rejected_outside_enum() {
+        let file: SettingsFile =
+            serde_yaml::from_str("settings:\n  - { key: p, type: string, allow_custom: true }\n")
+                .unwrap();
         assert!(file.validate().is_err());
     }
 

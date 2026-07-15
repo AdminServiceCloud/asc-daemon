@@ -85,7 +85,6 @@ pub enum Msg {
     AttachDockerOnly,
     AttachStartFirst,
     PkgInstalled,
-    PkgAlreadyInstalled,
     PkgNotFound,
     PkgAmbiguous,
     PkgNotInSource,
@@ -96,9 +95,9 @@ pub enum Msg {
     PkgStackAppSkipped,
     PkgStartHint,
     PkgPromptName,
+    PkgPromptStackName,
     PkgNameInvalid,
     PkgNameTaken,
-    PkgNameForSingleApp,
     PkgPolicyDockerOnly,
     PkgUpgraded,
     PkgUpToDate,
@@ -184,6 +183,7 @@ pub enum Msg {
     ErrSettingRange,
     ErrSettingBool,
     ErrSettingEnum,
+    HintEnumCustom,
     ErrSettingLength,
     ErrSettingPort,
     ErrSettingVolume,
@@ -251,10 +251,6 @@ pub fn t(msg: Msg) -> &'static str {
             "названию '{}' соответствует несколько приложений — используйте id",
         ),
         Msg::PkgInstalled => ("Installed '{}' version {}", "Установлено '{}' версии {}"),
-        Msg::PkgAlreadyInstalled => (
-            "app '{}' is already installed",
-            "приложение '{}' уже установлено",
-        ),
         Msg::PkgNotFound => (
             "package '{}' not found in any registry (refresh indexes: asc update)",
             "пакет '{}' не найден ни в одном реестре (обновить индексы: asc update)",
@@ -292,6 +288,10 @@ pub fn t(msg: Msg) -> &'static str {
             "App name [{}] — Enter keeps the default: ",
             "Название приложения [{}] — Enter оставит по умолчанию: ",
         ),
+        Msg::PkgPromptStackName => (
+            "Stack name prefix (apps become '<prefix>-<app>') [{}] — Enter keeps the defaults: ",
+            "Префикс названий стека (приложения получат '<префикс>-<приложение>') [{}] — Enter оставит по умолчанию: ",
+        ),
         Msg::PkgNameInvalid => (
             "invalid app name '{}': 1-64 printable characters, no leading/trailing spaces",
             "недопустимое название '{}': 1-64 печатных символа, без пробелов по краям",
@@ -299,10 +299,6 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::PkgNameTaken => (
             "name '{}' is already used by another app",
             "название '{}' уже занято другим приложением",
-        ),
-        Msg::PkgNameForSingleApp => (
-            "a custom name applies to a single app, not the whole '{}' stack",
-            "пользовательское название применимо к одному приложению, а не ко всему стеку '{}'",
         ),
         Msg::PkgUpgraded => (
             "App '{}' upgraded: {} → {}",
@@ -551,6 +547,7 @@ pub fn t(msg: Msg) -> &'static str {
             "value must be one of: {}",
             "значение должно быть одним из: {}",
         ),
+        Msg::HintEnumCustom => ("or a custom value", "или своё значение"),
         Msg::ErrSettingLength => (
             "value length must be in range {}",
             "длина значения должна быть в диапазоне {}",

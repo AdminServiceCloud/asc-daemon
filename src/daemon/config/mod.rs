@@ -115,6 +115,7 @@ impl Default for ApiConfig {
 #[serde(default)]
 pub struct LogConfig {
     /// Default log level (`trace`..`error`); `RUST_LOG` overrides it.
+    /// Toggled between `info` and `debug` by `asc config debug`.
     pub level: String,
 }
 

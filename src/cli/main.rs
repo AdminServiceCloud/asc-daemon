@@ -213,6 +213,23 @@ enum ServiceAction {
 enum ConfigAction {
     /// Show or set the CLI output language (en|ru)
     Lang { lang: Option<Lang> },
+    /// Show or set debug logging (on|off); persists to config.toml [log] level
+    Debug { state: Option<OnOff> },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+impl std::fmt::Display for OnOff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OnOff::On => "on",
+            OnOff::Off => "off",
+        })
+    }
 }
 
 fn main() {
@@ -226,6 +243,10 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load()?;
     i18n::set_lang(config.language);
+    // Every command gets tracing, not just `serve`: `asc install` and
+    // friends run package/docker logic in-process, so `asc config debug on`
+    // is only useful if the CLI itself emits the debug! calls it enables.
+    logging::init(&config.log.level);
 
     // CLI commands die quietly on a closed pipe (`asc status | head`), like
     // any Unix tool. The daemon keeps Rust's default (SIGPIPE ignored):
@@ -236,13 +257,10 @@ fn run() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Command::Serve => {
-            logging::init(&config.log.level);
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?
-                .block_on(server::run(config))
-        }
+        Command::Serve => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(server::run(config)),
         Command::Service { action } => service_cmd(action),
         Command::Status => status_cmd(&config),
         Command::Stats { sort } => stats_cmd(sort, &config),
@@ -1457,6 +1475,22 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
             config.save()?;
             i18n::set_lang(lang);
             println!("{}", tf(Msg::ConfigLangSet, lang));
+        }
+        ConfigAction::Debug { state: None } => {
+            let current = if config.log.level == "debug" {
+                OnOff::On
+            } else {
+                OnOff::Off
+            };
+            println!("{}", tf(Msg::ConfigDebugCurrent, current));
+        }
+        ConfigAction::Debug { state: Some(state) } => {
+            config.log.level = match state {
+                OnOff::On => "debug".to_string(),
+                OnOff::Off => "info".to_string(),
+            };
+            config.save()?;
+            println!("{}", tf(Msg::ConfigDebugSet, state));
         }
     }
     Ok(())

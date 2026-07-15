@@ -57,6 +57,7 @@ Community files: [🛡️ SECURITY.md](SECURITY.md) — security policy and priv
 - **Autonomy**: the daemon fully works without the platform (CLI + local API) — this is fundamental to its open source value.
 - **Connecting to the platform**: `asc connect <token>` — an outbound connection to nodeservice, mTLS after registration.
 - **Localization**: the language setting is stored in the config (`language` in `/etc/asc/config.toml`), chosen at install time and changed with `asc config lang en|ru` — it affects the output of all commands through the translation system (`src/daemon/i18n/`); debug messages are not translated.
+- **Debug logging**: `asc config debug on|off` toggles `[log] level` between `debug` and `info` in `config.toml` (`RUST_LOG` still overrides it); every command initializes tracing, not just `asc serve`, so e.g. `asc install` streams Docker image-pull progress to stderr — useful when a long install looks stuck with no output.
 - **Updates**: a separate utility, [🔄 asc-updater](updater.md) — auto-updates (can be disabled), stable/beta channels, rollback; at install time it shows the default settings and asks: install with them or change.
 
 ## 🔗 Related tasks

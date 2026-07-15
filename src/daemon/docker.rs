@@ -22,7 +22,7 @@ use bollard::query_parameters::{
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::daemon::config::DockerConfig;
 use crate::daemon::i18n::{Msg, t, tf};
@@ -331,7 +331,9 @@ fn image_ref(image: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Pull an image from its registry, waiting until the Engine finishes.
+/// Pull an image from its registry, waiting until the Engine finishes. Each
+/// layer event is logged at debug level — the Engine gives no other way to
+/// tell a slow pull from a stuck one.
 async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardError> {
     let (from_image, tag) = image_ref(image);
     let opts = CreateImageOptions {
@@ -341,7 +343,18 @@ async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardEr
     };
     let mut progress = docker.create_image(Some(opts), None, None);
     while let Some(step) = progress.next().await {
-        step?;
+        let step = step?;
+        let bytes = step.progress_detail.as_ref().and_then(|p| {
+            let (current, total) = (p.current?, p.total?);
+            Some(format!("{current}/{total}"))
+        });
+        debug!(
+            image,
+            layer = step.id.as_deref().unwrap_or_default(),
+            status = step.status.as_deref().unwrap_or_default(),
+            bytes = bytes.as_deref().unwrap_or_default(),
+            "pulling image"
+        );
     }
     Ok(())
 }

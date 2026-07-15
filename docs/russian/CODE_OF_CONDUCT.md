@@ -1,6 +1,6 @@
 # 🤝 Кодекс поведения
 
-> 🌍 **Язык:** Русский · [🇬🇧 English version](../english/CODE_OF_CONDUCT.md)
+> 🌍 **Язык:** Русский · [🇬🇧 English version](../../CODE_OF_CONDUCT.md)
 
 ## 🌟 Наши обязательства
 

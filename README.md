@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.0.17-blue)](version.txt)
+[![Version](https://img.shields.io/badge/version-0.0.18-blue)](version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## 📌 About
@@ -173,7 +173,7 @@ If you want to say **thank you** or support the active development of asc-daemon
 
 Contribution rules are in [CONTRIBUTING.md](CONTRIBUTING.md); CI and releases run on GitHub Actions (`.github/workflows/`). Developing on Windows? Use **WSL** (Ubuntu) to build and test the project: `cargo build` / `cargo test` run in WSL, while `cargo check` / `clippy` work from the host against the Linux target (see `.cargo/config.toml`). Every pull request automatically gets a review from the code owner ([@statebyte](https://github.com/statebyte)) via [CODEOWNERS](.github/CODEOWNERS).
 
-Please read our [🤝 Code of Conduct](docs/english/CODE_OF_CONDUCT.md) before participating — we are committed to a welcoming and harassment-free community.
+Please read our [🤝 Code of Conduct](CODE_OF_CONDUCT.md) before participating — we are committed to a welcoming and harassment-free community.
 
 ## 👥 Authors & contributors
 
@@ -185,7 +185,7 @@ For a full list of all authors and contributors, see the [contributors page](htt
 
 asc-daemon follows good practices of security, but 100% security cannot be assured. The software is provided **"as is"** without any warranty.
 
-Found a vulnerability? Please report it privately — see our [🛡️ Security Policy](docs/english/SECURITY.md).
+Found a vulnerability? Please report it privately — see our [🛡️ Security Policy](SECURITY.md).
 
 ## 📄 License
 

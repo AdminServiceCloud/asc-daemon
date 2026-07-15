@@ -24,7 +24,7 @@ Working in this repository, you are a **systems programmer with many years of ex
 - Daemon module docs live **in this repository**: `docs/english/` and `docs/russian/` (language selector — [docs/README.md](docs/README.md); indexes — [docs/english/README.md](docs/english/README.md) and [docs/russian/overview.md](docs/russian/overview.md)).
 - Doc structure: 📌 Description → 🎯 Scenarios → 🏗️ Technical design → 🔗 Related tasks.
 - New module → new docs in `docs/english/` **and** `docs/russian/` + a line in both indexes, in the repository README (EN + RU) and in the modules table.
-- Community files: [🛡️ SECURITY](docs/english/SECURITY.md) and [🤝 CODE_OF_CONDUCT](docs/english/CODE_OF_CONDUCT.md) (Russian versions in `docs/russian/`); the current version is duplicated in [version.txt](version.txt) — keep it in sync with `Cargo.toml`.
+- Community files: [🛡️ SECURITY](SECURITY.md) and [🤝 CODE_OF_CONDUCT](CODE_OF_CONDUCT.md) — at the repository root, where GitHub's community-profile checks expect them (Russian versions in `docs/russian/`); the current version is duplicated in [version.txt](version.txt) — keep it in sync with `Cargo.toml`.
 
 ## 🛠️ Repository specifics
 

@@ -7,4 +7,4 @@ Module documentation is bilingual — pick your language:
 | 🇬🇧 **English** | [docs/english/](english/README.md) |
 | 🇷🇺 **Русский** | [docs/russian/](russian/overview.md) |
 
-Community files: [🛡️ Security Policy](english/SECURITY.md) · [🤝 Code of Conduct](english/CODE_OF_CONDUCT.md) ([🇷🇺 SECURITY](russian/SECURITY.md) · [🇷🇺 Кодекс поведения](russian/CODE_OF_CONDUCT.md))
+Community files: [🛡️ Security Policy](../SECURITY.md) · [🤝 Code of Conduct](../CODE_OF_CONDUCT.md) ([🇷🇺 SECURITY](russian/SECURITY.md) · [🇷🇺 Кодекс поведения](russian/CODE_OF_CONDUCT.md))

@@ -1,6 +1,6 @@
 # 🛡️ Политика безопасности
 
-> 🌍 **Язык:** Русский · [🇬🇧 English version](../english/SECURITY.md)
+> 🌍 **Язык:** Русский · [🇬🇧 English version](../../SECURITY.md)
 
 ## 📦 Поддерживаемые версии
 

@@ -26,6 +26,7 @@ use tracing::{debug, info};
 
 use crate::daemon::config::DockerConfig;
 use crate::daemon::i18n::{Msg, t, tf};
+use crate::daemon::progress;
 
 /// Seconds the Engine waits on stop before killing the container.
 const STOP_TIMEOUT_SECS: i64 = 10;
@@ -333,7 +334,8 @@ fn image_ref(image: &str) -> (&str, Option<&str>) {
 
 /// Pull an image from its registry, waiting until the Engine finishes. Each
 /// layer event is logged at debug level — the Engine gives no other way to
-/// tell a slow pull from a stuck one.
+/// tell a slow pull from a stuck one — and, on a terminal, rendered as a
+/// `docker pull`-style progress bar per layer, regardless of the log level.
 async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardError> {
     let (from_image, tag) = image_ref(image);
     let opts = CreateImageOptions {
@@ -341,20 +343,36 @@ async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardEr
         tag: tag.map(str::to_string),
         ..Default::default()
     };
-    let mut progress = docker.create_image(Some(opts), None, None);
-    while let Some(step) = progress.next().await {
+    let mut bars = progress::interactive().then(progress::LayerBars::new);
+    let mut stream = docker.create_image(Some(opts), None, None);
+    while let Some(step) = stream.next().await {
         let step = step?;
-        let bytes = step.progress_detail.as_ref().and_then(|p| {
-            let (current, total) = (p.current?, p.total?);
-            Some(format!("{current}/{total}"))
-        });
+        let bytes = step
+            .progress_detail
+            .as_ref()
+            .and_then(|p| Some((p.current?, p.total?)));
+        let status = step.status.as_deref().unwrap_or_default();
+        let layer = step.id.as_deref().unwrap_or_default();
         debug!(
             image,
-            layer = step.id.as_deref().unwrap_or_default(),
-            status = step.status.as_deref().unwrap_or_default(),
-            bytes = bytes.as_deref().unwrap_or_default(),
+            layer,
+            status,
+            bytes = bytes
+                .map(|(c, t)| format!("{c}/{t}"))
+                .as_deref()
+                .unwrap_or_default(),
             "pulling image"
         );
+        if let Some(bars) = &mut bars {
+            if layer.is_empty() {
+                bars.header(status);
+            } else {
+                bars.update(layer, status, bytes);
+            }
+        }
+    }
+    if let Some(bars) = bars {
+        bars.finish();
     }
     Ok(())
 }

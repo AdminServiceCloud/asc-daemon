@@ -5,8 +5,9 @@
 //! the half-created app directory, so a retry starts clean.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
@@ -19,6 +20,7 @@ use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
 use crate::daemon::i18n::{Msg, t, tf, tf2, tf3};
+use crate::daemon::progress::{self, PhaseBar};
 
 #[derive(Debug)]
 pub struct InstallReport {
@@ -478,8 +480,13 @@ pub(super) fn clone_repository(
     }
 }
 
+/// Clones with `git`'s own `--progress` output rendered as a live bar on a
+/// terminal (regardless of the log level): `git` normally suppresses that
+/// output once stderr isn't a tty (which it never is here, piped for
+/// capture), so `--progress` forces it back on and [`read_progress_lines`]
+/// parses the `\r`-delimited status line as it streams in.
 fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
-    let mut args: Vec<&str> = vec!["clone", "--depth", "1"];
+    let mut args: Vec<&str> = vec!["clone", "--depth", "1", "--progress"];
     if let Some(tag) = tag {
         args.extend(["--branch", tag]);
     }
@@ -499,25 +506,76 @@ fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
     let credential = auth.as_ref().and_then(|a| a.lookup(git_url));
     let mut cmd = Command::new("git");
     cmd.args(&args);
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
     let _askpass = super::auth::configure_git(&mut cmd, credential.map(|c| &c.method))?;
 
-    let out = match cmd.output() {
-        Ok(out) => out,
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(t(Msg::ErrGitNotFound)),
         Err(e) => return Err(e).context("cannot run git"),
     };
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    // Read to EOF before wait(): git closes stderr at exit, and draining it
+    // first avoids the classic pipe-fills-up-then-deadlock ordering bug.
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let bar = progress::interactive().then(PhaseBar::new);
+    let captured = read_progress_lines(&mut stderr, |line| {
+        if let (Some(bar), Some((phase, pct))) = (&bar, progress::parse_git_progress(line)) {
+            bar.update(phase, pct);
+        }
+    });
+    if let Some(bar) = bar {
+        bar.finish();
+    }
+    let status = child.wait().context("cannot wait for git clone")?;
+    if !status.success() {
         // Only when no credential matched: with one configured, a plain
         // error (with the real git message) beats an offer to reconfigure.
-        if credential.is_none() && super::auth::is_auth_failure(&stderr) {
+        if credential.is_none() && super::auth::is_auth_failure(&captured) {
             return Err(anyhow::Error::new(super::auth::AuthRequired {
                 url: git_url.to_string(),
             }));
         }
-        bail!("git clone failed: {}", stderr.trim());
+        bail!("git clone failed: {}", captured.trim());
     }
     Ok(())
+}
+
+/// Read a child's piped stderr, splitting on `\r` *or* `\n` — `git
+/// --progress` overwrites its status line with a bare `\r`, which
+/// `BufRead::lines()` would never split on. Calls `on_line` for every
+/// segment and returns the full text, newline-joined, for error reporting.
+fn read_progress_lines(reader: &mut impl Read, mut on_line: impl FnMut(&str)) -> String {
+    let mut captured = String::new();
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 4096];
+    let flush = |pending: &mut Vec<u8>, captured: &mut String, on_line: &mut dyn FnMut(&str)| {
+        if pending.is_empty() {
+            return;
+        }
+        let line = String::from_utf8_lossy(pending).into_owned();
+        on_line(&line);
+        if !captured.is_empty() {
+            captured.push('\n');
+        }
+        captured.push_str(&line);
+        pending.clear();
+    };
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &byte in &buf[..n] {
+            if byte == b'\r' || byte == b'\n' {
+                flush(&mut pending, &mut captured, &mut on_line);
+            } else {
+                pending.push(byte);
+            }
+        }
+    }
+    flush(&mut pending, &mut captured, &mut on_line);
+    captured
 }
 
 /// Manifest directory inside the repository (monorepo packages set `path`).

@@ -144,15 +144,60 @@ apps:
         Some("demo-stack/master")
     );
 
-    // ── Re-install: everything is skipped, nothing breaks ────────────────
+    // ── Re-install: wanted apps become new instances (DMN-033) ───────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
     } = pkg::install(&config, &ctx, "demo-stack", None, None, true).unwrap()
     else {
         panic!("expected a stack install");
     };
-    assert!(installed.is_empty());
-    assert_eq!(skipped, ["demo-master", "demo-server"]);
+    let ids: Vec<&str> = installed.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["demo-master-2", "demo-server-2"]);
+    assert!(skipped.is_empty());
+    let meta = store.get("demo-server-2").unwrap().expect("meta.json");
+    assert_eq!(meta.custom_name.as_deref(), Some("demo-server-2"));
+    assert_eq!(meta.package.as_deref(), Some("demo-stack/server"));
+    store.remove("demo-master-2").unwrap();
+    store.remove("demo-server-2").unwrap();
+
+    // ── Whole stack with --name: the name prefixes every wanted app ──────
+    let pkg::InstallOutcome::Stack {
+        installed, skipped, ..
+    } = pkg::install(&config, &ctx, "demo-stack", None, Some("my"), true).unwrap()
+    else {
+        panic!("expected a stack install");
+    };
+    let ids: Vec<&str> = installed.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["demo-master-2", "demo-server-2"]);
+    assert_eq!(
+        store
+            .get("demo-master-2")
+            .unwrap()
+            .unwrap()
+            .custom_name
+            .as_deref(),
+        Some("my-master")
+    );
+    assert_eq!(
+        store
+            .get("demo-server-2")
+            .unwrap()
+            .unwrap()
+            .custom_name
+            .as_deref(),
+        Some("my-server")
+    );
+    assert!(skipped.is_empty());
+    // The same prefix again collides on the resulting names — and fails
+    // before anything is installed.
+    let err = pkg::install(&config, &ctx, "demo-stack", None, Some("my"), true).unwrap_err();
+    assert!(err.to_string().contains("my-master"), "got: {err:#}");
+    assert!(
+        store.get("demo-master-3").unwrap().is_none(),
+        "no partial install"
+    );
+    store.remove("demo-master-2").unwrap();
+    store.remove("demo-server-2").unwrap();
 
     // ── Single app from the stack (optional installs when asked) ─────────
     let pkg::InstallOutcome::Stack {
@@ -164,6 +209,19 @@ apps:
     assert_eq!(installed.len(), 1);
     assert_eq!(installed[0].id, "demo-extras");
     assert!(skipped.is_empty());
+
+    // ── '<stack>/<app>' again: the app becomes a new instance, its
+    // already-installed dependencies are reused, not duplicated ──────────
+    let pkg::InstallOutcome::Stack {
+        installed, skipped, ..
+    } = pkg::install(&config, &ctx, "demo-stack/server", None, None, true).unwrap()
+    else {
+        panic!("expected a stack install");
+    };
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id, "demo-server-2");
+    assert_eq!(skipped, ["demo-master"]);
+    store.remove("demo-server-2").unwrap();
 
     // Unknown stack app fails cleanly.
     let err = pkg::install(&config, &ctx, "demo-stack/ghost", None, None, true).unwrap_err();

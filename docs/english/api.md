@@ -39,6 +39,7 @@ The daemon's API server: two transports on **one port** — gRPC (tonic; compati
 | `GET /v1/apps` | `AppService.ListApps` | Application list |
 | `POST /v1/apps {"spec": "name@ver"}` | `AppService.InstallApp` | Install from a registry |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | A single application |
+| `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Disk usage: image, repository, data, custom volumes |
 | `POST /v1/apps/{id}/start\|stop\|restart` | `AppService.Start/Stop/RestartApp` | Lifecycle |
 | `GET /v1/apps/{id}/logs?tail=N` | `AppService.GetAppLogs` | Log tail |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Removal including data |

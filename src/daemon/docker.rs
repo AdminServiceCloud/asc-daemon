@@ -266,6 +266,32 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<(u64, u
     })
 }
 
+/// Size of an image on the host, in bytes. `None` when the image has not
+/// been pulled yet (404).
+pub fn image_size(cfg: &DockerConfig, image: &str) -> Result<Option<u64>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_image(image).await {
+            Ok(info) => Ok(info.size.map(|s| s.max(0) as u64)),
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// Host mountpoint of a Docker named volume. `None` when the volume does
+/// not exist yet (404) — the Engine creates it on first container use.
+pub fn volume_mountpoint(cfg: &DockerConfig, name: &str) -> Result<Option<std::path::PathBuf>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_volume(name).await {
+            Ok(info) => Ok(Some(std::path::PathBuf::from(info.mountpoint))),
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
 /// Last `tail` lines of the container's logs (non-follow), stdout+stderr.
 pub fn logs_tail(cfg: &DockerConfig, container: &str, tail: usize) -> Result<String> {
     block_on(async {

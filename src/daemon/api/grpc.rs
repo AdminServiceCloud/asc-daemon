@@ -36,6 +36,27 @@ fn to_status(err: anyhow::Error) -> Status {
     }
 }
 
+fn disk_to_pb(usage: &crate::daemon::apps::disk::DiskUsage) -> pb::GetAppDiskResponse {
+    pb::GetAppDiskResponse {
+        app_dir_bytes: usage.app_dir_bytes,
+        quota_bytes: usage.quota_bytes,
+        image_bytes: usage.image_bytes,
+        repository_bytes: usage.repository_bytes,
+        data_bytes: usage.data_bytes,
+        volumes: usage
+            .volumes
+            .iter()
+            .map(|v| pb::AppVolumeUsage {
+                entry: v.entry.clone(),
+                path: v.path.clone(),
+                bytes: v.bytes,
+                shared: v.shared,
+                counted: v.counted,
+            })
+            .collect(),
+    }
+}
+
 fn to_pb(status: &AppStatus) -> pb::App {
     pb::App {
         id: status.meta.id.clone(),
@@ -159,6 +180,18 @@ impl AppService for Grpc {
         Ok(Response::new(pb::GetAppResponse {
             app: Some(to_pb(&status)),
         }))
+    }
+
+    async fn get_app_disk(
+        &self,
+        request: Request<pb::GetAppDiskRequest>,
+    ) -> Result<Response<pb::GetAppDiskResponse>, Status> {
+        let usage = self
+            .0
+            .app_disk(request.into_inner().id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(disk_to_pb(&usage)))
     }
 
     async fn install_app(

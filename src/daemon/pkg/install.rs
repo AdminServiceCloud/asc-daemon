@@ -74,7 +74,8 @@ pub struct LicenseRequired {
     pub package: String,
     pub source: String,
     pub git: String,
-    /// The license text (LICENSE.md / LICENSE / LICENSE.txt at the repo root).
+    /// The license text (LICENSE.md / LICENSE / LICENSE.txt in the package
+    /// directory, else at the repository root).
     pub license: String,
 }
 
@@ -95,27 +96,38 @@ impl std::fmt::Display for LicenseRequired {
 
 impl std::error::Error for LicenseRequired {}
 
-/// License text of a cloned package repository: the first of LICENSE.md,
-/// LICENSE, LICENSE.txt at the repository root. `None` — no license file.
-fn repo_license(repo_dir: &Path) -> Option<String> {
+/// The first of LICENSE.md, LICENSE, LICENSE.txt in `dir`, if any.
+fn license_in(dir: &Path) -> Option<String> {
     ["LICENSE.md", "LICENSE", "LICENSE.txt"]
         .iter()
-        .find_map(|name| fs::read_to_string(repo_dir.join(name)).ok())
+        .find_map(|name| fs::read_to_string(dir.join(name)).ok())
 }
 
-/// Bail with [`LicenseRequired`] when the repository ships a license and the
-/// caller has not accepted it. Repositories without a license file install
+/// License text of a cloned package: the package's own directory wins
+/// (monorepos may license packages individually), the repository root is
+/// the fallback. `None` — no license file in either place.
+fn repo_license(package_dir: &Path, repo_root: &Path) -> Option<String> {
+    license_in(package_dir).or_else(|| {
+        (package_dir != repo_root)
+            .then(|| license_in(repo_root))
+            .flatten()
+    })
+}
+
+/// Bail with [`LicenseRequired`] when the package ships a license and the
+/// caller has not accepted it. Packages without a license file install
 /// without a prompt.
 fn require_license_ack(
     resolved: &ResolvedPackage,
     package: &str,
-    repo_dir: &Path,
+    package_dir: &Path,
+    repo_root: &Path,
     license_ack: bool,
 ) -> Result<()> {
     if license_ack {
         return Ok(());
     }
-    if let Some(license) = repo_license(repo_dir) {
+    if let Some(license) = repo_license(package_dir, repo_root) {
         return Err(anyhow::Error::new(LicenseRequired {
             package: package.to_string(),
             source: resolved.source_name.clone(),
@@ -177,8 +189,9 @@ impl Drop for RemoveOnDrop {
 /// Install from the configured registries. The spec is `name[@version]` for
 /// apps and whole stacks, `stack/app[@version]` for one app of a stack.
 /// `source` pins the registry source when several provide the package.
-/// `custom_name` is the user-chosen app name (DMN-024); it applies to a
-/// single app — installing a whole stack with one rejects the install.
+/// `custom_name` is the user-chosen app name (DMN-024). For a whole-stack
+/// install it acts as a prefix: every installed stack app is named
+/// `<prefix>-<app>` (DMN-034).
 /// `license_ack` — the caller has accepted the repository license; without
 /// it a repository shipping a LICENSE raises [`LicenseRequired`].
 pub fn install(
@@ -211,19 +224,40 @@ pub fn install(
         license_ack,
     };
     if resolved.entry.package_type == "stack" {
-        if custom_name.is_some() && stack_app.is_none() {
-            bail!(tf(Msg::PkgNameForSingleApp, package));
-        }
         return install_stack(config, ctx, &resolved, package, stack_app, opts);
     }
     if stack_app.is_some() {
         bail!(tf2(Msg::PkgNotAStack, package, package));
     }
     let store = AppStore::new(config.daemon.apps_dir.clone());
-    if store.get(package)?.is_some() {
-        bail!(tf(Msg::PkgAlreadyInstalled, package));
+    let id = instance_id(&store, package)?;
+    install_one(config, ctx, &resolved, &id, None, opts).map(InstallOutcome::App)
+}
+
+/// Instance id for a fresh install (DMN-033): the package name itself, or
+/// the first free `<package>-N` when instances of it are already installed.
+/// A candidate is taken when its app directory exists **or** some app's
+/// custom name equals it — a generated id must not shadow an existing name
+/// (the resolver prefers ids over custom names on collision).
+pub fn instance_id(store: &AppStore, package: &str) -> Result<String> {
+    let metas = store.list()?;
+    let free = |id: &str| -> Result<bool> {
+        Ok(!store.app_dir(id)?.exists()
+            && !metas.iter().any(|m| m.custom_name.as_deref() == Some(id)))
+    };
+    if free(package)? {
+        return Ok(package.to_string());
     }
-    install_one(config, ctx, &resolved, package, None, opts).map(InstallOutcome::App)
+    for n in 2u32.. {
+        let candidate = format!("{package}-{n}");
+        if candidate.len() > 64 {
+            break;
+        }
+        if free(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    bail!("cannot allocate an instance id for '{package}': all candidates are taken")
 }
 
 /// Options shared by every install path.
@@ -259,7 +293,10 @@ fn validate_custom_name(config: &Config, ctx: &UserContext, name: &str) -> Resul
 /// Install a stack: clone once to read `asc.stack.yaml`, then install the
 /// selected apps (all non-optional ones, or the requested app) together with
 /// their transitive dependencies, dependencies first. Each app installs
-/// atomically; already-installed apps are skipped and left untouched.
+/// atomically. Wanted apps that are already installed become new instances
+/// (DMN-033); dependencies pulled in alongside them are shared — installed
+/// ones are reused, not duplicated. On a whole-stack install the custom
+/// name is a prefix: every wanted app is named `<prefix>-<app>` (DMN-034).
 fn install_stack(
     config: &Config,
     ctx: &UserContext,
@@ -276,9 +313,9 @@ fn install_stack(
         armed: true,
     };
     clone_repository(&resolved.entry.source.git, opts.version, &probe_dir)?;
-    // One repository = one license: consent is asked once for the stack.
-    require_license_ack(resolved, package, &probe_dir, opts.license_ack)?;
     let stack_root = manifest_dir(&probe_dir, resolved.entry.source.path.as_deref())?;
+    // One repository = one license: consent is asked once for the stack.
+    require_license_ack(resolved, package, &stack_root, &probe_dir, opts.license_ack)?;
     let stack = StackManifest::load(&stack_root)?;
 
     let wanted: Vec<&str> = match stack_app {
@@ -296,34 +333,43 @@ fn install_stack(
             .collect(),
     };
 
+    // A whole-stack custom name is a prefix for every wanted app; validate
+    // the resulting names before installing anything, so a taken name fails
+    // upfront instead of aborting half-way through the stack.
+    if let (Some(prefix), None) = (opts.custom_name, stack_app) {
+        for app in &wanted {
+            validate_custom_name(config, ctx, &format!("{prefix}-{app}"))?;
+        }
+    }
+
     let store = AppStore::new(config.daemon.apps_dir.clone());
     let mut installed = Vec::new();
     let mut skipped = Vec::new();
-    for app in stack.install_order(wanted)? {
-        // The app id is the name from the app's own asc.yaml.
+    for app in stack.install_order(wanted.iter().copied())? {
+        // The app id is the name from the app's own asc.yaml, suffixed for
+        // repeat instances. Dependencies pulled in alongside the wanted
+        // apps are shared: an installed one is reused, not duplicated.
         let manifest = Manifest::load(&safe_join(&stack_root, &app.path)?)?;
-        if store.get(&manifest.name)?.is_some() {
+        let is_wanted = wanted.contains(&app.name.as_str());
+        if !is_wanted && store.get(&manifest.name)?.is_some() {
             skipped.push(manifest.name);
             continue;
         }
-        // The custom name goes to the app the user asked for, not to the
-        // dependencies pulled in alongside it; the license was accepted for
-        // the whole repository above.
+        let id = instance_id(&store, &manifest.name)?;
+        // The custom name goes to the wanted apps — '<prefix>-<app>' on a
+        // whole-stack install, the name itself for '<stack>/<app>' — never
+        // to dependencies; the license was accepted for the repository above.
+        let member_name = match (opts.custom_name, stack_app) {
+            (Some(name), Some(_)) if is_wanted => Some(name.to_string()),
+            (Some(prefix), None) if is_wanted => Some(format!("{prefix}-{}", app.name)),
+            _ => None,
+        };
         let app_opts = InstallOpts {
-            custom_name: opts
-                .custom_name
-                .filter(|_| Some(app.name.as_str()) == stack_app),
+            custom_name: member_name.as_deref(),
             license_ack: true,
             ..opts
         };
-        let report = install_one(
-            config,
-            ctx,
-            resolved,
-            &manifest.name,
-            Some(&app.name),
-            app_opts,
-        )?;
+        let report = install_one(config, ctx, resolved, &id, Some(&app.name), app_opts)?;
         installed.push(report);
     }
     Ok(InstallOutcome::Stack {
@@ -355,10 +401,10 @@ fn install_one(
 
     let repo_dir = app_dir.join("repository");
     let cloned_tag = clone_repository(&resolved.entry.source.git, opts.version, &repo_dir)?;
-    require_license_ack(resolved, name, &repo_dir, opts.license_ack)?;
 
     let (manifest_dir, _) =
         locate_manifest(&repo_dir, resolved.entry.source.path.as_deref(), stack_app)?;
+    require_license_ack(resolved, name, &manifest_dir, &repo_dir, opts.license_ack)?;
     let manifest = Manifest::load(&manifest_dir)?;
 
     // The app type is only known after reading the manifest; the cleanup
@@ -393,10 +439,21 @@ fn install_one(
     )?;
 
     let effective_version = cloned_tag.unwrap_or_else(|| manifest.version.clone());
+    // A suffixed instance id (second install of the same package, DMN-033)
+    // records its package for upgrades and gets the id as its display name —
+    // otherwise several instances would list under one identical title.
+    let base = match stack_app {
+        Some(_) => manifest.name.as_str(),
+        None => resolved.entry.name.as_str(),
+    };
+    let suffixed = name != base;
     let meta = AppMeta {
         id: name.to_string(),
         name: manifest.title.clone().unwrap_or_else(|| name.to_string()),
-        custom_name: opts.custom_name.map(str::to_string),
+        custom_name: opts
+            .custom_name
+            .map(str::to_string)
+            .or_else(|| suffixed.then(|| name.to_string())),
         owner: Owner {
             uid: ctx.uid,
             name: ctx.name.clone(),
@@ -406,7 +463,11 @@ fn install_one(
             "{}:{}",
             resolved.source_name, resolved.entry.source.git
         )),
-        package: stack_app.map(|app| format!("{}/{app}", resolved.entry.name)),
+        package: match stack_app {
+            Some(app) => Some(format!("{}/{app}", resolved.entry.name)),
+            None if suffixed => Some(resolved.entry.name.clone()),
+            None => None,
+        },
         desired_state: DesiredState::Stopped,
         quota,
         runtime,
@@ -734,7 +795,7 @@ fn process_runtime(start: &str) -> Runtime {
 /// filled in for keys the user has not set — so the inputs are complete even
 /// before the first settings edit. The settings are the **only** source:
 /// asc.yaml has no `env:`, `ports:` or `volumes:` sections.
-pub(super) struct RuntimeInputs {
+pub(crate) struct RuntimeInputs {
     /// `(ENV_NAME, value)` for every setting with an `env:` key.
     pub env: Vec<(String, String)>,
     /// Flattened values of every `type: ports` setting, each with its
@@ -746,7 +807,7 @@ pub(super) struct RuntimeInputs {
     pub start_command: Option<String>,
 }
 
-pub(super) fn runtime_inputs(
+pub(crate) fn runtime_inputs(
     settings: Option<&SettingsFile>,
     config_dir: &Path,
 ) -> Result<RuntimeInputs> {
@@ -945,6 +1006,32 @@ fn parse_volume(volume: &str) -> Result<Volume<'_>> {
         return Err(invalid());
     }
     Ok(Volume::Named(volume))
+}
+
+/// Where a volume entry's bytes actually live, for disk usage reporting
+/// (DMN-035). Mirrors [`Volume`]/[`HostSide`] without exposing them.
+pub(crate) enum VolumeKind {
+    /// A folder inside the app directory — already covered when the app
+    /// directory itself is measured.
+    AppFolder(PathBuf),
+    /// An absolute host path outside the app directory — measured on its own.
+    HostPath(PathBuf),
+    /// A Docker named volume, potentially shared with other apps — resolved
+    /// through the Engine, measured on its own.
+    Named(String),
+}
+
+pub(crate) fn classify_volume(volume: &str, app_dir: &Path) -> Result<VolumeKind> {
+    Ok(match parse_volume(volume)? {
+        Volume::Private(_, HostSide::AppFolder(folder)) => {
+            VolumeKind::AppFolder(app_dir.join(folder))
+        }
+        Volume::Private(_, HostSide::HostPath(path)) => VolumeKind::HostPath(PathBuf::from(path)),
+        Volume::Named(entry) => {
+            let name = entry.split_once(':').map_or(entry, |(name, _)| name);
+            VolumeKind::Named(name.to_string())
+        }
+    })
 }
 
 /// Bind string for one volume entry; creates the host directory when needed.

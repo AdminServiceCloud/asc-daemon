@@ -26,6 +26,8 @@ message GetStatusResponse {
 service AppService {
   rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
+  // Disk usage breakdown (DMN-035): image, repository, data, custom volumes.
+  rpc GetAppDisk(GetAppDiskRequest) returns (GetAppDiskResponse);
   // Install from the configured registries: "name" or "name@version".
   rpc InstallApp(InstallAppRequest) returns (InstallAppResponse);
   rpc StartApp(StartAppRequest) returns (StartAppResponse);
@@ -71,6 +73,39 @@ message GetAppRequest {
 
 message GetAppResponse {
   App app = 1;
+}
+
+message GetAppDiskRequest {
+  string id = 1;
+}
+
+message GetAppDiskResponse {
+  // Everything under the app directory (repository + data + config + any
+  // private volume folders) — what the quota measures.
+  uint64 app_dir_bytes = 1;
+  // From asc.settings.yaml quota.max_disk, normalized to bytes.
+  optional uint64 quota_bytes = 2;
+  // Docker image size; absent for non-Docker apps or an unpulled image.
+  optional uint64 image_bytes = 3;
+  uint64 repository_bytes = 4;
+  uint64 data_bytes = 5;
+  // Custom volumes only — the default private volume is covered by
+  // data_bytes.
+  repeated AppVolumeUsage volumes = 6;
+}
+
+message AppVolumeUsage {
+  // The raw asc.settings.yaml volume entry.
+  string entry = 1;
+  // Resolved host path, or the Docker volume name when it has no
+  // mountpoint yet.
+  string path = 2;
+  // Absent when the size could not be determined.
+  optional uint64 bytes = 3;
+  // A Docker named volume — may be mounted by other apps too.
+  bool shared = 4;
+  // Whether `bytes` is already included in app_dir_bytes.
+  bool counted = 5;
 }
 
 message InstallAppRequest {

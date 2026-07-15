@@ -4,6 +4,7 @@
 //! A regular user sees and controls only their own apps; root (incl. sudo)
 //! sees everyone's. The daemon API applies the same rule via request context.
 
+pub mod disk;
 pub mod docker;
 pub mod driver;
 pub mod meta;

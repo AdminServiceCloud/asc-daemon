@@ -23,6 +23,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/metrics/history", get(metrics_history))
         .route("/v1/apps", get(list_apps).post(install_app))
         .route("/v1/apps/{id}", get(get_app).delete(remove_app))
+        .route("/v1/apps/{id}/disk", get(app_disk))
         .route("/v1/apps/{id}/start", post(start_app))
         .route("/v1/apps/{id}/stop", post(stop_app))
         .route("/v1/apps/{id}/restart", post(restart_app))
@@ -166,6 +167,28 @@ async fn get_app(
 ) -> Result<Response, ApiError> {
     let status = state.get_app(id).await?;
     Ok(Json(serde_json::json!({ "app": to_json(&status) })).into_response())
+}
+
+async fn app_disk(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let usage = state.app_disk(id).await?;
+    Ok(Json(serde_json::json!({
+        "app_dir_bytes": usage.app_dir_bytes,
+        "quota_bytes": usage.quota_bytes,
+        "image_bytes": usage.image_bytes,
+        "repository_bytes": usage.repository_bytes,
+        "data_bytes": usage.data_bytes,
+        "volumes": usage.volumes.iter().map(|v| serde_json::json!({
+            "entry": v.entry,
+            "path": v.path,
+            "bytes": v.bytes,
+            "shared": v.shared,
+            "counted": v.counted,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
 }
 
 #[derive(Deserialize)]

@@ -200,6 +200,30 @@ impl PhaseBar {
     }
 }
 
+/// A single byte-progress bar for directory copies (`asc app clone`).
+pub struct CopyBar(ProgressBar);
+
+impl CopyBar {
+    pub fn new(total_bytes: u64) -> Self {
+        let pb = ProgressBar::new(total_bytes);
+        pb.set_style(bytes_style());
+        pb.set_prefix("Copying");
+        Self(pb)
+    }
+
+    pub fn set_length(&self, total_bytes: u64) {
+        self.0.set_length(total_bytes);
+    }
+
+    pub fn set_position(&self, bytes: u64) {
+        self.0.set_position(bytes);
+    }
+
+    pub fn finish(&self) {
+        self.0.finish_and_clear();
+    }
+}
+
 /// Parse a `git clone --progress` line, e.g. `Receiving objects:  45%
 /// (450/1000), 12.34 MiB | 1.02 MiB/s` into `("Receiving objects", 45)`.
 /// The server-side phases (Enumerating/Counting/Compressing objects) arrive

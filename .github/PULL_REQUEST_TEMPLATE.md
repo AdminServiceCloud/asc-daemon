@@ -28,7 +28,7 @@ Keep the PR focused: one logical change per PR. See CONTRIBUTING.md.
 ## 🗂️ Affected component
 
 <!-- e.g. API (gRPC/REST), CLI, App management, Package manager, MCP server,
-     Monitoring, Backups, SFTP, Database, Consoles, Scheduler, Updater, Config -->
+     Monitoring, Backups, SFTP, Consoles, Scheduler, Updater, Config -->
 
 ## 📝 What changed
 

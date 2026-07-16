@@ -30,8 +30,6 @@ pub struct Manifest {
     #[serde(default)]
     pub runtime: RuntimeSpec,
     #[serde(default)]
-    pub database: Option<DatabaseSpec>,
-    #[serde(default)]
     pub requirements: Option<Requirements>,
     #[serde(default)]
     pub healthcheck: Option<Healthcheck>,
@@ -71,14 +69,6 @@ pub struct RuntimeSpec {
     pub stop: Option<String>,
     #[serde(default)]
     pub uninstall: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DatabaseSpec {
-    pub engine: String,
-    #[serde(default)]
-    pub env_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

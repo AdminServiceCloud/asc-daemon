@@ -51,6 +51,31 @@ pub struct QuotaSpec {
     pub max_disk: Option<String>,
 }
 
+/// The `backups` editor category's value (DMN-009), stored under the
+/// `$backup` reserved key: which named storages an app backs up to, how many
+/// copies each keeps, and — once DMN-012 ships a scheduler — how often.
+/// `schedule` is recorded but not enforced yet; run backups by hand
+/// (`asc backup create <app>`) or from an external cron/systemd timer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BackupPolicy {
+    /// Storage names to back up to (`asc backup storage list`); `local`
+    /// always exists even unlisted here.
+    #[serde(default)]
+    pub storages: Vec<String>,
+    /// Copies to keep per storage; unset = unlimited (no rotation).
+    #[serde(default)]
+    pub keep: Option<u32>,
+    /// Free-form schedule string (e.g. `daily@03:00`) — not enforced yet.
+    #[serde(default)]
+    pub schedule: Option<String>,
+}
+
+impl BackupPolicy {
+    pub fn is_empty(&self) -> bool {
+        self.storages.is_empty() && self.keep.is_none() && self.schedule.is_none()
+    }
+}
+
 impl QuotaSpec {
     /// Parse the human sizes into the normalized form stored in meta.json.
     pub fn normalize(&self) -> Result<Quota> {
@@ -160,15 +185,17 @@ pub enum SettingCategory {
     Volumes,
     Quota,
     StartCommand,
+    Backups,
 }
 
 impl SettingCategory {
-    pub const ALL: [SettingCategory; 5] = [
+    pub const ALL: [SettingCategory; 6] = [
         SettingCategory::Environments,
         SettingCategory::Ports,
         SettingCategory::Volumes,
         SettingCategory::Quota,
         SettingCategory::StartCommand,
+        SettingCategory::Backups,
     ];
 
     pub fn label(self) -> &'static str {
@@ -178,6 +205,7 @@ impl SettingCategory {
             SettingCategory::Volumes => "volumes",
             SettingCategory::Quota => "quota",
             SettingCategory::StartCommand => "start_command",
+            SettingCategory::Backups => "backups",
         }
     }
 }
@@ -517,6 +545,7 @@ impl SettingValues {
     /// cannot collide with package setting keys (see [`valid_key`]).
     pub const QUOTA_KEY: &'static str = "$quota";
     pub const START_COMMAND_KEY: &'static str = "$start_command";
+    pub const BACKUP_KEY: &'static str = "$backup";
 
     /// The user's start-command override (the `start_command` editor
     /// category); wins over the package's `start_command`.
@@ -533,6 +562,16 @@ impl SettingValues {
         serde_json::from_value(value.clone())
             .map(Some)
             .context("invalid $quota override in settings.json")
+    }
+
+    /// The app's backup policy (the `backups` editor category, DMN-009).
+    pub fn backup_policy(&self) -> Result<Option<BackupPolicy>> {
+        let Some(value) = self.get(Self::BACKUP_KEY) else {
+            return Ok(None);
+        };
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .context("invalid $backup override in settings.json")
     }
 
     /// Load the values; a missing file means nothing was chosen yet.
@@ -910,9 +949,19 @@ settings:
         );
         assert_eq!(values.start_command_override(), Some("./run --fast"));
         assert_eq!(values.quota_override().unwrap().unwrap().max_cpu, Some(1.5));
+        assert!(values.backup_policy().unwrap().is_none());
+        values.set(
+            SettingValues::BACKUP_KEY,
+            serde_json::json!({ "storages": ["local", "s3-main"], "keep": 5 }),
+        );
+        let policy = values.backup_policy().unwrap().unwrap();
+        assert_eq!(policy.storages, vec!["local", "s3-main"]);
+        assert_eq!(policy.keep, Some(5));
+        assert_eq!(policy.schedule, None);
         // Reserved keys cannot collide with package settings.
         assert!(!valid_key(SettingValues::QUOTA_KEY));
         assert!(!valid_key(SettingValues::START_COMMAND_KEY));
+        assert!(!valid_key(SettingValues::BACKUP_KEY));
     }
 
     #[test]

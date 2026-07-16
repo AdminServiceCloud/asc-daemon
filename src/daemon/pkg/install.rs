@@ -272,7 +272,7 @@ struct InstallOpts<'a> {
 /// unique among the apps this user can see — otherwise `asc app <name>`
 /// commands would be ambiguous. Uniqueness is checked against visible apps
 /// only, so the error never leaks foreign users' app names.
-fn validate_custom_name(config: &Config, ctx: &UserContext, name: &str) -> Result<()> {
+pub(super) fn validate_custom_name(config: &Config, ctx: &UserContext, name: &str) -> Result<()> {
     let ok_len = (1..=64).contains(&name.chars().count());
     let ok_chars = !name.chars().any(char::is_control);
     if !ok_len || !ok_chars || name.trim() != name {
@@ -477,6 +477,160 @@ fn install_one(
     info!(app = name, version = %effective_version, "app installed");
     Ok(InstallReport {
         id: name.to_string(),
+        version: effective_version,
+    })
+}
+
+/// A ref to check out for a direct git install (`asc install <url>`):
+/// `Branch` tracks a moving branch head, `Tag` pins an exact tag. `None`
+/// (neither flag given) clones the repository's default branch HEAD.
+#[derive(Clone, Copy)]
+pub enum GitRef<'a> {
+    Branch(&'a str),
+    Tag(&'a str),
+}
+
+impl GitRef<'_> {
+    /// "branch" or "tag" — only used to log which kind of ref was requested.
+    fn kind(self) -> &'static str {
+        match self {
+            GitRef::Branch(_) => "branch",
+            GitRef::Tag(_) => "tag",
+        }
+    }
+}
+
+/// Whether `spec` looks like a git repository URL rather than a registry
+/// package spec: `https://`/`http://`/`ssh://`, or the scp-like
+/// `git@host:path` form ssh uses without an explicit scheme.
+pub fn is_git_url(spec: &str) -> bool {
+    spec.starts_with("https://")
+        || spec.starts_with("http://")
+        || spec.starts_with("ssh://")
+        || spec.starts_with("git@")
+}
+
+/// The repository's own name from its URL — the default app id for a direct
+/// git install: `https://github.com/foo/bar.git` and `git@github.com:foo/bar`
+/// both give `bar`.
+pub fn repo_name(url: &str) -> Result<String> {
+    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
+    let name = trimmed.rsplit(['/', ':']).next().unwrap_or_default();
+    if name.is_empty() {
+        bail!("cannot derive an app name from '{url}' — pass --name explicitly");
+    }
+    Ok(name.to_string())
+}
+
+/// Install directly from a git repository URL, bypassing the registry: for
+/// one-off installs and private forks that were never published anywhere.
+/// `asc.yaml` must be at the repository root (no monorepo `path`, unlike a
+/// registry entry — there is no entry to carry one). `git_ref` pins the
+/// branch or tag to check out; `None` clones the default branch HEAD.
+/// Private repositories reuse the same `asc auth` credentials as registry
+/// installs (host/prefix matching in [`super::auth`]).
+pub fn install_from_git(
+    config: &Config,
+    ctx: &UserContext,
+    url: &str,
+    git_ref: Option<GitRef<'_>>,
+    custom_name: Option<&str>,
+    license_ack: bool,
+) -> Result<InstallReport> {
+    if let Some(name) = custom_name {
+        validate_custom_name(config, ctx, name)?;
+    }
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    let base = repo_name(url)?;
+    let name = instance_id(&store, &base)?;
+
+    let app_dir = store.app_dir(&name)?;
+    fs::create_dir_all(&app_dir)
+        .with_context(|| format!("cannot create app directory {}", app_dir.display()))?;
+    let mut cleanup = RemoveOnDrop {
+        path: app_dir.clone(),
+        armed: true,
+    };
+
+    let repo_dir = app_dir.join("repository");
+    let checkout = match git_ref {
+        Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(r),
+        None => None,
+    };
+    git_clone(url, checkout, &repo_dir)?;
+
+    // No monorepo `path` for a direct install: the manifest is the
+    // repository root.
+    let manifest_dir = repo_dir.clone();
+    if !license_ack && let Some(license) = repo_license(&manifest_dir, &repo_dir) {
+        return Err(anyhow::Error::new(LicenseRequired {
+            package: name.clone(),
+            source: "git".to_string(),
+            git: url.to_string(),
+            license,
+        }));
+    }
+    let manifest = Manifest::load(&manifest_dir)?;
+
+    // The app type is only known after reading the manifest; the cleanup
+    // guard removes the cloned repository on this failure path too.
+    enforce_install_policy(config, ctx, &manifest, &name)?;
+
+    let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
+
+    for sub in ["config", "data"] {
+        fs::create_dir_all(app_dir.join(sub))
+            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
+    }
+    if let Some(settings) = &settings
+        && !settings.settings.is_empty()
+    {
+        let mut values = SettingValues::default();
+        values.merge_defaults(&settings.settings);
+        values.save(&app_dir.join("config"))?;
+    }
+
+    let runtime = provision(
+        &manifest,
+        &name,
+        &app_dir,
+        &manifest_dir,
+        &config.docker,
+        quota.as_ref(),
+        settings.as_ref(),
+    )?;
+
+    let effective_version = checkout
+        .map(str::to_string)
+        .unwrap_or_else(|| manifest.version.clone());
+    let meta = AppMeta {
+        id: name.clone(),
+        name: manifest.title.clone().unwrap_or_else(|| name.clone()),
+        custom_name: custom_name.map(str::to_string),
+        owner: Owner {
+            uid: ctx.uid,
+            name: ctx.name.clone(),
+        },
+        version: Some(effective_version.clone()),
+        // No registry source name for a direct install — the URL is the
+        // source of truth; `asc upgrade` does not resolve these apps yet.
+        source: Some(format!("git:{url}")),
+        package: None,
+        desired_state: DesiredState::Stopped,
+        quota,
+        runtime,
+    };
+    store.save(&meta)?;
+    cleanup.disarm();
+    info!(
+        app = %name,
+        version = %effective_version,
+        ref_kind = git_ref.map(GitRef::kind).unwrap_or("default"),
+        "app installed from git"
+    );
+    Ok(InstallReport {
+        id: name,
         version: effective_version,
     })
 }
@@ -889,9 +1043,14 @@ fn docker_create(
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
 
+    // Pulling here (rather than leaving it to docker::create's own
+    // pull-on-404) lets the image's declared USER be known before its
+    // bind-mounted volumes are created, so they can be chowned to match.
+    docker::ensure_pulled(docker_cfg, image)?;
+    let owner = docker::image_uid_gid(docker_cfg, image)?;
     let mut binds = Vec::new();
     for volume in &inputs.volumes {
-        binds.push(volume_bind(volume, app_dir)?);
+        binds.push(volume_bind(volume, app_dir, owner)?);
     }
 
     docker::create(
@@ -1034,8 +1193,36 @@ pub(crate) fn classify_volume(volume: &str, app_dir: &Path) -> Result<VolumeKind
     })
 }
 
+/// Open up a freshly created volume directory for the container: world-writable
+/// so an arbitrary-uid image can write into it, and — when `owner` is known —
+/// chowned to that uid:gid so the image can also `chown` it itself. A non-root
+/// process may only chown a path it already owns, so an image that fixes up
+/// its data directory's ownership on first start (`chown -R app:app ...`)
+/// hits EPERM against a root-owned bind mount unless this pre-chown matches
+/// (DMN-038); world-writable alone only ever covered write access.
+fn open_volume_dir(dir: &Path, owner: Option<(u32, u32)>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o777))
+        .with_context(|| format!("cannot chmod volume directory {}", dir.display()))?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::chown(dir, Some(uid), Some(gid)).with_context(|| {
+            format!(
+                "cannot chown volume directory {} to {uid}:{gid}",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Bind string for one volume entry; creates the host directory when needed.
-pub(super) fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
+/// `owner` is the image's numeric `USER` ([`docker::image_uid_gid`]), when
+/// known — passed through to [`open_volume_dir`] for freshly created dirs.
+pub(super) fn volume_bind(
+    volume: &str,
+    app_dir: &Path,
+    owner: Option<(u32, u32)>,
+) -> Result<String> {
     let (host, target) = match parse_volume(volume)? {
         Volume::Named(entry) => return Ok(entry.to_string()),
         Volume::Private(target, HostSide::AppFolder(folder)) => (app_dir.join(folder), target),
@@ -1048,24 +1235,14 @@ pub(super) fn volume_bind(volume: &str, app_dir: &Path) -> Result<String> {
                 fs::create_dir_all(&host).with_context(|| {
                     format!("cannot create volume directory {}", host.display())
                 })?;
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
-                    .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
+                open_volume_dir(&host, owner)?;
             }
             return Ok(format!("{path}:{target}"));
         }
     };
     fs::create_dir_all(&host)
         .with_context(|| format!("cannot create volume directory {}", host.display()))?;
-    // Images run under arbitrary non-root uids (`steam`, `www-data`, …)
-    // and bind mounts keep host ownership — a root-owned 0755 directory
-    // is read-only for them. World-writable applies to this leaf
-    // directory only; the app directory above stays restrictive.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o777))
-            .with_context(|| format!("cannot chmod volume directory {}", host.display()))?;
-    }
+    open_volume_dir(&host, owner)?;
     Ok(format!("{}:{}", host.display(), target))
 }
 
@@ -1103,7 +1280,7 @@ mod tests {
     #[test]
     fn plain_volumes_bind_the_data_folder() {
         let dir = tempfile::tempdir().unwrap();
-        let bind = volume_bind("/home/steam/cs2-dedicated", dir.path()).unwrap();
+        let bind = volume_bind("/home/steam/cs2-dedicated", dir.path(), None).unwrap();
         let host = dir.path().join("data");
         assert_eq!(
             bind,
@@ -1118,9 +1295,25 @@ mod tests {
     }
 
     #[test]
+    fn volumes_are_chowned_to_the_image_owner_when_known() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: geteuid()/getegid() have no preconditions and cannot fail;
+        // chowning a directory this process just created to its own ids is
+        // always a permitted no-op, so the test needs no special privilege.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let bind = volume_bind("/data", dir.path(), Some((uid, gid))).unwrap();
+        let host = dir.path().join("data");
+        assert_eq!(bind, format!("{}:/data", host.display()));
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&host).unwrap();
+        assert_eq!(meta.uid(), uid);
+        assert_eq!(meta.gid(), gid);
+    }
+
+    #[test]
     fn volume_host_folder_after_the_colon_replaces_data() {
         let dir = tempfile::tempdir().unwrap();
-        let bind = volume_bind("/var/lib/postgresql:pgdata", dir.path()).unwrap();
+        let bind = volume_bind("/var/lib/postgresql:pgdata", dir.path(), None).unwrap();
         let host = dir.path().join("pgdata");
         assert_eq!(bind, format!("{}:/var/lib/postgresql", host.display()));
         assert!(host.is_dir(), "the host directory must be created");
@@ -1128,7 +1321,7 @@ mod tests {
         // An absolute path after the colon is a host machine path, verbatim.
         let host_dir = dir.path().join("srv").join("maps");
         let entry = format!("/opt/maps:{}", host_dir.display());
-        let bind = volume_bind(&entry, dir.path()).unwrap();
+        let bind = volume_bind(&entry, dir.path(), None).unwrap();
         assert_eq!(bind, format!("{}:/opt/maps", host_dir.display()));
         assert!(host_dir.is_dir(), "the host directory must be created");
 
@@ -1143,7 +1336,10 @@ mod tests {
             "/data:",
             "/data:/srv/../etc",
         ] {
-            assert!(volume_bind(bad, dir.path()).is_err(), "must reject '{bad}'");
+            assert!(
+                volume_bind(bad, dir.path(), None).is_err(),
+                "must reject '{bad}'"
+            );
         }
     }
 
@@ -1151,15 +1347,15 @@ mod tests {
     fn named_volumes_pass_through_verbatim() {
         let app = Path::new("/nonexistent");
         assert_eq!(
-            volume_bind("cs2-master-data:/data", app).unwrap(),
+            volume_bind("cs2-master-data:/data", app, None).unwrap(),
             "cs2-master-data:/data"
         );
         assert_eq!(
-            volume_bind("cs2-master-data:/home/steam/cs2-dedicated:ro", app).unwrap(),
+            volume_bind("cs2-master-data:/home/steam/cs2-dedicated:ro", app, None).unwrap(),
             "cs2-master-data:/home/steam/cs2-dedicated:ro"
         );
         for bad in ["vol", "vol:data", ":/data", "-vol:/data", "a b:/data"] {
-            assert!(volume_bind(bad, app).is_err(), "must reject '{bad}'");
+            assert!(volume_bind(bad, app, None).is_err(), "must reject '{bad}'");
         }
     }
 

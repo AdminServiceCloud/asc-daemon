@@ -279,6 +279,45 @@ pub fn image_size(cfg: &DockerConfig, image: &str) -> Result<Option<u64>> {
     })
 }
 
+/// Pull `image` if it is not already present locally; a no-op otherwise.
+/// Lets a caller inspect the image (e.g. [`image_uid_gid`]) before it is
+/// known to exist on the host, without duplicating [`create`]'s own
+/// pull-on-404 handling.
+pub fn ensure_pulled(cfg: &DockerConfig, image: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_image(image).await {
+            Ok(_) => Ok(()),
+            Err(e) if status_of(&e) == Some(404) => pull(&docker, image)
+                .await
+                .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image))),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// The numeric `(uid, gid)` the image's default `USER` runs as — `None` for
+/// a named user (`steam`, `www-data`: resolving that needs the image's own
+/// `/etc/passwd`, not available without running it), an unset user (root),
+/// or a bare uid with no explicit group. Bind-mounted volumes are chowned to
+/// this when known, so an image that `chown`s its own data directory on
+/// first start does not hit EPERM against a root-owned bind mount — a
+/// non-root process may only chown a path it already owns (DMN-038).
+pub fn image_uid_gid(cfg: &DockerConfig, image: &str) -> Result<Option<(u32, u32)>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let info = docker
+            .inspect_image(image)
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        let user = info.config.and_then(|c| c.user).unwrap_or_default();
+        let Some((uid, gid)) = user.split_once(':') else {
+            return Ok(None);
+        };
+        Ok(uid.parse().ok().zip(gid.parse().ok()))
+    })
+}
+
 /// Host mountpoint of a Docker named volume. `None` when the volume does
 /// not exist yet (404) — the Engine creates it on first container use.
 pub fn volume_mountpoint(cfg: &DockerConfig, name: &str) -> Result<Option<std::path::PathBuf>> {

@@ -111,10 +111,22 @@ impl Desired {
             .collect();
         ports.sort();
         ports.dedup();
+        // The manifest is validated at install time: a docker-type manifest
+        // always has runtime.image (Manifest::validate).
+        let owner = manifest
+            .runtime
+            .image
+            .as_deref()
+            .map(|image| {
+                docker::ensure_pulled(&config.docker, image)?;
+                docker::image_uid_gid(&config.docker, image)
+            })
+            .transpose()?
+            .flatten();
         let mut binds = inputs
             .volumes
             .iter()
-            .map(|volume| volume_bind(volume, app_dir))
+            .map(|volume| volume_bind(volume, app_dir, owner))
             .collect::<Result<Vec<String>>>()?;
         binds.sort();
         Ok(Self {

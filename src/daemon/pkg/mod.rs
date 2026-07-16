@@ -2,6 +2,7 @@
 //! sources), install by cloning the package repository (versions = git tags).
 
 pub mod auth;
+pub mod clone;
 pub mod install;
 pub mod manifest;
 pub mod refresh;
@@ -10,8 +11,10 @@ pub mod settings;
 pub mod sources;
 pub mod upgrade;
 
+pub use clone::clone_app;
 pub use install::{
-    AmbiguousPackage, InstallOutcome, InstallReport, LicenseRequired, install, instance_id,
+    AmbiguousPackage, GitRef, InstallOutcome, InstallReport, LicenseRequired, install,
+    install_from_git, instance_id, is_git_url, repo_name,
 };
 pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};
 pub use registry::RegistryClient;

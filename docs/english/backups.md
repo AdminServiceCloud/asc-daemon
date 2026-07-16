@@ -2,25 +2,44 @@
 
 ## 📌 Description
 
-The backup execution module on the node: creating, restoring and rotating backups of applications and databases. Policies and schedules are set by the platform ([💾 features/backups](../../../asc-platform/docs/features/backups.md)), but the module also works fully standalone via the CLI.
+The backup execution module on the node: creating, restoring and rotating backups of applications. Policies and schedules can be set by the platform ([💾 features/backups](../../../asc-platform/docs/features/backups.md)), but the module also works fully standalone via the CLI (`asc backup ...`) — no platform account required.
 
 ## 🎯 Scenarios
 
-- `asc backup create <app>` — a full application backup (data + config + env manifest).
-- `asc backup restore <app> <backup-id>` — restore.
-- `asc backup list|prune` — listing and rotation.
-- A task from the platform: a scheduled backup uploaded to S3.
+- `asc backup create <app>` — back up an app to its configured storages (`local` by default), or a specific one with `--storage <name>` (repeatable).
+- `asc backup restore <app> <backup-id>` — restore; the app must be stopped first (destructive: replaces its repository, config and data).
+- `asc backup list <app> [--storage <name>]` — an app's backups on one storage, oldest first.
+- `asc backup prune <app> --keep <n> [--storage <name>]` — delete the oldest backups beyond `n` by hand (rotation also runs automatically after `create`, from the app's own `keep` setting).
+- `asc backup storage add|list|remove` — manage where backups go; `asc app settings <app>` (category `backups`) — which of those storages this app backs up to, how many copies to keep, and (once a scheduler exists) how often.
 
 ## 🏗️ Technical design
 
-- **Formats**: full (tar.gz + a metadata manifest) and incremental (based on a file snapshot).
-- **What's included**: the application's volumes/directories, database dumps (via [🗄️ database](database.md)), the version manifest and env (secrets — encrypted only).
-- **Storages**: a local directory, S3-compatible, SFTP, rsync — behind the `BackupStorage` trait.
-- **Encryption**: optional AES-256-GCM before upload; the key comes from the platform or is local.
-- **Rotation**: keep N latest / by age; runs after every successful backup.
-- **Consistency**: pre/post backup hook commands from `asc.yaml` (e.g. `pg_dump` or pausing writes).
-- **Integration**: schedules — via [⏰ scheduler](scheduler.md); platform-triggered runs — via taskmanager.
+### What's backed up
+
+An archive (`tar.gz`) of the app directory's `repository/`, `config/` and `data/` subdirectories — everything except `meta.json` (regenerated on restore, like a [🧬 clone](app-management.md)). `asc.backup.yaml` at the package repository root excludes paths from the archive:
+
+```yaml
+exclude:
+  - data/cache/**
+  - repository/vendor
+```
+
+Patterns are relative to the app directory and support `*` (any run of characters within one path segment), `**` (any run, crossing `/`) and `?` (one character); excluding a directory excludes everything under it, like `.gitignore`. No file is a substitute for application-level consistency (e.g. a database dump) — pre/post backup hooks are a later increment.
+
+### Storages (`BackupStorage` trait, `src/daemon/backup/storage.rs`)
+
+- **`local`** — always available, no setup: a plain directory (`<data_dir>/backups`, i.e. `/var/lib/asc/backups` by default). This is the only storage kind that actually transfers anything today.
+- **`s3` / `ftp` / `sftp`** — configurable via `asc backup storage add <name> --type s3|ftp|sftp ...` (connection details persist like registry sources — a system list `/etc/asc/backup-storages.toml`, root-managed and visible to everyone, plus a user list `~/.config/asc/backup-storages.toml`; the file is 0600, since it may hold credentials). The provider fields are validated and stored, but `push`/`pull`/`list`/`remove` are not wired up to a real transfer yet — every operation returns a clear "not implemented" error naming the provider. Use `local` (optionally pointed at a mounted network share via `--type local --dir <path>`) until these ship.
+- A configured storage's name cannot be `local` (reserved) and a regular user cannot shadow or remove a system-scoped storage, same rules as [📦 registry sources](package-manager.md).
+
+### Backup policy (`asc app settings` → `backups`)
+
+Stored under the `$backup` reserved key in `config/settings.json`, alongside `$quota`/`$start_command` (same convention, DMN-017/030): `storages` (multi-select, toggled by number in the editor), `keep` (copies to retain per storage — pruned automatically right after each `create`), `schedule` (free text, e.g. `daily@03:00`). **`schedule` is recorded but not enforced** — there is no task runner yet ([⏰ scheduler](scheduler.md), DMN-012 is still planned). Run backups by hand or from an external cron/systemd timer in the meantime. `asc backup create <app>` without `--storage` uses the policy's storages, falling back to `local` alone when the policy is empty.
+
+### Restore
+
+Downloads the archive to a local temp file, then **replaces** the app directory's `repository/`, `config/` and `data/` wholesale (removed, then extracted) — the result is exactly the backed-up snapshot, not a merge with whatever was there. The CLI refuses to restore over a running app.
 
 ## 🔗 Related tasks
 
-DMN-009, BE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-009, DMN-012, BE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

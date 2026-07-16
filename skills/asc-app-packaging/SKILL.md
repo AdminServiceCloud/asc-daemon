@@ -62,6 +62,5 @@ Install: `asc install my-stack` (whole stack) or `asc install my-stack/web` (one
 
 ## Tips
 
-- `database:` section auto-provisions a DB and injects credentials as env secrets — prefer it over bundling a DB manually for simple apps.
 - Mark tokens/passwords with `secret: true` so the platform stores and masks them properly.
 - Examples live in https://github.com/AdminServiceCloud/asc-example-apps.

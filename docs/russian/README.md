@@ -4,8 +4,9 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.0.3-blue)](../../version.txt)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue)](../../version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
 ## 📌 О проекте
 
@@ -19,10 +20,9 @@
 - 📡 **ConnectRPC + REST API** — proto-контракты API живут в этом репозитории (`proto/`) и открыты вместе с демоном; платформа AdminService.Cloud линкует их отсюда. REST (JSON/HTTP) работает одновременно с ConnectRPC на одном сервере — из тех же контрактов
 - 📦 **Пакетный менеджер** — манифест `asc.yaml`, реестры (как в apt) и установка через `asc install <package>`
 - 🤖 **MCP-сервер** — управление сервером через AI (Claude Code, Claude Desktop, платформа ASC)
-- 💾 **Бекапы** — полные и инкрементальные, локальные и в облако (S3/SFTP), с ротацией
+- 💾 **Бекапы** — `asc backup create|restore|list|prune`, локальное хранилище из коробки, S3/FTP/SFTP настраиваются (перенос данных для них ещё не подключён), исключения через `asc.backup.yaml`, ротация
 - 📊 **Мониторинг** — метрики системы и приложений, healthcheck'и
 - 📁 **SFTP-сервер** — файловый доступ с изоляцией по конкретному приложению
-- 🗄️ **Базы данных** — создание баз и пользователей (PostgreSQL, MySQL, MongoDB, Redis)
 - 🖥️ **Консоли** — WebSocket-терминал приложений и SSH-консоль для UI
 - ⏰ **Scheduler** — задачи по расписанию (cron), очередь с приоритетами
 - 🔄 **asc-updater** — отдельная утилита обновлений: автообновления (отключаемые), каналы stable/beta, откат; при установке — выбор настроек по умолчанию или своих
@@ -91,6 +91,11 @@ asc app settings helloworld
 > 🎛️ интерактивный редактор настроек (типы, лимиты и enum из asc.settings.yaml)
 
 ```bash
+asc backup create helloworld
+```
+> 💾 бекап приложения (по умолчанию — локальное хранилище; восстановление — `asc backup restore <app> <backup-id>`)
+
+```bash
 asc config lang ru
 ```
 > 🌍 сменить язык вывода команд (en|ru)
@@ -121,7 +126,7 @@ cp -r skills/* .claude/skills/
 
 | Скилл | Что умеет |
 |---|---|
-| [🖥️ asc-server-management](../../skills/asc-server-management/SKILL.md) | Управление сервером: приложения, логи, бекапы, БД. Если `asc` не установлен — проверит, предложит установить из официального репозитория одной командой (silent-режим) |
+| [🖥️ asc-server-management](../../skills/asc-server-management/SKILL.md) | Управление сервером: приложения, логи, бекапы. Если `asc` не установлен — проверит, предложит установить из официального репозитория одной командой (silent-режим) |
 | [📦 asc-app-packaging](../../skills/asc-app-packaging/SKILL.md) | Упаковка приложений: `asc.yaml` / `asc.stack.yaml`, валидация по схемам, публикация в реестр |
 
 Для MCP-клиентов (Claude Desktop и др.) вместо скиллов — [MCP-сервер демона](mcp-server.md): `asc mcp serve`.
@@ -140,7 +145,6 @@ cp -r skills/* .claude/skills/
 | [📊 monitoring](monitoring.md) | Метрики системы и приложений |
 | [💾 backups](backups.md) | Бекапы приложений |
 | [📁 sftp](sftp.md) | SFTP с изоляцией по приложению |
-| [🗄️ database](database.md) | Управление базами данных |
 | [🖥️ console](console.md) | WebSocket- и SSH-консоли |
 | [⏰ scheduler](scheduler.md) | Планировщик задач |
 | [🔄 updater](updater.md) | Утилита asc-updater: автообновления, каналы, откат |
@@ -160,6 +164,7 @@ Roadmap всего проекта ведётся в репозитории **asc
 
 - 🐛 [GitHub Issues](https://github.com/AdminServiceCloud/asc-daemon/issues) — баги и запросы фич (есть шаблоны)
 - ❓ [GitHub Discussions](https://github.com/AdminServiceCloud/asc-daemon/discussions) — вопросы и идеи
+- 💬 [Discord](https://discord.gg/xzJfp3ePfV) — официальный сервер сообщества: общение, помощь, анонсы
 - ☁️ [adminservice.cloud](https://adminservice.cloud) — сайт платформы и контакты
 
 ## 🌟 Помощь проекту
@@ -169,7 +174,12 @@ Roadmap всего проекта ведётся в репозитории **asc
 - ⭐ Поставьте звезду репозиторию на GitHub
 - 🐦 Расскажите о проекте в соцсетях
 - 📝 Напишите о проекте в блоге или на митапе
+- 💬 Заходите в [Discord-сообщество](https://discord.gg/xzJfp3ePfV)
 - 🤝 [Контрибьютьте](../../CONTRIBUTING.md) — код, доки, переводы, пакеты для реестра
+
+## 🌠 История звёзд
+
+[![Star History Chart](https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date)](https://star-history.com/#AdminServiceCloud/asc-daemon&Date)
 
 ## 🤝 Контрибьют
 

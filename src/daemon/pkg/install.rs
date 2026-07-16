@@ -272,7 +272,7 @@ struct InstallOpts<'a> {
 /// unique among the apps this user can see — otherwise `asc app <name>`
 /// commands would be ambiguous. Uniqueness is checked against visible apps
 /// only, so the error never leaks foreign users' app names.
-fn validate_custom_name(config: &Config, ctx: &UserContext, name: &str) -> Result<()> {
+pub(super) fn validate_custom_name(config: &Config, ctx: &UserContext, name: &str) -> Result<()> {
     let ok_len = (1..=64).contains(&name.chars().count());
     let ok_chars = !name.chars().any(char::is_control);
     if !ok_len || !ok_chars || name.trim() != name {
@@ -477,6 +477,160 @@ fn install_one(
     info!(app = name, version = %effective_version, "app installed");
     Ok(InstallReport {
         id: name.to_string(),
+        version: effective_version,
+    })
+}
+
+/// A ref to check out for a direct git install (`asc install <url>`):
+/// `Branch` tracks a moving branch head, `Tag` pins an exact tag. `None`
+/// (neither flag given) clones the repository's default branch HEAD.
+#[derive(Clone, Copy)]
+pub enum GitRef<'a> {
+    Branch(&'a str),
+    Tag(&'a str),
+}
+
+impl GitRef<'_> {
+    /// "branch" or "tag" — only used to log which kind of ref was requested.
+    fn kind(self) -> &'static str {
+        match self {
+            GitRef::Branch(_) => "branch",
+            GitRef::Tag(_) => "tag",
+        }
+    }
+}
+
+/// Whether `spec` looks like a git repository URL rather than a registry
+/// package spec: `https://`/`http://`/`ssh://`, or the scp-like
+/// `git@host:path` form ssh uses without an explicit scheme.
+pub fn is_git_url(spec: &str) -> bool {
+    spec.starts_with("https://")
+        || spec.starts_with("http://")
+        || spec.starts_with("ssh://")
+        || spec.starts_with("git@")
+}
+
+/// The repository's own name from its URL — the default app id for a direct
+/// git install: `https://github.com/foo/bar.git` and `git@github.com:foo/bar`
+/// both give `bar`.
+pub fn repo_name(url: &str) -> Result<String> {
+    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
+    let name = trimmed.rsplit(['/', ':']).next().unwrap_or_default();
+    if name.is_empty() {
+        bail!("cannot derive an app name from '{url}' — pass --name explicitly");
+    }
+    Ok(name.to_string())
+}
+
+/// Install directly from a git repository URL, bypassing the registry: for
+/// one-off installs and private forks that were never published anywhere.
+/// `asc.yaml` must be at the repository root (no monorepo `path`, unlike a
+/// registry entry — there is no entry to carry one). `git_ref` pins the
+/// branch or tag to check out; `None` clones the default branch HEAD.
+/// Private repositories reuse the same `asc auth` credentials as registry
+/// installs (host/prefix matching in [`super::auth`]).
+pub fn install_from_git(
+    config: &Config,
+    ctx: &UserContext,
+    url: &str,
+    git_ref: Option<GitRef<'_>>,
+    custom_name: Option<&str>,
+    license_ack: bool,
+) -> Result<InstallReport> {
+    if let Some(name) = custom_name {
+        validate_custom_name(config, ctx, name)?;
+    }
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    let base = repo_name(url)?;
+    let name = instance_id(&store, &base)?;
+
+    let app_dir = store.app_dir(&name)?;
+    fs::create_dir_all(&app_dir)
+        .with_context(|| format!("cannot create app directory {}", app_dir.display()))?;
+    let mut cleanup = RemoveOnDrop {
+        path: app_dir.clone(),
+        armed: true,
+    };
+
+    let repo_dir = app_dir.join("repository");
+    let checkout = match git_ref {
+        Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(r),
+        None => None,
+    };
+    git_clone(url, checkout, &repo_dir)?;
+
+    // No monorepo `path` for a direct install: the manifest is the
+    // repository root.
+    let manifest_dir = repo_dir.clone();
+    if !license_ack && let Some(license) = repo_license(&manifest_dir, &repo_dir) {
+        return Err(anyhow::Error::new(LicenseRequired {
+            package: name.clone(),
+            source: "git".to_string(),
+            git: url.to_string(),
+            license,
+        }));
+    }
+    let manifest = Manifest::load(&manifest_dir)?;
+
+    // The app type is only known after reading the manifest; the cleanup
+    // guard removes the cloned repository on this failure path too.
+    enforce_install_policy(config, ctx, &manifest, &name)?;
+
+    let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
+
+    for sub in ["config", "data"] {
+        fs::create_dir_all(app_dir.join(sub))
+            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
+    }
+    if let Some(settings) = &settings
+        && !settings.settings.is_empty()
+    {
+        let mut values = SettingValues::default();
+        values.merge_defaults(&settings.settings);
+        values.save(&app_dir.join("config"))?;
+    }
+
+    let runtime = provision(
+        &manifest,
+        &name,
+        &app_dir,
+        &manifest_dir,
+        &config.docker,
+        quota.as_ref(),
+        settings.as_ref(),
+    )?;
+
+    let effective_version = checkout
+        .map(str::to_string)
+        .unwrap_or_else(|| manifest.version.clone());
+    let meta = AppMeta {
+        id: name.clone(),
+        name: manifest.title.clone().unwrap_or_else(|| name.clone()),
+        custom_name: custom_name.map(str::to_string),
+        owner: Owner {
+            uid: ctx.uid,
+            name: ctx.name.clone(),
+        },
+        version: Some(effective_version.clone()),
+        // No registry source name for a direct install — the URL is the
+        // source of truth; `asc upgrade` does not resolve these apps yet.
+        source: Some(format!("git:{url}")),
+        package: None,
+        desired_state: DesiredState::Stopped,
+        quota,
+        runtime,
+    };
+    store.save(&meta)?;
+    cleanup.disarm();
+    info!(
+        app = %name,
+        version = %effective_version,
+        ref_kind = git_ref.map(GitRef::kind).unwrap_or("default"),
+        "app installed from git"
+    );
+    Ok(InstallReport {
+        id: name,
         version: effective_version,
     })
 }

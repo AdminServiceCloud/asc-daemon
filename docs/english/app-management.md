@@ -11,8 +11,9 @@ The core of the daemon: a single interface for managing applications of three ki
 - **Custom names** (DMN-024): `asc install` asks for an app name (Enter keeps the default; non-interactively — `--name`). `asc app list` shows both the original ID and the NAME, and every command accepts either one: `asc app start "My Server"` = `asc app start cs2-server`. When an id and a name collide, the id wins; an ambiguous name (several apps named alike) is an error suggesting the id.
 - **Multiple instances of one app** (DMN-033): installing an already-installed package no longer errors out — it becomes a new instance `<package>-2`, `<package>-3`, … (also its default name), so `asc install nginx` twice gives two independent `nginx`/`nginx-2` apps. Installing a whole stack again names its new instances the same way; `--name <prefix>` on a whole-stack install prefixes every member app instead (DMN-034), since a stack has no entity of its own.
 - **`asc app disk <name>`** (DMN-035): disk usage — a quota bar when `quota.max_disk` is set, then a breakdown by Docker image, repository checkout, private data and custom volumes (Docker named volumes are marked shared and excluded from the app-directory total).
+- **`asc app clone <name> [--name <clone-name>]`** (DMN-019): a full copy of an app instance — repository, config and data — under a new id (the same `<id>-N` numbering a repeat `asc install` uses, DMN-033), with a live byte-progress bar over the copy on a terminal. The runtime itself is never copied (a Docker container/systemd unit/process cannot be), only recreated from the copied manifest and settings, exactly like a fresh install. The clone always starts stopped. Cloning across nodes (moving the copy to a different server via the platform) is a separate, later increment — see [🧬 app-cloning](../../../asc-platform/docs/features/app-cloning.md).
 - `asc app list` — a user sees **only their own** applications; `sudo asc app list` — the applications of all users. Short aliases (DMN-025): `asc ls` and `asc ps` — same output and same permissions.
-- `asc stats` — CPU and memory consumption per application (like `docker stats`, see [📊 monitoring](monitoring.md)).
+- `asc stats [--live] [--sort cpu|mem]` — CPU, memory and disk consumption per application (like `docker stats`, see [📊 monitoring](monitoring.md)).
 - The platform performs the same operations through the daemon API.
 - After a server reboot the daemon restores the application states (running/stopped).
 
@@ -47,8 +48,8 @@ Every application lives in a directory named after its ID:
 - **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple *nodes* running the platform together. Multiple instances of one application on a single node already work (DMN-033/034, above).
-- **MVP CLI commands**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info|disk|settings` (+ the `asc ls`/`asc ps` aliases for the list), `asc service` (managing the daemon itself).
+- **MVP CLI commands**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info|disk|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list), `asc service` (managing the daemon itself).
 
 ## 🔗 Related tasks
 
-DMN-002, DMN-004, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

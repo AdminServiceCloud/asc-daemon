@@ -76,6 +76,12 @@ pub struct AppStats {
     pub cpu_percent: Option<f64>,
     /// Resident memory, bytes. `None` when the app is stopped.
     pub memory_bytes: Option<u64>,
+    /// Everything under the app's directory, in bytes — the same figure
+    /// `asc app disk` measures, computed here without the (comparatively
+    /// expensive) image/volume breakdown so it stays cheap to refresh.
+    pub disk_bytes: u64,
+    /// `meta.quota.disk_bytes`, if the app has a disk quota set.
+    pub quota_disk_bytes: Option<u64>,
 }
 
 /// CPU percentage from two cumulative readings over a wall-clock interval.
@@ -197,10 +203,18 @@ impl AppManager {
                 (Some(a), Some(b)) => Some(cpu_percent(a, b, elapsed_micros)),
                 _ => None,
             };
+            let disk_bytes = self
+                .store
+                .app_dir(&app.meta.id)
+                .map(|dir| disk::dir_size(&dir))
+                .unwrap_or(0);
+            let quota_disk_bytes = app.meta.quota.as_ref().and_then(|q| q.disk_bytes);
             result.push(AppStats {
                 meta: app.meta,
                 cpu_percent: cpu,
                 memory_bytes: second.map(|u| u.memory_bytes),
+                disk_bytes,
+                quota_disk_bytes,
             });
         }
         Ok(result)

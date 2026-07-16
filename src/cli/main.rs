@@ -12,6 +12,7 @@ use asc_daemon::daemon::docker;
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2, tf3};
 use asc_daemon::daemon::monitor;
 use asc_daemon::daemon::pkg::{self, RegistryClient, SourceList};
+use asc_daemon::daemon::progress;
 use asc_daemon::daemon::service::{self, ServiceState};
 use asc_daemon::daemon::{logging, server};
 
@@ -23,7 +24,7 @@ use asc_daemon::daemon::{logging, server};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -37,12 +38,17 @@ enum Command {
     },
     /// Show daemon version, service state and apps summary
     Status,
-    /// Show CPU and memory usage per app, like `docker stats --no-stream`
-    /// (your own apps; run under sudo to see everyone's, grouped by owner)
+    /// Show CPU, memory and disk usage per app, like `docker stats
+    /// --no-stream` (your own apps; run under sudo to see everyone's,
+    /// grouped by owner)
     Stats {
         /// Sort rows by consumption
         #[arg(long, value_enum, default_value_t = StatsSort::Cpu)]
         sort: StatsSort,
+        /// Keep refreshing in place until interrupted (Ctrl+C), like plain
+        /// `docker stats`
+        #[arg(long)]
+        live: bool,
     },
     /// Manage apps (your own; run under sudo to manage everyone's)
     App {
@@ -52,16 +58,25 @@ enum Command {
     /// List apps, shorthand for `asc app list` (root sees all users' apps)
     #[command(visible_alias = "ps")]
     Ls,
-    /// Install from a registry: <name>, <stack> or <stack>/<app>, with optional @<version>
+    /// Install from a registry (<name>, <stack> or <stack>/<app>, with
+    /// optional @<version>) or directly from a git repository URL
+    /// (https://, ssh:// or git@host:path)
     Install {
         spec: String,
-        /// Registry source to install from (when several provide the package)
+        /// Registry source to install from (when several provide the
+        /// package; not used for a direct repository install)
         #[arg(long)]
         source: Option<String>,
         /// Custom app name (skips the interactive prompt); commands accept
         /// it interchangeably with the app id
         #[arg(long)]
         name: Option<String>,
+        /// Branch to check out (direct repository installs only)
+        #[arg(long, conflicts_with = "tag")]
+        branch: Option<String>,
+        /// Tag to check out (direct repository installs only)
+        #[arg(long, conflicts_with = "branch")]
+        tag: Option<String>,
     },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
@@ -81,6 +96,11 @@ enum Command {
     Auth {
         #[command(subcommand)]
         action: AuthAction,
+    },
+    /// Create, restore and manage app backups (DMN-009)
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
     },
     /// Manage daemon configuration
     Config {
@@ -136,6 +156,108 @@ enum AuthAction {
 }
 
 #[derive(Subcommand)]
+enum BackupAction {
+    /// Back up an app: repository, config and data, minus asc.backup.yaml
+    /// exclusions
+    Create {
+        app: String,
+        /// Storage to back up to (repeatable); defaults to the app's
+        /// backup policy (`asc app settings`), else just 'local'
+        #[arg(long = "storage")]
+        storages: Vec<String>,
+    },
+    /// Restore an app from a backup — the app must be stopped first
+    /// (destructive: replaces the app's repository, config and data)
+    Restore {
+        app: String,
+        /// Backup name, as shown by `asc backup list`
+        backup: String,
+        /// Storage the backup lives on (default: local)
+        #[arg(long)]
+        storage: Option<String>,
+    },
+    /// List an app's backups on one storage, oldest first
+    List {
+        app: String,
+        /// Storage to list (default: local)
+        #[arg(long)]
+        storage: Option<String>,
+    },
+    /// Delete an app's oldest backups on one storage beyond --keep
+    Prune {
+        app: String,
+        /// Storage to prune (default: local)
+        #[arg(long)]
+        storage: Option<String>,
+        #[arg(long)]
+        keep: u32,
+    },
+    /// Manage backup storages: 'local' always exists; add S3/FTP/SFTP or
+    /// another local directory
+    Storage {
+        #[command(subcommand)]
+        action: StorageAction,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum StorageType {
+    Local,
+    S3,
+    Ftp,
+    Sftp,
+}
+
+/// Fields of `asc backup storage add`, boxed in [`StorageAction::Add`] —
+/// this one variant carries every provider's fields at once (clippy's
+/// `large_enum_variant`), so it is the odd one out size-wise next to
+/// `List`/`Remove`.
+#[derive(clap::Args)]
+struct StorageAddArgs {
+    name: String,
+    #[arg(long, value_enum)]
+    r#type: StorageType,
+    #[arg(long)]
+    dir: Option<String>,
+    #[arg(long)]
+    bucket: Option<String>,
+    #[arg(long)]
+    region: Option<String>,
+    #[arg(long)]
+    endpoint: Option<String>,
+    #[arg(long)]
+    access_key: Option<String>,
+    #[arg(long)]
+    secret_key: Option<String>,
+    #[arg(long)]
+    prefix: Option<String>,
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    user: Option<String>,
+    #[arg(long)]
+    password: Option<String>,
+    /// SFTP private key path (SFTP only, instead of --password)
+    #[arg(long)]
+    key: Option<std::path::PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum StorageAction {
+    /// Add a storage; the required flags depend on --type (local: --dir;
+    /// s3: --bucket --region [--endpoint] --access-key --secret-key
+    /// [--prefix]; ftp/sftp: --host [--port] --user [--password] [--dir]
+    /// [--key] (sftp only, instead of --password))
+    Add(Box<StorageAddArgs>),
+    /// List configured storages ('local' is always there, unlisted)
+    List,
+    /// Remove a configured storage ('local' cannot be removed)
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
 enum AppAction {
     /// List apps (root sees all users' apps, grouped by owner)
     List,
@@ -148,16 +270,31 @@ enum AppAction {
     Disk {
         id: String,
     },
-    /// Install an app from a registry (same as top-level `asc install`)
+    /// Clone an app instance (data, env, settings) into a new one (DMN-019)
+    Clone {
+        id: String,
+        /// Custom name for the clone (skips the interactive prompt)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Install an app from a registry or a git repository URL (same as
+    /// top-level `asc install`)
     Install {
         spec: String,
-        /// Registry source to install from (when several provide the package)
+        /// Registry source to install from (when several provide the
+        /// package; not used for a direct repository install)
         #[arg(long)]
         source: Option<String>,
         /// Custom app name (skips the interactive prompt); commands accept
         /// it interchangeably with the app id
         #[arg(long)]
         name: Option<String>,
+        /// Branch to check out (direct repository installs only)
+        #[arg(long, conflicts_with = "tag")]
+        branch: Option<String>,
+        /// Tag to check out (direct repository installs only)
+        #[arg(long, conflicts_with = "branch")]
+        tag: Option<String>,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
     Attach {
@@ -244,8 +381,31 @@ fn main() {
     }
 }
 
+/// Bare `asc` (no subcommand): the ASCII banner, copyright and a pointer to
+/// `--help` — a welcome screen instead of a bare usage error. Printed before
+/// the config loads (and thus before the language setting is known), so the
+/// hint below it is the only translated line.
+fn banner_cmd() -> anyhow::Result<()> {
+    println!("{}", asc_daemon::BANNER);
+    println!();
+    println!(
+        "asc {} — AdminService.Cloud daemon & CLI",
+        asc_daemon::VERSION
+    );
+    println!("Copyright (c) 2020 - 2026 Omar El Sayed");
+    println!("https://github.com/AdminServiceCloud/asc-daemon");
+    println!();
+    println!("{}", t(Msg::BannerHelpHint));
+    Ok(())
+}
+
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Bare `asc` (no subcommand): banner + copyright + repository link,
+    // like `git` or `npm` printing a welcome screen instead of an error.
+    let Some(command) = cli.command else {
+        return banner_cmd();
+    };
     let config = Config::load()?;
     i18n::set_lang(config.language);
     // Every command gets tracing, not just `serve`: `asc install` and
@@ -256,24 +416,35 @@ fn run() -> anyhow::Result<()> {
     // CLI commands die quietly on a closed pipe (`asc status | head`), like
     // any Unix tool. The daemon keeps Rust's default (SIGPIPE ignored):
     // getting killed by a log-pipe hiccup is not acceptable for a service.
-    if !matches!(cli.command, Command::Serve) {
+    if !matches!(command, Command::Serve) {
         // SAFETY: resetting a signal disposition has no preconditions.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
 
-    match cli.command {
+    match command {
         Command::Serve => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
             .block_on(server::run(config)),
         Command::Service { action } => service_cmd(action),
         Command::Status => status_cmd(&config),
-        Command::Stats { sort } => stats_cmd(sort, &config),
+        Command::Stats { sort, live } => stats_cmd(sort, live, &config),
         Command::App { action } => app_cmd(action, &config),
         Command::Ls => app_cmd(AppAction::List, &config),
-        Command::Install { spec, source, name } => {
-            install_cmd(&spec, source.as_deref(), name, &config)
-        }
+        Command::Install {
+            spec,
+            source,
+            name,
+            branch,
+            tag,
+        } => install_cmd(
+            &spec,
+            source.as_deref(),
+            name,
+            branch.as_deref(),
+            tag.as_deref(),
+            &config,
+        ),
         Command::Attach { id } => attach_cmd(&id, &config),
         Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
         Command::Search { query } => search_cmd(&query, &config),
@@ -288,6 +459,7 @@ fn run() -> anyhow::Result<()> {
         }
         Command::Source { action } => source_cmd(action),
         Command::Auth { action } => auth_cmd(action),
+        Command::Backup { action } => backup_cmd(action, &config),
         Command::Config { action } => config_cmd(action, config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
     }
@@ -313,9 +485,19 @@ fn install_cmd(
     spec: &str,
     source: Option<&str>,
     name: Option<String>,
+    branch: Option<&str>,
+    tag: Option<&str>,
     config: &Config,
 ) -> anyhow::Result<()> {
     let ctx = UserContext::current();
+    if pkg::is_git_url(spec) {
+        return install_from_git_cmd(spec, source, name, branch, tag, config, &ctx);
+    }
+    if branch.is_some() || tag.is_some() {
+        anyhow::bail!(
+            "--branch and --tag are only used for a direct repository install (a git URL as the spec); pin a registry version with @<version> instead"
+        );
+    }
     let name = match name {
         Some(name) => Some(name),
         None => prompt_app_name(spec, config)?,
@@ -369,6 +551,55 @@ fn install_cmd(
     Ok(())
 }
 
+/// `asc install <git-url>`: bypasses the registry entirely and clones the
+/// repository straight in — for one-off installs and private forks that
+/// were never published to a registry. `--branch`/`--tag` pick the ref to
+/// check out (default branch HEAD otherwise); private repositories reuse the
+/// same `asc auth` credentials as registry installs (host/prefix matching).
+fn install_from_git_cmd(
+    url: &str,
+    source: Option<&str>,
+    name: Option<String>,
+    branch: Option<&str>,
+    tag: Option<&str>,
+    config: &Config,
+    ctx: &UserContext,
+) -> anyhow::Result<()> {
+    if source.is_some() {
+        anyhow::bail!("--source has no effect on a direct repository install");
+    }
+    let git_ref = match (branch, tag) {
+        (Some(b), None) => Some(pkg::GitRef::Branch(b)),
+        (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap rejects --branch together with --tag"),
+    };
+    let name = match name {
+        Some(name) => Some(name),
+        None => prompt_git_app_name(url, config)?,
+    };
+    let name = name.as_deref();
+    let mut license_ack = false;
+    // Same interactive recoveries as a registry install, minus the source
+    // pick (there is only ever one source: the URL itself).
+    let report = loop {
+        match pkg::install_from_git(config, ctx, url, git_ref, name, license_ack) {
+            Ok(report) => break report,
+            Err(err) if offer_auth_setup(&err) => continue,
+            Err(err) => {
+                if accept_license(&err)? {
+                    license_ack = true;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    };
+    println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
+    println!("{}", tf(Msg::PkgStartHint, &report.id));
+    Ok(())
+}
+
 /// Interactive custom-name prompt of `asc install` (DMN-024): Enter keeps
 /// the default (the name from the package manifest), anything else becomes
 /// the app's name — commands then accept it interchangeably with the id.
@@ -401,6 +632,21 @@ fn prompt_app_name(spec: &str, config: &Config) -> anyhow::Result<Option<String>
         Msg::PkgPromptName
     };
     let answer = read_line(&tf(msg, &default))?;
+    Ok(Some(answer).filter(|a| !a.is_empty()))
+}
+
+/// Same custom-name prompt as [`prompt_app_name`], for a direct repository
+/// install: the default is derived from the repository name instead of a
+/// registry manifest (there is none to read yet).
+fn prompt_git_app_name(url: &str, config: &Config) -> anyhow::Result<Option<String>> {
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(None);
+    }
+    let base = pkg::repo_name(url)?;
+    let store = asc_daemon::daemon::apps::AppStore::new(config.daemon.apps_dir.clone());
+    let default = pkg::instance_id(&store, &base).unwrap_or(base);
+    let answer = read_line(&tf(Msg::PkgPromptName, &default))?;
     Ok(Some(answer).filter(|a| !a.is_empty()))
 }
 
@@ -446,6 +692,204 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
             auth.remove(&target)?;
             auth.save()?;
             println!("{}", tf(Msg::AuthRemoved, normalize(&target)));
+        }
+    }
+    Ok(())
+}
+
+/// `asc backup ...` (DMN-009): create/restore/list/prune archives and manage
+/// the storages they go to. Every subcommand resolves the app through
+/// `get_authorized`, so a user only ever touches their own apps' backups
+/// (root, everyone's) — same rule as every other `asc app` command.
+fn backup_cmd(action: BackupAction, config: &Config) -> anyhow::Result<()> {
+    use asc_daemon::daemon::backup::{self, storage};
+    use asc_daemon::daemon::pkg::settings::SettingValues;
+
+    match action {
+        BackupAction::Create { app, storages } => {
+            let manager = AppManager::new(config);
+            let ctx = UserContext::current();
+            let meta = manager.get_authorized(&ctx, &app)?;
+            let config_dir = manager.store().app_dir(&meta.id)?.join("config");
+            let policy = SettingValues::load(&config_dir)?
+                .backup_policy()?
+                .unwrap_or_default();
+            // Explicit --storage wins; otherwise the app's own policy;
+            // otherwise just the always-available local storage.
+            let targets = if !storages.is_empty() {
+                storages
+            } else if !policy.storages.is_empty() {
+                policy.storages.clone()
+            } else {
+                vec![storage::LOCAL_NAME.to_string()]
+            };
+            let storage_list = storage::StorageList::load()?;
+            for name in &targets {
+                let info = backup::create_backup(
+                    config,
+                    manager.store(),
+                    &meta,
+                    &storage_list,
+                    name,
+                    policy.keep,
+                )?;
+                println!(
+                    "{}",
+                    tf3(
+                        Msg::BackupCreated,
+                        &info.name,
+                        &info.storage,
+                        monitor::human_bytes(info.bytes)
+                    )
+                );
+            }
+        }
+        BackupAction::Restore {
+            app,
+            backup: backup_name,
+            storage,
+        } => {
+            let manager = AppManager::new(config);
+            let ctx = UserContext::current();
+            let status = manager.status(&ctx, &app)?;
+            if status.state == RuntimeState::Running {
+                anyhow::bail!(tf2(
+                    Msg::BackupRestoreStopFirst,
+                    &status.meta.id,
+                    &status.meta.id
+                ));
+            }
+            let storage_name = storage.unwrap_or_else(|| storage::LOCAL_NAME.to_string());
+            let storage_list = storage::StorageList::load()?;
+            backup::restore_backup(
+                config,
+                manager.store(),
+                &status.meta,
+                &storage_list,
+                &storage_name,
+                &backup_name,
+            )?;
+            println!(
+                "{}",
+                tf2(Msg::BackupRestored, &status.meta.id, &backup_name)
+            );
+        }
+        BackupAction::List { app, storage } => {
+            let manager = AppManager::new(config);
+            let ctx = UserContext::current();
+            let meta = manager.get_authorized(&ctx, &app)?;
+            let storage_name = storage.unwrap_or_else(|| storage::LOCAL_NAME.to_string());
+            let storage_list = storage::StorageList::load()?;
+            let names = backup::list_backups(config, &storage_list, &storage_name, &meta.id)?;
+            if names.is_empty() {
+                println!("{}", t(Msg::BackupListEmpty));
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
+            }
+        }
+        BackupAction::Prune { app, storage, keep } => {
+            let manager = AppManager::new(config);
+            let ctx = UserContext::current();
+            let meta = manager.get_authorized(&ctx, &app)?;
+            let storage_name = storage.unwrap_or_else(|| storage::LOCAL_NAME.to_string());
+            let storage_list = storage::StorageList::load()?;
+            let impl_ = backup::resolve_storage(config, &storage_list, &storage_name)?;
+            let removed = backup::prune(impl_.as_ref(), &meta.id, keep)?;
+            println!("{}", tf2(Msg::BackupPruned, removed.len(), &storage_name));
+        }
+        BackupAction::Storage { action } => storage_action_cmd(action)?,
+    }
+    Ok(())
+}
+
+/// `asc backup storage ...`: 'local' is always available and never listed
+/// as an entry (its directory is fixed); everything else is configured here.
+fn storage_action_cmd(action: StorageAction) -> anyhow::Result<()> {
+    use asc_daemon::daemon::backup::storage::{StorageKind, StorageList};
+
+    match action {
+        StorageAction::Add(args) => {
+            let StorageAddArgs {
+                name,
+                r#type,
+                dir,
+                bucket,
+                region,
+                endpoint,
+                access_key,
+                secret_key,
+                prefix,
+                host,
+                port,
+                user,
+                password,
+                key,
+            } = *args;
+            let require = |field: Option<String>, flag: &str, kind: &str| {
+                field
+                    .ok_or_else(|| anyhow::anyhow!(tf2(Msg::BackupStorageMissingField, flag, kind)))
+            };
+            let kind = match r#type {
+                StorageType::Local => StorageKind::Local {
+                    dir: require(dir, "--dir", "local")?.into(),
+                },
+                StorageType::S3 => StorageKind::S3 {
+                    bucket: require(bucket, "--bucket", "s3")?,
+                    region: require(region, "--region", "s3")?,
+                    endpoint,
+                    access_key: require(access_key, "--access-key", "s3")?,
+                    secret_key: require(secret_key, "--secret-key", "s3")?,
+                    prefix,
+                },
+                StorageType::Ftp => StorageKind::Ftp {
+                    host: require(host, "--host", "ftp")?,
+                    port: port.unwrap_or(21),
+                    user: require(user, "--user", "ftp")?,
+                    password: require(password, "--password", "ftp")?,
+                    dir,
+                },
+                StorageType::Sftp => {
+                    if password.is_none() && key.is_none() {
+                        anyhow::bail!(tf2(
+                            Msg::BackupStorageMissingField,
+                            "--password or --key",
+                            "sftp"
+                        ));
+                    }
+                    StorageKind::Sftp {
+                        host: require(host, "--host", "sftp")?,
+                        port: port.unwrap_or(22),
+                        user: require(user, "--user", "sftp")?,
+                        password,
+                        key,
+                        dir,
+                    }
+                }
+            };
+            let mut storages = StorageList::load()?;
+            storages.add(&name, kind)?;
+            storages.save()?;
+            println!("{}", tf(Msg::BackupStorageAdded, &name));
+        }
+        StorageAction::List => {
+            let storages = StorageList::load()?;
+            let names = storages.names();
+            let name_w = names.iter().map(|n| n.len()).max().unwrap_or(4).max(4);
+            for name in &names {
+                let label = storages
+                    .get(name)
+                    .map(|e| e.kind.label())
+                    .unwrap_or("local");
+                println!("{name:<name_w$}  {label}");
+            }
+        }
+        StorageAction::Remove { name } => {
+            let mut storages = StorageList::load()?;
+            storages.remove(&name)?;
+            storages.save()?;
+            println!("{}", tf(Msg::BackupStorageRemoved, &name));
         }
     }
     Ok(())
@@ -702,9 +1146,21 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
         AppAction::Disk { id } => disk_cmd(&id, config)?,
-        AppAction::Install { spec, source, name } => {
-            install_cmd(&spec, source.as_deref(), name, config)?
-        }
+        AppAction::Clone { id, name } => clone_cmd(&id, name, config)?,
+        AppAction::Install {
+            spec,
+            source,
+            name,
+            branch,
+            tag,
+        } => install_cmd(
+            &spec,
+            source.as_deref(),
+            name,
+            branch.as_deref(),
+            tag.as_deref(),
+            config,
+        )?,
         AppAction::Attach { id } => attach_cmd(&id, config)?,
         AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
         AppAction::Start { id, detach } => {
@@ -933,6 +1389,49 @@ fn static_bar(used: u64, total: u64, width: usize) -> String {
     format!("[{}{}]", "█".repeat(filled), "░".repeat(width - filled))
 }
 
+/// `asc app clone <id>` (DMN-019): a full copy of an app instance (data,
+/// env, settings) under a new id — the CLI's part is the same custom-name
+/// prompt as `asc install` plus a live byte-progress bar over the copy
+/// (`docker pull`/`git clone` style, on by default on a terminal).
+fn clone_cmd(reference: &str, name: Option<String>, config: &Config) -> anyhow::Result<()> {
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+    let source = manager.get_authorized(&ctx, reference)?;
+    let name = match name {
+        Some(name) => Some(name),
+        None => prompt_app_name(&source.id, config)?,
+    };
+
+    // The source directory's total size is only known once `pkg::clone_app`
+    // measures it internally, so the bar starts empty and grows its length
+    // on the first progress callback instead of being sized upfront.
+    let bar = progress::interactive().then(|| progress::CopyBar::new(0));
+    let mut bar_total = 0u64;
+    let report = pkg::clone_app(
+        config,
+        &ctx,
+        manager.store(),
+        &source,
+        name.as_deref(),
+        |copied, total| {
+            if let Some(bar) = &bar {
+                if total != bar_total {
+                    bar.set_length(total);
+                    bar_total = total;
+                }
+                bar.set_position(copied);
+            }
+        },
+    );
+    if let Some(bar) = bar {
+        bar.finish();
+    }
+    let meta = report?;
+    println!("{}", tf2(Msg::AppCloned, &source.id, &meta.id));
+    println!("{}", tf(Msg::PkgStartHint, &meta.id));
+    Ok(())
+}
+
 /// `asc app settings <id>` — interactive settings editor (DMN-017/030).
 /// The user first picks a **category** — environments, ports, volumes,
 /// quota, start_command — then edits its settings. Package-defined settings
@@ -973,7 +1472,9 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
                 .filter(|d| d.kind.category() == *category)
                 .count();
             let suffix = match category {
-                SettingCategory::Quota | SettingCategory::StartCommand => String::new(),
+                SettingCategory::Quota
+                | SettingCategory::StartCommand
+                | SettingCategory::Backups => String::new(),
                 _ => format!(" ({count})"),
             };
             println!("  {}) {}{suffix}", i + 1, category.label());
@@ -997,6 +1498,7 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
             SettingCategory::StartCommand => {
                 edit_start_command(&file, &mut values, &config_dir, &mut changed)?
             }
+            SettingCategory::Backups => edit_backup_policy(&mut values, &config_dir, &mut changed)?,
             _ => {
                 let defs: Vec<_> = file
                     .settings
@@ -1250,6 +1752,120 @@ fn edit_start_command(
     Ok(())
 }
 
+/// The backups category (DMN-009): which configured storages to back up to
+/// (multi-select — toggle numbers on and off), how many copies to keep per
+/// storage, and a free-form schedule (recorded, not enforced — no scheduler
+/// yet, DMN-012). Stored under the `$backup` reserved key, same convention
+/// as quota/start_command; an all-default policy is removed rather than
+/// stored empty.
+fn edit_backup_policy(
+    values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
+    config_dir: &std::path::Path,
+    changed: &mut bool,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::backup::storage::StorageList;
+    use asc_daemon::daemon::pkg::settings::SettingValues;
+
+    let storages = StorageList::load()?.names();
+    const FIELDS: [&str; 3] = ["storages", "keep", "schedule"];
+    loop {
+        let mut policy = values.backup_policy()?.unwrap_or_default();
+        println!();
+        for (i, field) in FIELDS.iter().enumerate() {
+            let shown = match *field {
+                "storages" if policy.storages.is_empty() => "-".to_string(),
+                "storages" => policy.storages.join(", "),
+                "keep" => policy
+                    .keep
+                    .map(|k| k.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                _ => policy.schedule.clone().unwrap_or_else(|| "-".into()),
+            };
+            println!("  {}) {:<9} = {}", i + 1, field, shown);
+        }
+        println!();
+        let line = read_line(t(Msg::SettingsPromptSelect))?;
+        if line.is_empty() || line.eq_ignore_ascii_case("q") {
+            break;
+        }
+        let Some(index) = line
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|i| *i < FIELDS.len())
+        else {
+            eprintln!("asc: {}", t(Msg::AuthInvalidChoice));
+            continue;
+        };
+        match index {
+            0 => {
+                println!();
+                for (i, name) in storages.iter().enumerate() {
+                    let mark = if policy.storages.iter().any(|s| s == name) {
+                        "x"
+                    } else {
+                        " "
+                    };
+                    println!("  {}) [{mark}] {name}", i + 1);
+                }
+                let raw = read_line(t(Msg::BackupPolicyStorageToggle))?;
+                if raw.is_empty() {
+                    continue;
+                }
+                for token in raw.split([',', ' ']).filter(|t| !t.is_empty()) {
+                    let Some(n) = token
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| (1..=storages.len()).contains(n))
+                    else {
+                        eprintln!("asc: {}", t(Msg::AuthInvalidChoice));
+                        continue;
+                    };
+                    let name = &storages[n - 1];
+                    match policy.storages.iter().position(|s| s == name) {
+                        Some(pos) => {
+                            policy.storages.remove(pos);
+                        }
+                        None => policy.storages.push(name.clone()),
+                    }
+                }
+            }
+            1 => {
+                let raw = read_line(t(Msg::BackupPolicyKeepPrompt))?;
+                if raw.is_empty() {
+                    continue;
+                }
+                if raw == "-" {
+                    policy.keep = None;
+                } else {
+                    match raw.parse::<u32>() {
+                        Ok(n) if n > 0 => policy.keep = Some(n),
+                        _ => {
+                            eprintln!("asc: keep must be a positive integer");
+                            continue;
+                        }
+                    }
+                }
+            }
+            _ => {
+                let raw = read_line(t(Msg::BackupPolicySchedulePrompt))?;
+                if raw.is_empty() {
+                    continue;
+                }
+                policy.schedule = if raw == "-" { None } else { Some(raw) };
+            }
+        }
+        if policy.is_empty() {
+            values.remove(SettingValues::BACKUP_KEY);
+        } else {
+            values.set(SettingValues::BACKUP_KEY, serde_json::to_value(&policy)?);
+        }
+        values.save(config_dir)?;
+        *changed = true;
+    }
+    Ok(())
+}
+
 /// `asc attach` — interactive app console in the terminal: the app's output
 /// goes to stdout, the terminal's stdin goes to the app. Talks straight to
 /// the Engine API (standalone, no running daemon needed); Docker fans the
@@ -1310,17 +1926,36 @@ async fn attach_loop(
     Ok(())
 }
 
-/// `asc stats` — one-shot resource usage per app, like `docker stats
-/// --no-stream`. Root gets everyone's apps grouped by owner.
-fn stats_cmd(sort: StatsSort, config: &Config) -> anyhow::Result<()> {
+/// `asc stats` — resource usage per app, like `docker stats --no-stream`;
+/// with `--live`, keeps refreshing in place instead of exiting after one
+/// sample, like plain `docker stats`. Root gets everyone's apps grouped by
+/// owner. Each sample already costs ~500ms (CPU is a delta over a wall-clock
+/// interval, [`AppManager::stats`] sleeps for it) — that doubles as the live
+/// refresh cadence, no extra sleep needed.
+fn stats_cmd(sort: StatsSort, live: bool, config: &Config) -> anyhow::Result<()> {
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
-    let mut stats = manager.stats(&ctx)?;
-    if stats.is_empty() {
-        println!("{}", t(Msg::AppListEmpty));
-        return Ok(());
+    loop {
+        let mut stats = manager.stats(&ctx)?;
+        if live {
+            // Clear the screen and home the cursor before each redraw, like
+            // `docker stats`/`top`.
+            print!("\x1b[2J\x1b[H");
+        }
+        if stats.is_empty() {
+            println!("{}", t(Msg::AppListEmpty));
+        } else {
+            print_stats_table(&mut stats, sort, ctx.is_root);
+        }
+        if !live {
+            return Ok(());
+        }
     }
-    // Highest consumers first; apps without data (stopped) go last.
+}
+
+/// One `asc stats` render: sorts (highest consumer first, stopped apps
+/// last) and prints, grouped by owner for root.
+fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bool) {
     stats.sort_by(|a, b| {
         let key = |s: &AppStats| match sort {
             StatsSort::Cpu => s.cpu_percent.unwrap_or(-1.0),
@@ -1337,8 +1972,8 @@ fn stats_cmd(sort: StatsSort, config: &Config) -> anyhow::Result<()> {
         .max(2);
     let print_rows = |rows: &[&AppStats]| {
         println!(
-            "{:<id_w$}  {:<7}  {:>7}  {:>10}",
-            "ID", "KIND", "CPU %", "MEM"
+            "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  DISK",
+            "ID", "KIND", "CPU %", "MEM", "QUOTA"
         );
         for s in rows {
             let cpu = s
@@ -1349,16 +1984,22 @@ fn stats_cmd(sort: StatsSort, config: &Config) -> anyhow::Result<()> {
                 .memory_bytes
                 .map(monitor::human_bytes)
                 .unwrap_or_else(|| "-".into());
+            let quota = match s.quota_disk_bytes {
+                Some(quota) => static_bar(s.disk_bytes, quota, 10),
+                None => "-".to_string(),
+            };
             println!(
-                "{:<id_w$}  {:<7}  {:>7}  {:>10}",
+                "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {}",
                 s.meta.id,
                 s.meta.runtime.kind(),
                 cpu,
                 mem,
+                quota,
+                monitor::human_bytes(s.disk_bytes),
             );
         }
     };
-    if ctx.is_root {
+    if group_by_owner {
         let mut owners: Vec<&str> = stats.iter().map(|s| s.meta.owner.name.as_str()).collect();
         owners.sort_unstable();
         owners.dedup();
@@ -1377,7 +2018,6 @@ fn stats_cmd(sort: StatsSort, config: &Config) -> anyhow::Result<()> {
         let rows: Vec<&AppStats> = stats.iter().collect();
         print_rows(&rows);
     }
-    Ok(())
 }
 
 fn state_label(state: RuntimeState) -> &'static str {

@@ -58,6 +58,7 @@ pub fn lang() -> Lang {
 /// Keys of all translatable CLI messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Msg {
+    BannerHelpHint,
     ServiceInstalled,
     ServiceUninstalled,
     ServiceStarted,
@@ -77,6 +78,7 @@ pub enum Msg {
     AppStopped,
     AppNotRunning,
     AppRestarted,
+    AppCloned,
     AppRemoved,
     AppRemoveNeedsYes,
     AppListEmpty,
@@ -189,11 +191,26 @@ pub enum Msg {
     ErrSettingVolume,
     ErrQuotaSize,
     ErrQuotaCpu,
+    BackupCreated,
+    BackupRestored,
+    BackupRestoreStopFirst,
+    BackupListEmpty,
+    BackupPruned,
+    BackupStorageAdded,
+    BackupStorageRemoved,
+    BackupStorageMissingField,
+    BackupPolicyStorageToggle,
+    BackupPolicyKeepPrompt,
+    BackupPolicySchedulePrompt,
 }
 
 /// Translate a message key using the current language.
 pub fn t(msg: Msg) -> &'static str {
     let (en, ru) = match msg {
+        Msg::BannerHelpHint => (
+            "Run 'asc --help' to see the list of commands.",
+            "Запустите 'asc --help', чтобы увидеть список команд.",
+        ),
         Msg::ServiceInstalled => (
             "Service installed and enabled (systemd unit 'asc'). Start it with: asc service start",
             "Сервис установлен и добавлен в автозапуск (systemd-юнит 'asc'). Запуск: asc service start",
@@ -239,6 +256,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::AttachStartFirst => (
             "app '{}' is not running — start it first: asc app start {}",
             "приложение '{}' не запущено — сначала запустите: asc app start {}",
+        ),
+        Msg::AppCloned => (
+            "App '{}' cloned as '{}'",
+            "Приложение '{}' склонировано в '{}'",
         ),
         Msg::AppRemoved => ("App '{}' removed", "Приложение '{}' удалено"),
         Msg::AppRemoveNeedsYes => (
@@ -567,6 +588,41 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ErrQuotaCpu => (
             "quota max_cpu must be a positive number of cores",
             "квота max_cpu должна быть положительным числом ядер",
+        ),
+        Msg::BackupCreated => (
+            "Backup '{}' created on storage '{}' ({})",
+            "Бекап '{}' создан в хранилище '{}' ({})",
+        ),
+        Msg::BackupRestored => (
+            "App '{}' restored from backup '{}'",
+            "Приложение '{}' восстановлено из бекапа '{}'",
+        ),
+        Msg::BackupRestoreStopFirst => (
+            "app '{}' is running — stop it before restoring: asc app stop {}",
+            "приложение '{}' запущено — перед восстановлением остановите его: asc app stop {}",
+        ),
+        Msg::BackupListEmpty => ("no backups yet", "бекапов пока нет"),
+        Msg::BackupPruned => (
+            "Removed {} old backup(s) from storage '{}'",
+            "Удалено старых бекапов: {} (хранилище '{}')",
+        ),
+        Msg::BackupStorageAdded => ("Storage '{}' added", "Хранилище '{}' добавлено"),
+        Msg::BackupStorageRemoved => ("Storage '{}' removed", "Хранилище '{}' удалено"),
+        Msg::BackupStorageMissingField => (
+            "{} is required for --type {}",
+            "{} обязателен для --type {}",
+        ),
+        Msg::BackupPolicyStorageToggle => (
+            "Toggle storage numbers (space/comma separated), Enter to keep: ",
+            "Переключить номера хранилищ (через пробел или запятую), Enter — оставить: ",
+        ),
+        Msg::BackupPolicyKeepPrompt => (
+            "Copies to keep per storage (Enter — keep, '-' — unlimited): ",
+            "Сколько копий хранить на каждое хранилище (Enter — оставить, '-' — не ограничивать): ",
+        ),
+        Msg::BackupPolicySchedulePrompt => (
+            "Schedule (free text, e.g. daily@03:00; not enforced without a scheduler yet; Enter — keep, '-' — clear): ",
+            "Расписание (свободный текст, например daily@03:00; пока не исполняется — нет планировщика; Enter — оставить, '-' — очистить): ",
         ),
     };
     match lang() {

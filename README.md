@@ -4,8 +4,9 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.0.18-blue)](version.txt)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue)](version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
 ## 📌 About
 
@@ -19,10 +20,9 @@
 - 📡 **ConnectRPC + REST API** — the API proto contracts live in this repository (`proto/`) and ship together with the daemon; the AdminService.Cloud platform links them from here. REST (JSON/HTTP) runs alongside ConnectRPC on the same server — from the same contracts
 - 📦 **Package manager** — an `asc.yaml` manifest, registries (like apt) and installation via `asc install <package>`
 - 🤖 **MCP server** — manage the server through AI (Claude Code, Claude Desktop, the ASC platform)
-- 💾 **Backups** — full and incremental, local and to the cloud (S3/SFTP), with rotation
+- 💾 **Backups** — `asc backup create|restore|list|prune`, a local storage out of the box, S3/FTP/SFTP storages configurable (upload not wired up yet), exclusions via `asc.backup.yaml`, rotation
 - 📊 **Monitoring** — system and application metrics, health checks
 - 📁 **SFTP server** — file access isolated to a specific application
-- 🗄️ **Databases** — create databases and users (PostgreSQL, MySQL, MongoDB, Redis)
 - 🖥️ **Consoles** — WebSocket application terminal and SSH console for the UI
 - ⏰ **Scheduler** — scheduled (cron) tasks, a priority queue
 - 🔄 **asc-updater** — a separate updater utility: auto-updates (can be disabled), stable/beta channels, rollback; at install time — pick default settings or your own
@@ -91,6 +91,11 @@ asc app settings helloworld
 > 🎛️ interactive settings editor (types, limits and enums from asc.settings.yaml)
 
 ```bash
+asc backup create helloworld
+```
+> 💾 back up an app (local storage by default; `asc backup restore <app> <backup-id>` to restore)
+
+```bash
 asc config lang ru
 ```
 > 🌍 change the CLI output language (en|ru)
@@ -121,7 +126,7 @@ cp -r skills/* .claude/skills/
 
 | Skill | What it does |
 |---|---|
-| [🖥️ asc-server-management](skills/asc-server-management/SKILL.md) | Server management: applications, logs, backups, databases. If `asc` is not installed, it checks, then offers to install it from the official repository with a single command (silent mode) |
+| [🖥️ asc-server-management](skills/asc-server-management/SKILL.md) | Server management: applications, logs, backups. If `asc` is not installed, it checks, then offers to install it from the official repository with a single command (silent mode) |
 | [📦 asc-app-packaging](skills/asc-app-packaging/SKILL.md) | Packaging applications: `asc.yaml` / `asc.stack.yaml`, validation against schemas, publishing to a registry |
 
 For MCP clients (Claude Desktop and others) use the [daemon's MCP server](docs/english/mcp-server.md) instead of skills: `asc mcp serve`.
@@ -140,7 +145,6 @@ Documentation for the daemon's modules lives in the [docs/english/](docs/english
 | [📊 monitoring](docs/english/monitoring.md) | System and application metrics |
 | [💾 backups](docs/english/backups.md) | Application backups |
 | [📁 sftp](docs/english/sftp.md) | SFTP isolated per application |
-| [🗄️ database](docs/english/database.md) | Database management |
 | [🖥️ console](docs/english/console.md) | WebSocket and SSH consoles |
 | [⏰ scheduler](docs/english/scheduler.md) | Task scheduler |
 | [🔄 updater](docs/english/updater.md) | The asc-updater utility: auto-updates, channels, rollback |
@@ -158,6 +162,7 @@ Reach out to the maintainers through any of these channels:
 
 - 🐛 [GitHub Issues](https://github.com/AdminServiceCloud/asc-daemon/issues) — bug reports and feature requests (templates included)
 - ❓ [GitHub Discussions](https://github.com/AdminServiceCloud/asc-daemon/discussions) — questions and ideas
+- 💬 [Discord](https://discord.gg/xzJfp3ePfV) — the official community server: chat, help, announcements
 - ☁️ [adminservice.cloud](https://adminservice.cloud) — the platform website and contact options
 
 ## 🌟 Project assistance
@@ -167,7 +172,12 @@ If you want to say **thank you** or support the active development of asc-daemon
 - ⭐ Add a GitHub star to the repository
 - 🐦 Share the project on social media
 - 📝 Write about the project on your blog or at meetups
+- 💬 Join the [Discord community](https://discord.gg/xzJfp3ePfV)
 - 🤝 [Contribute](CONTRIBUTING.md) — code, docs, translations, registry packages
+
+## 🌠 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date)](https://star-history.com/#AdminServiceCloud/asc-daemon&Date)
 
 ## 🤝 Contributing
 

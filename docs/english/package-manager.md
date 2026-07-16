@@ -9,6 +9,7 @@ A package manager in the spirit of apt/homebrew: applications are described by a
 - `asc install nginx` — install from the official registry.
 - `asc source add https://registry.example.com` — connect a custom registry (like an apt source).
 - `asc source add https://github.com/user/my-app` — an application straight from GitHub (asc.yaml at the root); for a private repo a 404 triggers an offer to configure a token.
+- `asc install https://github.com/user/my-app --branch dev` — install directly from a repository URL, no registry involved at all (DMN-040): a one-off, for forks and packages that were never published. `asc source add` above wires a repo into the registry system permanently; this is for trying one out.
 - The platform store ([🛍️ app-store](../../../asc-platform/docs/features/app-store.md)) is a storefront over the same registries.
 
 ## 🏗️ Technical design
@@ -161,6 +162,8 @@ Installing an application = **cloning its repository**:
 
 **Updating** (`asc app upgrade <name>[@version]`, synonym — `asc upgrade`): the application must be stopped; the new tag is cloned **next to** the current copy (`repository.new`), the manifest is validated, and only then are the directories swapped and the runtime recreated (for Docker the container is recreated with the new image). A failure before the swap does not touch the installed application; a failure while recreating the runtime rolls back to the previous version. Without an explicit version, `latest` from the registry is used.
 
+**Direct install from a git repository** (`asc install <url> [--branch <name>|--tag <name>]`, DMN-040): when the spec is a git URL (`https://`, `ssh://`, or the scp-like `git@host:path`) rather than a package name, the daemon skips the registry entirely and clones the repository straight in — the same clone/manifest/provision pipeline as a registry install, minus the resolution step. `asc.yaml` must be at the repository root (no monorepo `path`, since there is no registry entry to carry one). `--branch`/`--tag` pick the ref to check out; neither flag clones the default branch HEAD. The app id defaults to the repository's own name (`bar` for both `https://github.com/foo/bar.git` and `git@github.com:foo/bar`); `--name` overrides it, same as a registry install. Private repositories reuse the exact same `asc auth` credentials below — a URL install is just a registry install with the resolution step removed. `asc upgrade` does not yet resolve apps installed this way (there is no registry entry to re-resolve against); re-running `asc install` with the same URL creates a new instance instead of upgrading in place.
+
 **Private repositories**: authorization is configured **per git host or prefix** (`github.com`, `github.com/myorg`) and stored separately from the source lists — `/etc/asc/git-auth.toml` (root) and `~/.config/asc/git-auth.toml` (user), both files 0600. Secrets end up neither in world-readable files nor in the argv of git processes (argv is visible to all users via /proc).
 
 - **Methods**: a GitHub token — for `https://` URLs (passed via `GIT_ASKPASS` + an environment variable of the git process); an SSH key — for `git@`/`ssh://` URLs (`GIT_SSH_COMMAND` with `-i <key> -o IdentitiesOnly=yes`). When several entries match, the longest prefix wins; user entries take priority over system ones.
@@ -215,8 +218,8 @@ apps:
   - The effective list = system sources (higher priority) + your own; a user cannot shadow or remove system sources (`asc source list` shows the origin of every source). Index caches: for root — in `data_dir`, for a user — in `~/.cache/asc/`.
 - **Install policy** (`[policy]` in `/etc/asc/config.toml`, managed by root): `user_install = "all"` (default — users may install any packages: Docker, native, utilities) or `user_install = "docker"` (users may install Docker applications only; native apps and utilities are root-only). Applied at `asc install`; does not apply to root.
 - **Index cache** with a TTL + `asc update` for a forced refresh.
-- **CLI**: `asc install|remove|upgrade <pkg>`, `asc search <query>`, `asc source add|remove|list`, `asc update`.
+- **CLI**: `asc install|remove|upgrade <pkg>` (or `asc install <git-url> [--branch|--tag]`), `asc search <query>`, `asc source add|remove|list`, `asc update`.
 
 ## 🔗 Related tasks
 
-DMN-003, DMN-018, DMN-038, REG-001, REG-002, BE-002, BE-003 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).
+DMN-003, DMN-018, DMN-038, DMN-040, REG-001, REG-002, BE-002, BE-003 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).

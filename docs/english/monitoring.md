@@ -7,7 +7,7 @@ Collecting system and application metrics on the node: CPU, RAM, disk, network, 
 ## 🎯 Scenarios
 
 - `asc status` — a server and application summary in the terminal.
-- `asc stats` — CPU and memory consumption per application (like `docker stats`); root sees all users' applications grouped by owner.
+- `asc stats` — CPU, memory and disk consumption per application (like `docker stats --no-stream`); `asc stats --live` keeps refreshing in place instead of exiting after one sample (like plain `docker stats`); root sees all users' applications grouped by owner.
 - The platform dashboard shows node load graphs in real time.
 - An "application went down" alert → a Telegram notification (via the platform).
 - The AI assistant answers "what's eating my memory?" with monitoring data.
@@ -28,7 +28,7 @@ Collecting system and application metrics on the node: CPU, RAM, disk, network, 
 - **API**: `MonitorService` in proto (`GetSystemMetrics`, `GetMetricsHistory`) + REST routes `GET /v1/metrics` and `GET /v1/metrics/history?limit=N` — both transports on top of the shared layer, like the rest of the API (DMN-005).
 - **CLI**: `asc status` shows CPU (usage, load average), memory and disks — the metrics are sampled by the CLI itself without contacting the daemon (autonomy).
 - **Per-app metrics**: the `usage()` method on the `AppDriver` trait returns cumulative counters (CPU time in microseconds, resident memory in bytes); sources by runtime — the Docker Engine API (`/containers/<id>/stats`, one-shot), the systemd unit's cgroup v2 (`cpu.stat` + `memory.current`), `/proc/<pid>/stat` + `statm` for processes. CPU% is computed as the delta of two samples (~500 ms), like `docker stats`, and can exceed 100% on multi-core machines.
-- **CLI `asc stats`**: an ID / KIND / CPU % / MEM table over running applications; sorting `--sort cpu|mem` (cpu by default); for root — grouping by owner, like `asc app list`. Stopped applications are shown with dashes.
+- **CLI `asc stats`**: an ID / KIND / CPU % / MEM / QUOTA / DISK table over running applications — QUOTA is a compact usage bar (like `asc app disk`) when the app has a disk quota set, else a dash, DISK is the app directory's total size regardless; sorting `--sort cpu|mem` (cpu by default); for root — grouping by owner, like `asc app list`. Stopped applications are shown with dashes. `--live` reprints the same table in place (screen clear + redraw) every ~500 ms — the same interval a single sample already costs for the CPU delta, so no extra sleep — until Ctrl+C.
 - Next increments: per-app metrics in the API (`MonitorService`), history in SQLite, healthcheck statuses, pushing into the tunnel.
 
 ## 🔗 Related tasks

@@ -17,7 +17,6 @@ Open source CLI utility and daemon written in Rust, installed on the user's serv
 | 📊 System and application monitoring | [monitoring](monitoring.md) |
 | 💾 Application backups | [backups](backups.md) |
 | 📁 Per-application SFTP server | [sftp](sftp.md) |
-| 🗄️ Database management | [database](database.md) |
 | 🖥️ WebSocket and SSH consoles | [console](console.md) |
 | ⏰ Task scheduler | [scheduler](scheduler.md) |
 | 🔄 The asc-updater update utility | [updater](updater.md) |
@@ -37,7 +36,7 @@ Community files: [🛡️ SECURITY.md](../../SECURITY.md) — security policy an
 │   │   ├── apps/     # drivers: docker, systemd, process
 │   │   ├── pkg/      # package manager + registries
 │   │   ├── mcp/      # MCP server
-│   │   ├── backup/ monitor/ sftp/ db/ console/ scheduler/
+│   │   ├── backup/ monitor/ sftp/ console/ scheduler/
 │   │   ├── i18n/     # translation system for command output (EN/RU)
 │   │   └── config/   # /etc/asc/config.toml
 │   └── updater/      # 🔄 asc-updater — a separate update binary (see updater.md)

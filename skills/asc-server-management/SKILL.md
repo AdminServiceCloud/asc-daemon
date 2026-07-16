@@ -1,6 +1,6 @@
 ---
 name: asc-server-management
-description: Manage a server through the ASC daemon CLI - install and control applications (Docker and native), view logs, monitor resources, create backups, manage databases. Use when the user asks to install/start/stop apps on a server, check server or app status, read logs, back up an app, or troubleshoot a server managed by AdminService.Cloud (asc).
+description: Manage a server through the ASC daemon CLI - install and control applications (Docker and native), view logs, monitor resources, create backups. Use when the user asks to install/start/stop apps on a server, check server or app status, read logs, back up an app, or troubleshoot a server managed by AdminService.Cloud (asc).
 ---
 
 # ASC Server Management
@@ -42,7 +42,6 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 | Update sources | `asc update` |
 | Add a registry/repo | `asc source add <url>` |
 | Backup / restore | `asc backup create <app>` / `asc backup restore <app> <id>` — restore is destructive, confirm first |
-| Databases | `asc db list`, `asc db user add <user> --db <db> --grant rw` |
 | Scheduled tasks | `asc task list|add|cancel` |
 
 ## Troubleshooting flow
@@ -55,6 +54,6 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 
 ## Safety rules
 
-- Destructive actions (`app remove`, `backup restore`, `db drop`) — always confirm with the user first.
+- Destructive actions (`app remove`, `backup restore`) — always confirm with the user first.
 - Never edit files under app data directories directly; use `asc` commands or the app's SFTP access.
 - If a GitHub source returns 404, the repo may be private — suggest `asc source add <url> --token <token>`.

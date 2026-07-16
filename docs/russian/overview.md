@@ -17,7 +17,6 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | 📊 Мониторинг системы и приложений | [monitoring](monitoring.md) |
 | 💾 Бекапы приложений | [backups](backups.md) |
 | 📁 SFTP-сервер по приложению | [sftp](sftp.md) |
-| 🗄️ Управление базами данных | [database](database.md) |
 | 🖥️ WebSocket- и SSH-консоли | [console](console.md) |
 | ⏰ Планировщик задач | [scheduler](scheduler.md) |
 | 🔄 Утилита обновлений asc-updater | [updater](updater.md) |
@@ -37,7 +36,7 @@ Community-файлы: [🛡️ SECURITY.md](SECURITY.md) — политика б
 │   │   ├── apps/     # драйверы: docker, systemd, process
 │   │   ├── pkg/      # пакетный менеджер + реестры
 │   │   ├── mcp/      # MCP-сервер
-│   │   ├── backup/ monitor/ sftp/ db/ console/ scheduler/
+│   │   ├── backup/ monitor/ sftp/ console/ scheduler/
 │   │   ├── i18n/     # система переводов вывода команд (EN/RU)
 │   │   └── config/   # /etc/asc/config.toml
 │   └── updater/      # 🔄 asc-updater — отдельный бинарник обновлений (см. updater.md)

@@ -53,9 +53,8 @@ pub struct QuotaSpec {
 
 /// The `backups` editor category's value (DMN-009), stored under the
 /// `$backup` reserved key: which named storages an app backs up to, how many
-/// copies each keeps, and — once DMN-012 ships a scheduler — how often.
-/// `schedule` is recorded but not enforced yet; run backups by hand
-/// (`asc backup create <app>`) or from an external cron/systemd timer.
+/// copies each keeps, and how often — the daemon's scheduler (DMN-012,
+/// [`crate::daemon::scheduler`]) runs `schedule` automatically.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BackupPolicy {
     /// Storage names to back up to (`asc backup storage list`); `local`
@@ -65,7 +64,9 @@ pub struct BackupPolicy {
     /// Copies to keep per storage; unset = unlimited (no rotation).
     #[serde(default)]
     pub keep: Option<u32>,
-    /// Free-form schedule string (e.g. `daily@03:00`) — not enforced yet.
+    /// `daily@HH:MM` or a cron expression (see
+    /// [`crate::daemon::scheduler::Schedule::parse`]); validated by the
+    /// settings editor, evaluated by the daemon once a minute.
     #[serde(default)]
     pub schedule: Option<String>,
 }

@@ -1,7 +1,8 @@
 //! Daemon runtime: startup, main loop, graceful shutdown.
 //!
-//! Future subsystems — ConnectRPC API (DMN-005), platform tunnel, scheduler,
-//! monitoring — are spawned from [`run`] as tasks and stopped on shutdown.
+//! Future subsystems — the platform tunnel among them — are spawned from
+//! [`run`] as tasks and stopped on shutdown, like the API server, the
+//! metrics sampler and the scheduler already are.
 
 use anyhow::Context;
 use tracing::info;
@@ -40,6 +41,9 @@ pub async fn run(mut config: Config) -> anyhow::Result<()> {
     // Background metrics sampler (DMN-006) feeds the API's ring buffer;
     // the task dies with the runtime on shutdown.
     state.monitor.start_sampler(&state.config.monitor);
+
+    // Cron-like scheduler (DMN-012): runs scheduled app backups (DMN-009).
+    crate::daemon::scheduler::start(&state.config);
 
     api::serve(state, shutdown_signal()).await?;
 

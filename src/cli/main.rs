@@ -1754,10 +1754,10 @@ fn edit_start_command(
 
 /// The backups category (DMN-009): which configured storages to back up to
 /// (multi-select — toggle numbers on and off), how many copies to keep per
-/// storage, and a free-form schedule (recorded, not enforced — no scheduler
-/// yet, DMN-012). Stored under the `$backup` reserved key, same convention
-/// as quota/start_command; an all-default policy is removed rather than
-/// stored empty.
+/// storage, and a schedule the daemon's scheduler (DMN-012) enforces —
+/// `daily@HH:MM` or a cron expression, validated on input here. Stored under
+/// the `$backup` reserved key, same convention as quota/start_command; an
+/// all-default policy is removed rather than stored empty.
 fn edit_backup_policy(
     values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
     config_dir: &std::path::Path,
@@ -1852,7 +1852,16 @@ fn edit_backup_policy(
                 if raw.is_empty() {
                     continue;
                 }
-                policy.schedule = if raw == "-" { None } else { Some(raw) };
+                if raw == "-" {
+                    policy.schedule = None;
+                } else {
+                    // The scheduler will run this — reject what it cannot parse.
+                    if let Err(err) = asc_daemon::daemon::scheduler::Schedule::parse(&raw) {
+                        eprintln!("asc: {err}");
+                        continue;
+                    }
+                    policy.schedule = Some(raw);
+                }
             }
         }
         if policy.is_empty() {

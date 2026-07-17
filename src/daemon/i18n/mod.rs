@@ -202,6 +202,7 @@ pub enum Msg {
     BackupPolicyStorageToggle,
     BackupPolicyKeepPrompt,
     BackupPolicySchedulePrompt,
+    ErrBackupSchedule,
 }
 
 /// Translate a message key using the current language.
@@ -621,8 +622,12 @@ pub fn t(msg: Msg) -> &'static str {
             "Сколько копий хранить на каждое хранилище (Enter — оставить, '-' — не ограничивать): ",
         ),
         Msg::BackupPolicySchedulePrompt => (
-            "Schedule (free text, e.g. daily@03:00; not enforced without a scheduler yet; Enter — keep, '-' — clear): ",
-            "Расписание (свободный текст, например daily@03:00; пока не исполняется — нет планировщика; Enter — оставить, '-' — очистить): ",
+            "Schedule (daily@HH:MM or cron 'min hour day month weekday'; Enter — keep, '-' — clear): ",
+            "Расписание (daily@HH:MM или cron 'мин час день месяц день_недели'; Enter — оставить, '-' — очистить): ",
+        ),
+        Msg::ErrBackupSchedule => (
+            "invalid schedule '{}': use daily@HH:MM or a cron expression 'min hour day month weekday'",
+            "неверное расписание '{}': используйте daily@HH:MM или cron-выражение 'мин час день месяц день_недели'",
         ),
     };
     match lang() {

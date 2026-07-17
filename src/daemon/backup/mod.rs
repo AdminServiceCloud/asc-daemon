@@ -7,10 +7,10 @@
 //! stored under the `$backup` reserved key — see
 //! [`crate::daemon::pkg::settings::SettingValues::backup_policy`]).
 //!
-//! Scheduled ("period") backups need a task runner, which does not exist yet
-//! (DMN-012 is still planned) — `schedule` is recorded in the policy but not
-//! enforced; run backups by hand (`asc backup create <app>`) or from an
-//! external cron/systemd timer in the meantime.
+//! Scheduled backups run inside the daemon: the scheduler (DMN-012,
+//! [`crate::daemon::scheduler`]) evaluates each app's policy `schedule`
+//! (`daily@HH:MM` or a cron expression) once a minute and calls
+//! [`create_backup`] when it fires.
 
 pub mod glob;
 pub mod storage;

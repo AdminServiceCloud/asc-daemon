@@ -10,7 +10,7 @@ The backup execution module on the node: creating, restoring and rotating backup
 - `asc backup restore <app> <backup-id>` — restore; the app must be stopped first (destructive: replaces its repository, config and data).
 - `asc backup list <app> [--storage <name>]` — an app's backups on one storage, oldest first.
 - `asc backup prune <app> --keep <n> [--storage <name>]` — delete the oldest backups beyond `n` by hand (rotation also runs automatically after `create`, from the app's own `keep` setting).
-- `asc backup storage add|list|remove` — manage where backups go; `asc app settings <app>` (category `backups`) — which of those storages this app backs up to, how many copies to keep, and (once a scheduler exists) how often.
+- `asc backup storage add|list|remove` — manage where backups go; `asc app settings <app>` (category `backups`) — which of those storages this app backs up to, how many copies to keep, and how often (the schedule runs inside the daemon, see [⏰ scheduler](scheduler.md)).
 
 ## 🏗️ Technical design
 
@@ -34,7 +34,7 @@ Patterns are relative to the app directory and support `*` (any run of character
 
 ### Backup policy (`asc app settings` → `backups`)
 
-Stored under the `$backup` reserved key in `config/settings.json`, alongside `$quota`/`$start_command` (same convention, DMN-017/030): `storages` (multi-select, toggled by number in the editor), `keep` (copies to retain per storage — pruned automatically right after each `create`), `schedule` (free text, e.g. `daily@03:00`). **`schedule` is recorded but not enforced** — there is no task runner yet ([⏰ scheduler](scheduler.md), DMN-012 is still planned). Run backups by hand or from an external cron/systemd timer in the meantime. `asc backup create <app>` without `--storage` uses the policy's storages, falling back to `local` alone when the policy is empty.
+Stored under the `$backup` reserved key in `config/settings.json`, alongside `$quota`/`$start_command` (same convention, DMN-017/030): `storages` (multi-select, toggled by number in the editor), `keep` (copies to retain per storage — pruned automatically right after each `create`), `schedule` (`daily@HH:MM`, bare `HH:MM`, or a five-field cron expression `min hour day month weekday`; validated by the editor). **`schedule` is enforced by the daemon's scheduler** ([⏰ scheduler](scheduler.md), DMN-012): once a minute it evaluates every app's policy against the node's local time and runs the due backups to the policy's storages with the policy's `keep` rotation — the daemon must be running (`asc service install` or `asc serve`). `asc backup create <app>` without `--storage` uses the policy's storages, falling back to `local` alone when the policy is empty.
 
 ### Restore
 

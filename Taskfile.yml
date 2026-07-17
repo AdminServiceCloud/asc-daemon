@@ -1,5 +1,5 @@
-# 🛠️ Taskfile — команды разработки, сборки и релиза asc-daemon
-# https://taskfile.dev · установка: go install github.com/go-task/task/v3/cmd/task@latest
+# 🛠️ Taskfile — development, build and release commands for asc-daemon
+# https://taskfile.dev · install: go install github.com/go-task/task/v3/cmd/task@latest
 version: '3'
 
 vars:
@@ -7,87 +7,87 @@ vars:
 
 tasks:
   default:
-    desc: 📋 Список всех команд
+    desc: 📋 List all commands
     cmds:
       - task --list
 
-  # ── 🧑‍💻 Разработка ────────────────────────────────────────────────
+  # ── 🧑‍💻 Development ──────────────────────────────────────────────
 
   dev:
-    desc: 🚀 Запустить демон локально (debug, подробные логи)
+    desc: 🚀 Run the daemon locally (debug, verbose logs)
     cmds:
       - RUST_LOG=debug cargo run --bin asc -- serve
 
   dev:cli:
-    desc: 💻 Выполнить CLI-команду против локального демона (task dev:cli -- status)
+    desc: 💻 Run a CLI command against the local daemon (task dev:cli -- status)
     cmds:
       - cargo run --bin asc -- {{.CLI_ARGS}}
 
   dev:updater:
-    desc: 🔄 Запустить asc-updater локально (task dev:updater -- status)
+    desc: 🔄 Run asc-updater locally (task dev:updater -- status)
     cmds:
       - cargo run --bin asc-updater -- {{.CLI_ARGS}}
 
   proto:
-    desc: 📜 Сгенерировать Rust-код из proto-контрактов (prost/tonic)
+    desc: 📜 Generate Rust code from the proto contracts (prost/tonic)
     cmds:
-      - cargo build   # build.rs компилирует proto/ через protox (protoc не нужен)
+      - cargo build   # build.rs compiles proto/ via protox (no protoc needed)
 
-  # ── ✅ Качество ───────────────────────────────────────────────────
+  # ── ✅ Quality ────────────────────────────────────────────────────
 
   lint:
-    desc: 🔍 Clippy + проверка форматирования
+    desc: 🔍 Clippy + formatting check
     cmds:
       - cargo clippy --all-targets --all-features -- -D warnings
       - cargo fmt --all -- --check
 
   fmt:
-    desc: 🎨 Отформатировать код
+    desc: 🎨 Format the code
     cmds:
       - cargo fmt --all
 
   test:
-    desc: 🧪 Тесты
+    desc: 🧪 Tests
     cmds:
       - cargo test --all
 
   check:
-    desc: ✅ Полная проверка перед коммитом (lint + test)
+    desc: ✅ Full pre-commit check (lint + test)
     cmds:
       - task: lint
       - task: test
 
-  # ── 📦 Сборка и релиз ─────────────────────────────────────────────
+  # ── 📦 Build and release ──────────────────────────────────────────
 
   build:
-    desc: 📦 Релизная сборка под текущую платформу (asc + asc-updater)
+    desc: 📦 Release build for the current platform (asc + asc-updater)
     cmds:
       - cargo build --release
 
   build:cross:
-    desc: 🧬 Кросс-компиляция под все поддерживаемые архитектуры (нужен cross)
+    desc: 🧬 Cross-compile for all supported architectures (requires cross)
     cmds:
       - for: { var: TARGETS }
         cmd: cross build --release --target {{.ITEM}}
 
   install:local:
-    desc: 🔧 Установить собранные бинарники в /usr/local/bin (нужен sudo)
+    desc: 🔧 Install the built binaries into /usr/local/bin (requires sudo)
     deps: [build]
     cmds:
       - sudo install -m 755 target/release/asc /usr/local/bin/asc
       - sudo install -m 755 target/release/asc-updater /usr/local/bin/asc-updater
 
-  # ── 🚀 Продакшен ──────────────────────────────────────────────────
+  # ── 🚀 Production ─────────────────────────────────────────────────
 
   prod:service:
-    desc: 🚀 Установить и запустить как systemd-сервис (нужен sudo)
+    desc: 🚀 Install and start as a systemd service (requires sudo)
     deps: [install:local]
     cmds:
       - sudo asc service install
       - sudo systemctl enable --now asc
 
   prod:status:
-    desc: 📊 Статус продакшен-сервиса
+    desc: 📊 Production service status
     cmds:
       - systemctl status asc --no-pager
       - asc status

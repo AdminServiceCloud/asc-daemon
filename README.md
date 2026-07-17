@@ -1,12 +1,16 @@
 # 🦀 ASC Daemon CLI
 
-> 🌍 **Language:** English · [🇷🇺 Русская версия](docs/russian/README.md)
+> 🌍 **Language:** English · [🌐 Other Languages](docs/README.md)
+
+
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.1.4-blue)](version.txt)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue)](version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
+
+![asc-daemon preview](docs/screenshots/preview.png)
 
 ## 📌 About
 
@@ -133,7 +137,7 @@ For MCP clients (Claude Desktop and others) use the [daemon's MCP server](docs/e
 
 ## 📚 Documentation
 
-Documentation for the daemon's modules lives in the [docs/english/](docs/english/README.md) directory (🇷🇺 [Russian version](docs/russian/overview.md)):
+Documentation for the daemon's modules lives in the [docs/english/](docs/english/README.md) directory:
 
 | Doc | Description |
 |---|---|
@@ -177,7 +181,13 @@ If you want to say **thank you** or support the active development of asc-daemon
 
 ## 🌠 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date)](https://star-history.com/#AdminServiceCloud/asc-daemon&Date)
+<a href="https://www.star-history.com/?type=date&repos=AdminServiceCloud%2Fasc-daemon">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date" />
+ </picture>
+</a>
 
 ## 🤝 Contributing
 

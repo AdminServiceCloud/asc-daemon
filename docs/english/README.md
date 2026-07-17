@@ -1,6 +1,8 @@
 # 🦀 asc-daemon — overview
 
-> 🌍 **Language:** English · [🇷🇺 Русская версия](../russian/overview.md)
+> 🌍 **Language:** English · [🇷🇺 Русская версия](../russian/README.md)
+
+![asc-daemon preview](../screenshots/preview.png)
 
 ## 📌 Description
 

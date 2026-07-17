@@ -40,10 +40,13 @@ pub struct Moment {
 impl Moment {
     /// The node's local time for a unix timestamp.
     pub fn local(epoch_secs: i64) -> Self {
+        // time_t is 32-bit on armv7 (y2038 applies there, as it does to the
+        // whole platform) — go through libc's alias, not a fixed width.
+        let epoch: libc::time_t = epoch_secs as libc::time_t;
         // SAFETY: localtime_r fills the caller's buffer and touches no shared
         // state; a zeroed tm is a valid out-parameter.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&epoch_secs, &mut tm) };
+        unsafe { libc::localtime_r(&epoch, &mut tm) };
         Self {
             minute: tm.tm_min as u32,
             hour: tm.tm_hour as u32,

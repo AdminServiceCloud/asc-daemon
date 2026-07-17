@@ -8,7 +8,7 @@ use tonic::{Request, Response, Status};
 use super::console::SessionType;
 use super::proto::v1 as pb;
 use super::{ApiState, proto};
-use crate::daemon::apps::{AppStatus, Outcome, RuntimeState};
+use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::pkg::InstallOutcome;
 
 use pb::app_service_server::{AppService, AppServiceServer};
@@ -24,6 +24,23 @@ pub fn routes(state: Arc<ApiState>) -> Router {
 }
 
 struct Grpc(Arc<ApiState>);
+
+/// The caller's context, stamped into the request extensions by the
+/// transport middleware: the full-visibility context after bearer auth
+/// (TCP), the peer-cred context on the unix socket. Absence means a
+/// middleware bug — fail closed with an unprivileged nobody context
+/// rather than defaulting to full visibility.
+fn ctx_of<T>(request: &Request<T>) -> UserContext {
+    request
+        .extensions()
+        .get::<UserContext>()
+        .cloned()
+        .unwrap_or(UserContext {
+            uid: u32::MAX,
+            name: "unauthenticated".into(),
+            is_root: false,
+        })
+}
 
 /// anyhow errors → gRPC status. "not found" errors keep their code; the rest
 /// become INTERNAL with the message preserved.
@@ -69,6 +86,16 @@ fn to_pb(status: &AppStatus) -> pb::App {
         version: status.meta.version.clone().unwrap_or_default(),
         source: status.meta.source.clone().unwrap_or_default(),
         owner: status.meta.owner.name.clone(),
+        title: status
+            .meta
+            .custom_name
+            .is_some()
+            .then(|| status.meta.name.clone()),
+        quota: status.meta.quota.as_ref().map(|q| pb::AppQuota {
+            cpu_cores: q.cpu_cores,
+            ram_bytes: q.ram_bytes,
+            disk_bytes: q.disk_bytes,
+        }),
     }
 }
 
@@ -76,9 +103,9 @@ fn to_pb(status: &AppStatus) -> pb::App {
 impl DaemonService for Grpc {
     async fn get_status(
         &self,
-        _request: Request<pb::GetStatusRequest>,
+        request: Request<pb::GetStatusRequest>,
     ) -> Result<Response<pb::GetStatusResponse>, Status> {
-        let (running, total) = self.0.status().await.map_err(to_status)?;
+        let (running, total) = self.0.status(ctx_of(&request)).await.map_err(to_status)?;
         Ok(Response::new(pb::GetStatusResponse {
             version: crate::VERSION.to_string(),
             apps_total: total as u32,
@@ -160,9 +187,13 @@ impl MonitorService for Grpc {
 impl AppService for Grpc {
     async fn list_apps(
         &self,
-        _request: Request<pb::ListAppsRequest>,
+        request: Request<pb::ListAppsRequest>,
     ) -> Result<Response<pb::ListAppsResponse>, Status> {
-        let apps = self.0.list_apps().await.map_err(to_status)?;
+        let apps = self
+            .0
+            .list_apps(ctx_of(&request))
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(pb::ListAppsResponse {
             apps: apps.iter().map(to_pb).collect(),
         }))
@@ -172,9 +203,10 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::GetAppRequest>,
     ) -> Result<Response<pb::GetAppResponse>, Status> {
+        let ctx = ctx_of(&request);
         let status = self
             .0
-            .get_app(request.into_inner().id)
+            .get_app(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::GetAppResponse {
@@ -186,9 +218,10 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::GetAppDiskRequest>,
     ) -> Result<Response<pb::GetAppDiskResponse>, Status> {
+        let ctx = ctx_of(&request);
         let usage = self
             .0
-            .app_disk(request.into_inner().id)
+            .app_disk(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(disk_to_pb(&usage)))
@@ -198,11 +231,20 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::InstallAppRequest>,
     ) -> Result<Response<pb::InstallAppResponse>, Status> {
+        let ctx = ctx_of(&request);
         let request = request.into_inner();
         let source = Some(request.source).filter(|s| !s.is_empty());
         let outcome = self
             .0
-            .install(request.spec, source)
+            .install(
+                ctx,
+                request.spec,
+                source,
+                request.name,
+                request.branch,
+                request.tag,
+                request.license_ack,
+            )
             .await
             .map_err(to_status)?;
         let response = match outcome {
@@ -239,9 +281,10 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::StartAppRequest>,
     ) -> Result<Response<pb::StartAppResponse>, Status> {
+        let ctx = ctx_of(&request);
         let outcome = self
             .0
-            .start(request.into_inner().id)
+            .start(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::StartAppResponse {
@@ -253,9 +296,10 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::StopAppRequest>,
     ) -> Result<Response<pb::StopAppResponse>, Status> {
+        let ctx = ctx_of(&request);
         let outcome = self
             .0
-            .stop(request.into_inner().id)
+            .stop(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::StopAppResponse {
@@ -267,8 +311,9 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::RestartAppRequest>,
     ) -> Result<Response<pb::RestartAppResponse>, Status> {
+        let ctx = ctx_of(&request);
         self.0
-            .restart(request.into_inner().id)
+            .restart(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::RestartAppResponse {}))
@@ -278,13 +323,14 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::GetAppLogsRequest>,
     ) -> Result<Response<pb::GetAppLogsResponse>, Status> {
+        let ctx = ctx_of(&request);
         let req = request.into_inner();
         let tail = if req.tail == 0 {
             100
         } else {
             req.tail as usize
         };
-        let logs = self.0.logs(req.id, tail).await.map_err(to_status)?;
+        let logs = self.0.logs(ctx, req.id, tail).await.map_err(to_status)?;
         Ok(Response::new(pb::GetAppLogsResponse { logs }))
     }
 
@@ -292,8 +338,9 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::RemoveAppRequest>,
     ) -> Result<Response<pb::RemoveAppResponse>, Status> {
+        let ctx = ctx_of(&request);
         self.0
-            .remove(request.into_inner().id)
+            .remove(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::RemoveAppResponse {}))
@@ -303,6 +350,7 @@ impl AppService for Grpc {
         &self,
         request: Request<pb::IssueConsoleTokenRequest>,
     ) -> Result<Response<pb::IssueConsoleTokenResponse>, Status> {
+        let ctx = ctx_of(&request);
         let req = request.into_inner();
         let session = match proto::v1::ConsoleSessionType::try_from(req.session) {
             Ok(pb::ConsoleSessionType::Attach) => SessionType::Attach,
@@ -311,7 +359,7 @@ impl AppService for Grpc {
         };
         let (token, expires_at) = self
             .0
-            .issue_console_token(req.app_id, session)
+            .issue_console_token(ctx, req.app_id, session)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::IssueConsoleTokenResponse {

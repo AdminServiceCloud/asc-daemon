@@ -25,6 +25,7 @@ The core of the daemon: a single interface for managing applications of three ki
 - A regular user sees and manages **only their own application group**.
 - Via `sudo` (or as `root`) the applications of **all users** are visible and accessible — the output is grouped by owner.
 - The daemon API applies the same rule: the request context determines the visible group.
+- **With the system daemon running** (DMN-042), the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`) go through its unix socket `/run/asc/asc.sock`: the daemon reads the caller's uid from the kernel (SO_PEERCRED) and enforces this rule on the shared system store — a regular user manages their apps in `/asc/apps` **without sudo and without the docker group**, and `asc ls` / `sudo asc ls` finally agree on what is installed. Details — [📡 api](api.md).
 
 ### 📂 Application storage: /asc/apps/
 
@@ -40,7 +41,7 @@ Every application lives in a directory named after its ID:
 
 - **Installation = cloning the repository** of the package into `repository/`; switching versions = checking out the desired git tag (details — [📦 package-manager](package-manager.md)).
 - `meta.json` is the source of truth for rebuilding the index after a crash/reboot.
-- **Path scoping by user**: `/asc/apps/` (with `/etc/asc/config.toml` and `/var/lib/asc`) is the tree of the **root** installation — the system daemon and `sudo asc`. Running `asc` as a regular user works against a private tree under `~/.asc/` instead: `~/.asc/apps`, `~/.asc/data`, `~/.asc/config.toml` — so the user edits their apps' settings and config without sudo. The root-managed `[policy]` section is still read from the system config and cannot be overridden per user.
+- **Path scoping by user**: `/asc/apps/` (with `/etc/asc/config.toml` and `/var/lib/asc`) is the tree of the **root** installation — the system daemon and `sudo asc`. Running `asc` as a regular user **without a running system daemon** works against a private tree under `~/.asc/` instead: `~/.asc/apps`, `~/.asc/data`, `~/.asc/config.toml` — so the user edits their apps' settings and config without sudo. With the daemon present, the lifecycle commands operate on the shared system tree through the daemon socket instead (DMN-042, see above). The root-managed `[policy]` section is still read from the system config and cannot be overridden per user.
 
 ### ⚙️ Core
 

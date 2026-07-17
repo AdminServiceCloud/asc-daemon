@@ -4,6 +4,7 @@
 pub mod api;
 pub mod apps;
 pub mod backup;
+pub mod client;
 pub mod config;
 pub mod console;
 pub mod docker;

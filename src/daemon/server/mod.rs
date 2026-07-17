@@ -45,7 +45,30 @@ pub async fn run(mut config: Config) -> anyhow::Result<()> {
     // Cron-like scheduler (DMN-012): runs scheduled app backups (DMN-009).
     crate::daemon::scheduler::start(&state.config);
 
-    api::serve(state, shutdown_signal()).await?;
+    // One shutdown signal fans out to both listeners: the TCP API (bearer
+    // token, for the platform) and the local unix socket (peer-cred auth,
+    // for the CLI, DMN-042). The unix socket is best-effort — a host where
+    // it cannot be bound (no /run/asc for a non-root daemon) keeps the TCP
+    // API instead of refusing to start; the CLI reports the socket's
+    // absence with a hint when a user actually needs it.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        drop(shutdown_tx);
+    });
+    let wait = |mut rx: tokio::sync::watch::Receiver<()>| async move {
+        // Resolves when the sender is dropped after the signal.
+        let _ = rx.changed().await;
+    };
+    let uds_state = std::sync::Arc::clone(&state);
+    let uds_shutdown = wait(shutdown_rx.clone());
+    let uds = async {
+        if let Err(err) = api::uds::serve(uds_state, uds_shutdown).await {
+            tracing::warn!(error = %format!("{err:#}"), "local unix-socket API unavailable");
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::try_join!(api::serve(state, wait(shutdown_rx)), uds)?;
 
     info!("asc daemon stopped");
     Ok(())

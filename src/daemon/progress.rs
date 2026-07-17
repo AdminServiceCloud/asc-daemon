@@ -169,6 +169,31 @@ impl IndexBars {
     }
 }
 
+/// A plain spinner with a static label for operations that report no
+/// incremental progress (`asc app start/stop/restart` waiting on the
+/// runtime or the daemon): the user sees the command is alive instead of a
+/// silent terminal. Cleared without a trace once the operation finishes —
+/// the result line is the summary.
+pub struct Spinner(ProgressBar);
+
+impl Spinner {
+    pub fn new(label: &str) -> Self {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .expect("static template")
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        pb.set_message(label.to_string());
+        pb.enable_steady_tick(Duration::from_millis(100));
+        Self(pb)
+    }
+
+    pub fn finish(self) {
+        self.0.finish_and_clear();
+    }
+}
+
 /// A single phase/percent bar for `git clone --progress` (Enumerating,
 /// Counting, Compressing, Receiving, Resolving deltas).
 pub struct PhaseBar(ProgressBar);

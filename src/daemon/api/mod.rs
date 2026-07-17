@@ -9,6 +9,7 @@ pub mod console;
 mod grpc;
 pub mod proto;
 mod rest;
+pub mod uds;
 mod ws;
 
 use std::future::Future;
@@ -42,9 +43,11 @@ pub struct ApiState {
     token: String,
 }
 
-/// API calls act with full visibility: the platform performs its own
-/// per-user permission checks before reaching the daemon. Per-user API
-/// tokens are a follow-up (see docs/api.md).
+/// Context of bearer-token (TCP) calls: full visibility — the platform
+/// performs its own per-user permission checks before reaching the daemon.
+/// Per-user API tokens are a follow-up (see docs/api.md). The unix-socket
+/// listener builds a real per-user context from SO_PEERCRED instead
+/// (see [`uds`]).
 fn api_context() -> UserContext {
     UserContext {
         uid: 0,
@@ -79,9 +82,9 @@ impl ApiState {
             .context("api worker task panicked")?
     }
 
-    pub async fn status(self: &Arc<Self>) -> Result<(usize, usize)> {
-        self.blocking(|s| {
-            let apps = s.manager.list(&api_context())?;
+    pub async fn status(self: &Arc<Self>, ctx: UserContext) -> Result<(usize, usize)> {
+        self.blocking(move |s| {
+            let apps = s.manager.list(&ctx)?;
             let running = apps
                 .iter()
                 .filter(|a| a.state == crate::daemon::apps::RuntimeState::Running)
@@ -91,81 +94,110 @@ impl ApiState {
         .await
     }
 
-    pub async fn list_apps(self: &Arc<Self>) -> Result<Vec<AppStatus>> {
-        self.blocking(|s| s.manager.list(&api_context())).await
+    pub async fn list_apps(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<AppStatus>> {
+        self.blocking(move |s| s.manager.list(&ctx)).await
     }
 
-    pub async fn get_app(self: &Arc<Self>, id: String) -> Result<AppStatus> {
-        self.blocking(move |s| s.manager.status(&api_context(), &id))
-            .await
+    pub async fn get_app(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<AppStatus> {
+        self.blocking(move |s| s.manager.status(&ctx, &id)).await
     }
 
     pub async fn app_disk(
         self: &Arc<Self>,
+        ctx: UserContext,
         id: String,
     ) -> Result<crate::daemon::apps::disk::DiskUsage> {
         self.blocking(move |s| {
-            let meta = s.manager.get_authorized(&api_context(), &id)?;
+            let meta = s.manager.get_authorized(&ctx, &id)?;
             crate::daemon::apps::disk::usage(&s.config, s.manager.store(), &meta)
         })
         .await
     }
 
+    /// Install from a registry spec or directly from a git URL (mirrors the
+    /// CLI's dispatch). Without `license_ack` a repository shipping a
+    /// LICENSE returns the typed [`pkg::LicenseRequired`] error — REST
+    /// serializes it structurally so clients (the CLI over the unix socket,
+    /// the platform UI) can render their own consent dialog and retry.
+    #[allow(clippy::too_many_arguments)]
     pub async fn install(
         self: &Arc<Self>,
+        ctx: UserContext,
         spec: String,
         source: Option<String>,
+        name: Option<String>,
+        branch: Option<String>,
+        tag: Option<String>,
+        license_ack: bool,
     ) -> Result<pkg::InstallOutcome> {
         self.blocking(move |s| {
-            // No license consent over the API yet: a repository shipping a
-            // LICENSE returns the typed error, and the platform UI will
-            // render its own consent dialog from it (DMN-028 follow-up).
+            if pkg::is_git_url(&spec) {
+                if source.is_some() {
+                    anyhow::bail!("--source has no effect on a direct repository install");
+                }
+                let git_ref = match (branch.as_deref(), tag.as_deref()) {
+                    (Some(b), None) => Some(pkg::GitRef::Branch(b)),
+                    (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
+                };
+                let report =
+                    pkg::install_from_git(&s.config, &ctx, &spec, git_ref, name.as_deref(), license_ack)?;
+                return Ok(pkg::InstallOutcome::App(report));
+            }
+            if branch.is_some() || tag.is_some() {
+                anyhow::bail!(
+                    "branch and tag are only used for a direct repository install (a git URL as the spec)"
+                );
+            }
             pkg::install(
                 &s.config,
-                &api_context(),
+                &ctx,
                 &spec,
                 source.as_deref(),
-                None,
-                false,
+                name.as_deref(),
+                license_ack,
             )
         })
         .await
     }
 
-    pub async fn start(self: &Arc<Self>, id: String) -> Result<Outcome> {
-        self.blocking(move |s| s.manager.start(&api_context(), &id))
+    pub async fn start(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {
+        self.blocking(move |s| s.manager.start(&ctx, &id)).await
+    }
+
+    pub async fn stop(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {
+        self.blocking(move |s| s.manager.stop(&ctx, &id)).await
+    }
+
+    pub async fn restart(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<()> {
+        self.blocking(move |s| s.manager.restart(&ctx, &id)).await
+    }
+
+    pub async fn logs(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        tail: usize,
+    ) -> Result<String> {
+        self.blocking(move |s| s.manager.logs(&ctx, &id, tail))
             .await
     }
 
-    pub async fn stop(self: &Arc<Self>, id: String) -> Result<Outcome> {
-        self.blocking(move |s| s.manager.stop(&api_context(), &id))
-            .await
-    }
-
-    pub async fn restart(self: &Arc<Self>, id: String) -> Result<()> {
-        self.blocking(move |s| s.manager.restart(&api_context(), &id))
-            .await
-    }
-
-    pub async fn logs(self: &Arc<Self>, id: String, tail: usize) -> Result<String> {
-        self.blocking(move |s| s.manager.logs(&api_context(), &id, tail))
-            .await
-    }
-
-    pub async fn remove(self: &Arc<Self>, id: String) -> Result<()> {
-        self.blocking(move |s| s.manager.remove(&api_context(), &id))
-            .await
+    pub async fn remove(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<()> {
+        self.blocking(move |s| s.manager.remove(&ctx, &id)).await
     }
 
     /// Issue a one-time console token after verifying the app exists.
     pub async fn issue_console_token(
         self: &Arc<Self>,
+        ctx: UserContext,
         app_id: String,
         session: console::SessionType,
     ) -> Result<(String, i64)> {
         let id = app_id.clone();
         // Existence + authorization check first: no tokens for unknown apps.
-        self.blocking(move |s| s.manager.get_authorized(&api_context(), &id))
+        self.blocking(move |s| s.manager.get_authorized(&ctx, &id))
             .await?;
         Ok(self.console_tokens.issue(&app_id, session))
     }
@@ -256,13 +288,16 @@ pub async fn serve(
 
 /// Bearer-token check for both transports. gRPC callers get a proper
 /// `grpc-status: UNAUTHENTICATED` trailer-only response, REST callers 401.
-async fn auth(state: Arc<ApiState>, req: Request<Body>, next: Next) -> Response {
+/// Authenticated requests carry the full-visibility [`api_context`] — the
+/// per-user context is the unix-socket listener's job (see [`uds`]).
+async fn auth(state: Arc<ApiState>, mut req: Request<Body>, next: Next) -> Response {
     let presented = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     if presented.is_some_and(|t| console::constant_time_eq(t, &state.token)) {
+        req.extensions_mut().insert(api_context());
         return next.run(req).await;
     }
     if is_grpc(req.headers()) {

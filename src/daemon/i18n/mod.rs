@@ -203,6 +203,9 @@ pub enum Msg {
     BackupPolicyKeepPrompt,
     BackupPolicySchedulePrompt,
     ErrBackupSchedule,
+    Processing,
+    DaemonUnreachable,
+    DaemonDirectFallback,
 }
 
 /// Translate a message key using the current language.
@@ -628,6 +631,15 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ErrBackupSchedule => (
             "invalid schedule '{}': use daily@HH:MM or a cron expression 'min hour day month weekday'",
             "неверное расписание '{}': используйте daily@HH:MM или cron-выражение 'мин час день месяц день_недели'",
+        ),
+        Msg::Processing => ("processing...", "выполняется..."),
+        Msg::DaemonUnreachable => (
+            "daemon socket {} exists but the daemon is not answering — check the service: sudo asc service status",
+            "сокет демона {} существует, но демон не отвечает — проверьте сервис: sudo asc service status",
+        ),
+        Msg::DaemonDirectFallback => (
+            "asc: daemon is not reachable, operating directly",
+            "asc: демон недоступен, выполняю напрямую",
         ),
     };
     match lang() {

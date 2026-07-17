@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -35,6 +35,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 axum = { version = "0.8", features = ["ws"] }
+# CLI → daemon client over the local unix socket (DMN-042): a minimal
+# HTTP/1 JSON client — one connection per request, no TLS, no pooling.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util", "io-std"] }
 toml = "1.1"
 tonic = "0.14"
@@ -55,7 +60,6 @@ libc = "0.2"
 
 [dev-dependencies]
 futures-util = "0.3"
-http-body-util = "0.1"
 tempfile = "3"
 tokio-tungstenite = "0.30"
 tower = { version = "0.5", features = ["util"] }

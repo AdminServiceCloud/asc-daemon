@@ -39,6 +39,10 @@ ExecStart={exec} serve
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
+# /run/asc for the local API socket (peer-cred auth, see docs/api.md);
+# 0755 so any user can reach the socket — authorization is per-request.
+RuntimeDirectory=asc
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target
@@ -126,5 +130,7 @@ mod tests {
         let unit = Systemd::unit_file(Path::new("/usr/local/bin/asc"));
         assert!(unit.contains("ExecStart=/usr/local/bin/asc serve"));
         assert!(unit.contains("WantedBy=multi-user.target"));
+        // The local API socket directory (DMN-042).
+        assert!(unit.contains("RuntimeDirectory=asc"));
     }
 }

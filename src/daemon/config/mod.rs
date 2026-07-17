@@ -123,6 +123,12 @@ pub struct ApiConfig {
     /// Listen address. Localhost by default: remote access goes through the
     /// platform tunnel, not an exposed port.
     pub listen: String,
+    /// Local unix socket of the same API, authenticated by SO_PEERCRED
+    /// instead of the bearer token: the CLI talks to the daemon here, and
+    /// the daemon enforces per-user app ownership from the kernel-reported
+    /// peer uid. The default is the system daemon's socket for everyone —
+    /// a private non-root daemon (DMN-041) overrides it in its own config.
+    pub socket: PathBuf,
     /// Legacy field: the token now lives in `api.token` next to config.toml
     /// (root-only 0600, see `api::api_token_path`). Kept for migration —
     /// a value found here is moved out on the next daemon start.
@@ -130,10 +136,14 @@ pub struct ApiConfig {
     pub token: Option<String>,
 }
 
+/// Default path of the daemon's local API socket (see `ApiConfig::socket`).
+pub const DEFAULT_API_SOCKET: &str = "/run/asc/asc.sock";
+
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:8420".into(),
+            socket: PathBuf::from(DEFAULT_API_SOCKET),
             token: None,
         }
     }

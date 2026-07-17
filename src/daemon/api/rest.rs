@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ApiState;
 use super::console::SessionType;
-use crate::daemon::apps::{AppStatus, Outcome, RuntimeState};
+use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::pkg::InstallOutcome;
 
 pub fn router(state: Arc<ApiState>) -> Router {
@@ -33,6 +34,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
 }
 
 /// anyhow errors → JSON error responses (404 for missing apps/packages).
+///
+/// The typed install errors keep their structure (DMN-028/DMN-042): a
+/// client that can act on them — the CLI's consent prompt, the platform
+/// UI's dialog — reads the payload instead of parsing the message.
 struct ApiError(anyhow::Error);
 
 impl From<anyhow::Error> for ApiError {
@@ -44,6 +49,39 @@ impl From<anyhow::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let msg = format!("{:#}", self.0);
+        if let Some(required) = self.0.downcast_ref::<crate::daemon::pkg::LicenseRequired>() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "license_required": {
+                        "package": required.package,
+                        "source": required.source,
+                        "git": required.git,
+                        "license": required.license,
+                    },
+                })),
+            )
+                .into_response();
+        }
+        if let Some(ambiguous) = self
+            .0
+            .downcast_ref::<crate::daemon::pkg::AmbiguousPackage>()
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "ambiguous": {
+                        "name": ambiguous.name,
+                        "candidates": ambiguous.candidates.iter().map(|(source, git)| {
+                            serde_json::json!({ "source": source, "git": git })
+                        }).collect::<Vec<_>>(),
+                    },
+                })),
+            )
+                .into_response();
+        }
         let code = if msg.contains("not found") || msg.contains("не найдено") {
             StatusCode::NOT_FOUND
         } else {
@@ -62,6 +100,12 @@ struct AppJson {
     version: Option<String>,
     source: Option<String>,
     owner: String,
+    /// The package title when the app carries a custom name (then `name`
+    /// is the custom name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota: Option<crate::daemon::apps::meta::Quota>,
 }
 
 fn to_json(status: &AppStatus) -> AppJson {
@@ -76,11 +120,20 @@ fn to_json(status: &AppStatus) -> AppJson {
         version: status.meta.version.clone(),
         source: status.meta.source.clone(),
         owner: status.meta.owner.name.clone(),
+        title: status
+            .meta
+            .custom_name
+            .is_some()
+            .then(|| status.meta.name.clone()),
+        quota: status.meta.quota,
     }
 }
 
-async fn status(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
-    let (running, total) = state.status().await?;
+async fn status(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let (running, total) = state.status(ctx).await?;
     Ok(Json(serde_json::json!({
         "version": crate::VERSION,
         "apps_total": total,
@@ -155,25 +208,30 @@ async fn metrics_history(
     Json(serde_json::json!({ "samples": samples })).into_response()
 }
 
-async fn list_apps(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
-    let apps = state.list_apps().await?;
+async fn list_apps(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let apps = state.list_apps(ctx).await?;
     let apps: Vec<AppJson> = apps.iter().map(to_json).collect();
     Ok(Json(serde_json::json!({ "apps": apps })).into_response())
 }
 
 async fn get_app(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let status = state.get_app(id).await?;
+    let status = state.get_app(ctx, id).await?;
     Ok(Json(serde_json::json!({ "app": to_json(&status) })).into_response())
 }
 
 async fn app_disk(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let usage = state.app_disk(id).await?;
+    let usage = state.app_disk(ctx, id).await?;
     Ok(Json(serde_json::json!({
         "app_dir_bytes": usage.app_dir_bytes,
         "quota_bytes": usage.quota_bytes,
@@ -193,19 +251,44 @@ async fn app_disk(
 
 #[derive(Deserialize)]
 struct InstallBody {
-    /// "name", "stack" or "stack/app", optionally with "@version".
+    /// "name", "stack" or "stack/app", optionally with "@version" — or a
+    /// direct git repository URL (DMN-040).
     spec: String,
     /// Registry source to install from; required when several provide the package.
     #[serde(default)]
     source: Option<String>,
+    /// Custom app name (DMN-024); for a stack — the per-app name prefix.
+    #[serde(default)]
+    name: Option<String>,
+    /// Branch/tag to check out — direct repository installs only.
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    /// Consent to the package license (DMN-028); without it a repository
+    /// shipping a LICENSE fails with the structured license error.
+    #[serde(default)]
+    license_ack: bool,
 }
 
 async fn install_app(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Json(body): Json<InstallBody>,
 ) -> Result<Response, ApiError> {
     // Mirrors InstallAppResponse from the proto contract.
-    let json = match state.install(body.spec, body.source).await? {
+    let json = match state
+        .install(
+            ctx,
+            body.spec,
+            body.source,
+            body.name,
+            body.branch,
+            body.tag,
+            body.license_ack,
+        )
+        .await?
+    {
         InstallOutcome::App(report) => serde_json::json!({
             "id": report.id,
             "version": report.version,
@@ -231,9 +314,10 @@ async fn install_app(
 
 async fn start_app(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let outcome = state.start(id).await?;
+    let outcome = state.start(ctx, id).await?;
     Ok(Json(serde_json::json!({
         "already_running": outcome == Outcome::AlreadyInState
     }))
@@ -242,9 +326,10 @@ async fn start_app(
 
 async fn stop_app(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let outcome = state.stop(id).await?;
+    let outcome = state.stop(ctx, id).await?;
     Ok(Json(serde_json::json!({
         "already_stopped": outcome == Outcome::AlreadyInState
     }))
@@ -253,9 +338,10 @@ async fn stop_app(
 
 async fn restart_app(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    state.restart(id).await?;
+    state.restart(ctx, id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -267,18 +353,20 @@ struct LogsQuery {
 
 async fn app_logs(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
-    let logs = state.logs(id, query.tail.unwrap_or(100)).await?;
+    let logs = state.logs(ctx, id, query.tail.unwrap_or(100)).await?;
     Ok(Json(serde_json::json!({ "logs": logs })).into_response())
 }
 
 async fn remove_app(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    state.remove(id).await?;
+    state.remove(ctx, id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -290,6 +378,7 @@ struct ConsoleTokenBody {
 
 async fn console_token(
     State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
     Json(body): Json<ConsoleTokenBody>,
 ) -> Result<Response, ApiError> {
@@ -304,6 +393,6 @@ async fn console_token(
                 .into_response());
         }
     };
-    let (token, expires_at) = state.issue_console_token(id, session).await?;
+    let (token, expires_at) = state.issue_console_token(ctx, id, session).await?;
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
 }

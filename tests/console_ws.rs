@@ -6,12 +6,21 @@ use std::sync::Arc;
 
 use asc_daemon::daemon::api::console::SessionType;
 use asc_daemon::daemon::api::{self, ApiState};
-use asc_daemon::daemon::apps::AppStore;
 use asc_daemon::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime};
+use asc_daemon::daemon::apps::{AppStore, UserContext};
 use asc_daemon::daemon::config::Config;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+
+/// The bearer-authenticated context every API test acts under.
+fn root() -> UserContext {
+    UserContext {
+        uid: 0,
+        name: "root".into(),
+        is_root: true,
+    }
+}
 
 fn test_state() -> (Arc<ApiState>, tempfile::TempDir) {
     let ws = tempfile::tempdir().unwrap();
@@ -62,7 +71,7 @@ async fn ws_streams_logs_with_valid_token() {
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token("demo".into(), SessionType::Logs)
+        .issue_console_token(root(), "demo".into(), SessionType::Logs)
         .await
         .unwrap();
 
@@ -94,7 +103,7 @@ async fn ws_rejects_invalid_and_reused_tokens() {
 
     // A valid token works once...
     let (token, _) = state
-        .issue_console_token("demo".into(), SessionType::Logs)
+        .issue_console_token(root(), "demo".into(), SessionType::Logs)
         .await
         .unwrap();
     let ok = connect_async(format!("ws://{addr}/v1/console?token={token}")).await;
@@ -112,7 +121,7 @@ async fn attach_reports_unsupported_runtime() {
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token("demo".into(), SessionType::Attach)
+        .issue_console_token(root(), "demo".into(), SessionType::Attach)
         .await
         .unwrap();
     let (mut socket, _) = connect_async(format!("ws://{addr}/v1/console?token={token}"))

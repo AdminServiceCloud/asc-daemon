@@ -59,6 +59,18 @@ message App {
   string source = 6;
   // Owning Linux user name.
   string owner = 7;
+  // The package title when the app carries a custom name (then `name` is
+  // the custom name); absent otherwise.
+  optional string title = 8;
+  // Resource quota limits, when any are set (DMN-021).
+  optional AppQuota quota = 9;
+}
+
+// Per-app resource limits; every field is optional — only set limits appear.
+message AppQuota {
+  optional double cpu_cores = 1;
+  optional uint64 ram_bytes = 2;
+  optional uint64 disk_bytes = 3;
 }
 
 message ListAppsRequest {}
@@ -110,11 +122,20 @@ message AppVolumeUsage {
 
 message InstallAppRequest {
   // "name", "stack" or "stack/app", optionally with "@version"
-  // (version = git tag of the package repo).
+  // (version = git tag of the package repo), or a direct git repository
+  // URL (https://, ssh:// or git@host:path — DMN-040).
   string spec = 1;
   // Registry source to install from; empty = automatic. Required when
   // several sources provide the package (the error lists them).
   string source = 2;
+  // Custom app name (DMN-024); for a stack — the per-app name prefix.
+  optional string name = 3;
+  // Branch or tag to check out — direct repository installs only.
+  optional string branch = 4;
+  optional string tag = 5;
+  // Consent to the package license (DMN-028). Without it a repository
+  // shipping a LICENSE fails with the structured license error.
+  bool license_ack = 6;
 }
 
 message InstallAppResponse {

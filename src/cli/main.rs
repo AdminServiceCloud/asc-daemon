@@ -7,6 +7,7 @@ use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
     AppManager, AppStats, AppStatus, Outcome, RuntimeState, UserContext,
 };
+use asc_daemon::daemon::client::{self, RemoteApp};
 use asc_daemon::daemon::config::Config;
 use asc_daemon::daemon::docker;
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2, tf3};
@@ -481,6 +482,39 @@ fn autoupdate_cmd(action: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The daemon connection for app commands, when the local API socket is
+/// present (DMN-042): the daemon then owns identity (SO_PEERCRED) and
+/// authorization, and the CLI needs neither docker.sock access nor sudo.
+/// `None` — no daemon on this host, the command runs in-process (DMN-041).
+/// A present-but-unresponsive daemon is an error for a regular user (they
+/// have no other way to the system apps) and a warned fallback for root
+/// (recovery must not depend on the daemon being healthy).
+fn daemon_backend(config: &Config) -> anyhow::Result<Option<client::Daemon>> {
+    match client::Daemon::connect(config) {
+        Ok(daemon) => Ok(daemon),
+        Err(err) => {
+            if UserContext::current().is_root {
+                eprintln!("{}", t(Msg::DaemonDirectFallback));
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Run `op` under a "processing..." spinner (tty-gated): start/stop wait on
+/// Docker or the daemon with no output of their own, and a silent terminal
+/// reads as a hung command.
+fn with_spinner<T>(op: impl FnOnce() -> T) -> T {
+    let spinner = progress::interactive().then(|| progress::Spinner::new(t(Msg::Processing)));
+    let result = op();
+    if let Some(spinner) = spinner {
+        spinner.finish();
+    }
+    result
+}
+
 fn install_cmd(
     spec: &str,
     source: Option<&str>,
@@ -489,9 +523,9 @@ fn install_cmd(
     tag: Option<&str>,
     config: &Config,
 ) -> anyhow::Result<()> {
-    let ctx = UserContext::current();
+    let daemon = daemon_backend(config)?;
     if pkg::is_git_url(spec) {
-        return install_from_git_cmd(spec, source, name, branch, tag, config, &ctx);
+        return install_from_git_cmd(spec, source, name, branch, tag, config, daemon);
     }
     if branch.is_some() || tag.is_some() {
         anyhow::bail!(
@@ -500,18 +534,60 @@ fn install_cmd(
     }
     let name = match name {
         Some(name) => Some(name),
-        None => prompt_app_name(spec, config)?,
+        None => prompt_app_name(spec, config, daemon.as_ref())?,
     };
     let name = name.as_deref();
+    let outcome = match &daemon {
+        Some(daemon) => install_daemon_loop(daemon, spec, source, name, None, None)?,
+        None => {
+            let ctx = UserContext::current();
+            let mut source = source.map(str::to_string);
+            let mut license_ack = false;
+            // Interactive recoveries loop until the install passes or the user
+            // declines: auth setup for private repositories, a source pick when
+            // several provide the package, license consent (DMN-028).
+            loop {
+                match pkg::install(config, &ctx, spec, source.as_deref(), name, license_ack) {
+                    Ok(outcome) => break outcome,
+                    Err(err) if offer_auth_setup(&err) => continue,
+                    Err(err) => {
+                        if let Some(chosen) = pick_source(&err)? {
+                            source = Some(chosen);
+                            continue;
+                        }
+                        if accept_license(&err)? {
+                            license_ack = true;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    };
+    print_install_outcome(&outcome);
+    Ok(())
+}
+
+/// Install through the daemon, with the same interactive recoveries as the
+/// in-process path — the client reconstructs the typed errors from the
+/// structured REST payloads, so `pick_source`/`accept_license` work
+/// unchanged. Auth setup for private repositories is not offered here: the
+/// daemon clones with its own credentials, per-user git auth over the
+/// daemon is DMN-043.
+fn install_daemon_loop(
+    daemon: &client::Daemon,
+    spec: &str,
+    source: Option<&str>,
+    name: Option<&str>,
+    branch: Option<&str>,
+    tag: Option<&str>,
+) -> anyhow::Result<pkg::InstallOutcome> {
     let mut source = source.map(str::to_string);
     let mut license_ack = false;
-    // Interactive recoveries loop until the install passes or the user
-    // declines: auth setup for private repositories, a source pick when
-    // several provide the package, license consent (DMN-028).
-    let outcome = loop {
-        match pkg::install(config, &ctx, spec, source.as_deref(), name, license_ack) {
-            Ok(outcome) => break outcome,
-            Err(err) if offer_auth_setup(&err) => continue,
+    loop {
+        match daemon.install(spec, source.as_deref(), name, branch, tag, license_ack) {
+            Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 if let Some(chosen) = pick_source(&err)? {
                     source = Some(chosen);
@@ -524,7 +600,10 @@ fn install_cmd(
                 return Err(err);
             }
         }
-    };
+    }
+}
+
+fn print_install_outcome(outcome: &pkg::InstallOutcome) {
     match outcome {
         pkg::InstallOutcome::App(report) => {
             println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
@@ -535,20 +614,19 @@ fn install_cmd(
             installed,
             skipped,
         } => {
-            for id in &skipped {
+            for id in skipped {
                 println!("{}", tf(Msg::PkgStackAppSkipped, id));
             }
-            for report in &installed {
+            for report in installed {
                 println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
             }
-            println!("{}", tf2(Msg::PkgStackInstalled, &stack, installed.len()));
+            println!("{}", tf2(Msg::PkgStackInstalled, stack, installed.len()));
             // Dependency order doubles as the recommended start order.
-            for report in &installed {
+            for report in installed {
                 println!("{}", tf(Msg::PkgStartHint, &report.id));
             }
         }
     }
-    Ok(())
 }
 
 /// `asc install <git-url>`: bypasses the registry entirely and clones the
@@ -563,27 +641,33 @@ fn install_from_git_cmd(
     branch: Option<&str>,
     tag: Option<&str>,
     config: &Config,
-    ctx: &UserContext,
+    daemon: Option<client::Daemon>,
 ) -> anyhow::Result<()> {
     if source.is_some() {
         anyhow::bail!("--source has no effect on a direct repository install");
     }
+    let name = match name {
+        Some(name) => Some(name),
+        None => prompt_git_app_name(url, config, daemon.as_ref())?,
+    };
+    let name = name.as_deref();
+    if let Some(daemon) = &daemon {
+        let outcome = install_daemon_loop(daemon, url, None, name, branch, tag)?;
+        print_install_outcome(&outcome);
+        return Ok(());
+    }
+    let ctx = UserContext::current();
     let git_ref = match (branch, tag) {
         (Some(b), None) => Some(pkg::GitRef::Branch(b)),
         (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!("clap rejects --branch together with --tag"),
     };
-    let name = match name {
-        Some(name) => Some(name),
-        None => prompt_git_app_name(url, config)?,
-    };
-    let name = name.as_deref();
     let mut license_ack = false;
     // Same interactive recoveries as a registry install, minus the source
     // pick (there is only ever one source: the URL itself).
     let report = loop {
-        match pkg::install_from_git(config, ctx, url, git_ref, name, license_ack) {
+        match pkg::install_from_git(config, &ctx, url, git_ref, name, license_ack) {
             Ok(report) => break report,
             Err(err) if offer_auth_setup(&err) => continue,
             Err(err) => {
@@ -607,7 +691,11 @@ fn install_from_git_cmd(
 /// the suffixed instance id the install would allocate (DMN-033). For a
 /// whole-stack spec the name is a prefix (DMN-034) and the prompt says so.
 /// Skipped for non-interactive stdin, where `--name` is the way.
-fn prompt_app_name(spec: &str, config: &Config) -> anyhow::Result<Option<String>> {
+fn prompt_app_name(
+    spec: &str,
+    config: &Config,
+    daemon: Option<&client::Daemon>,
+) -> anyhow::Result<Option<String>> {
     // SAFETY: isatty() has no preconditions.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
         return Ok(None);
@@ -623,9 +711,7 @@ fn prompt_app_name(spec: &str, config: &Config) -> anyhow::Result<Option<String>
                 !candidates.is_empty() && candidates.iter().all(|c| c.entry.package_type == "stack")
             })
             .unwrap_or(false);
-    // Stack specs ('stack/app') are not valid ids; fall back to the spec.
-    let store = asc_daemon::daemon::apps::AppStore::new(config.daemon.apps_dir.clone());
-    let default = pkg::instance_id(&store, base).unwrap_or_else(|_| base.to_string());
+    let default = instance_default(base, config, daemon);
     let msg = if is_stack {
         Msg::PkgPromptStackName
     } else {
@@ -638,16 +724,52 @@ fn prompt_app_name(spec: &str, config: &Config) -> anyhow::Result<Option<String>
 /// Same custom-name prompt as [`prompt_app_name`], for a direct repository
 /// install: the default is derived from the repository name instead of a
 /// registry manifest (there is none to read yet).
-fn prompt_git_app_name(url: &str, config: &Config) -> anyhow::Result<Option<String>> {
+fn prompt_git_app_name(
+    url: &str,
+    config: &Config,
+    daemon: Option<&client::Daemon>,
+) -> anyhow::Result<Option<String>> {
     // SAFETY: isatty() has no preconditions.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
         return Ok(None);
     }
     let base = pkg::repo_name(url)?;
-    let store = asc_daemon::daemon::apps::AppStore::new(config.daemon.apps_dir.clone());
-    let default = pkg::instance_id(&store, &base).unwrap_or(base);
+    let default = instance_default(&base, config, daemon);
     let answer = read_line(&tf(Msg::PkgPromptName, &default))?;
     Ok(Some(answer).filter(|a| !a.is_empty()))
+}
+
+/// The default instance id shown in the name prompt (DMN-033): the next
+/// free `<base>`, `<base>-2`, ... Against the daemon's app list when the
+/// install goes through the daemon (that is where the id will be
+/// allocated), against the local store otherwise. Best-effort either way —
+/// the install itself allocates the id authoritatively.
+fn instance_default(base: &str, config: &Config, daemon: Option<&client::Daemon>) -> String {
+    let Some(daemon) = daemon else {
+        // Stack specs ('stack/app') are not valid ids; fall back to the spec.
+        let store = asc_daemon::daemon::apps::AppStore::new(config.daemon.apps_dir.clone());
+        return pkg::instance_id(&store, base).unwrap_or_else(|_| base.to_string());
+    };
+    let Ok(apps) = daemon.list() else {
+        return base.to_string();
+    };
+    let taken: std::collections::HashSet<&str> = apps
+        .iter()
+        .flat_map(|a| [a.id.as_str(), a.name.as_str()])
+        .collect();
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for n in 2u32.. {
+        let candidate = format!("{base}-{n}");
+        if candidate.len() > 64 {
+            break;
+        }
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    base.to_string()
 }
 
 fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
@@ -1125,10 +1247,109 @@ fn source_cmd(action: SourceAction) -> anyhow::Result<()> {
 }
 
 fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
+    // Lifecycle commands go through the daemon when it is present
+    // (DMN-042); the rest operate on local files/consoles and stay
+    // in-process until their daemon RPCs exist (DMN-043).
+    let routable = matches!(
+        action,
+        AppAction::List
+            | AppAction::Info { .. }
+            | AppAction::Start { .. }
+            | AppAction::Stop { .. }
+            | AppAction::Restart { .. }
+            | AppAction::Logs { .. }
+            | AppAction::Remove { .. }
+    );
+    if routable && let Some(daemon) = daemon_backend(config)? {
+        return app_cmd_daemon(&daemon, action, config);
+    }
+    app_cmd_local(action, config)
+}
+
+/// App commands over the daemon's unix socket: the daemon reads the
+/// caller's uid from SO_PEERCRED and shows/manages only their apps (root —
+/// everyone's), so no docker group and no sudo are needed here.
+fn app_cmd_daemon(
+    daemon: &client::Daemon,
+    action: AppAction,
+    config: &Config,
+) -> anyhow::Result<()> {
+    match action {
+        AppAction::List => {
+            let rows: Vec<AppRow> = daemon.list()?.iter().map(remote_row).collect();
+            print_app_list(&rows, UserContext::current().is_root);
+        }
+        AppAction::Info { id } => {
+            let app = daemon.info(&id)?;
+            println!("{}  {}", app.id, app.name);
+            if let Some(title) = &app.title {
+                println!("  title:   {title}");
+            }
+            println!("  kind:    {}", app.kind);
+            println!("  state:   {}", remote_state_label(&app.state));
+            println!("  version: {}", app.version.as_deref().unwrap_or("-"));
+            println!("  source:  {}", app.source.as_deref().unwrap_or("-"));
+            if let Some(quota) = &app.quota {
+                println!("  quota:   {}", quota_label(quota));
+            }
+            println!("  {}", tf(Msg::OwnerLabel, &app.owner));
+        }
+        AppAction::Start { id, detach } => {
+            match with_spinner(|| daemon.start(&id))? {
+                false => println!("{}", tf(Msg::AppStarted, &id)),
+                true => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
+            }
+            // Auto-attach like the in-process path — the attach itself
+            // still opens Docker directly, so it only works where the
+            // caller can reach docker.sock (root); the console over the
+            // daemon socket is a follow-up (DMN-043).
+            // SAFETY: isatty() has no preconditions.
+            let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
+            if !detach
+                && interactive
+                && UserContext::current().is_root
+                && daemon.info(&id)?.kind == "docker"
+            {
+                attach_cmd(&id, config)?;
+            }
+        }
+        AppAction::Stop { id } => match with_spinner(|| daemon.stop(&id))? {
+            false => println!("{}", tf(Msg::AppStopped, &id)),
+            true => println!("{}", tf(Msg::AppNotRunning, &id)),
+        },
+        AppAction::Restart { id } => {
+            with_spinner(|| daemon.restart(&id))?;
+            println!("{}", tf(Msg::AppRestarted, &id));
+        }
+        AppAction::Logs { id, tail } => {
+            let logs = daemon.logs(&id, tail)?;
+            if logs.trim().is_empty() {
+                println!("{}", t(Msg::NoLogs));
+            } else {
+                println!("{logs}");
+            }
+        }
+        AppAction::Remove { id, yes } => {
+            if !yes {
+                anyhow::bail!(tf(Msg::AppRemoveNeedsYes, &id));
+            }
+            daemon.remove(&id)?;
+            println!("{}", tf(Msg::AppRemoved, &id));
+        }
+        // Only lifecycle actions are routed here (see app_cmd).
+        other => app_cmd_local(other, config)?,
+    }
+    Ok(())
+}
+
+fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
     match action {
-        AppAction::List => print_app_list(&manager.list(&ctx)?, ctx.is_root),
+        AppAction::List => {
+            let rows: Vec<AppRow> = manager.list(&ctx)?.iter().map(local_row).collect();
+            print_app_list(&rows, ctx.is_root);
+        }
         AppAction::Info { id } => {
             let status = manager.status(&ctx, &id)?;
             let m = &status.meta;
@@ -1165,7 +1386,7 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
         AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
         AppAction::Start { id, detach } => {
             confirm_start_resources(&manager, &ctx, &id, config)?;
-            match manager.start(&ctx, &id)? {
+            match with_spinner(|| manager.start(&ctx, &id))? {
                 Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
                 Outcome::AlreadyInState => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
             }
@@ -1185,12 +1406,12 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
                 attach_cmd(&id, config)?;
             }
         }
-        AppAction::Stop { id } => match manager.stop(&ctx, &id)? {
+        AppAction::Stop { id } => match with_spinner(|| manager.stop(&ctx, &id))? {
             Outcome::Done => println!("{}", tf(Msg::AppStopped, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
         AppAction::Restart { id } => {
-            manager.restart(&ctx, &id)?;
+            with_spinner(|| manager.restart(&ctx, &id))?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
         AppAction::Logs { id, tail } => {
@@ -1399,7 +1620,7 @@ fn clone_cmd(reference: &str, name: Option<String>, config: &Config) -> anyhow::
     let source = manager.get_authorized(&ctx, reference)?;
     let name = match name {
         Some(name) => Some(name),
-        None => prompt_app_name(&source.id, config)?,
+        None => prompt_app_name(&source.id, config, None)?,
     };
 
     // The source directory's total size is only known once `pkg::clone_app`
@@ -2036,28 +2257,65 @@ fn state_label(state: RuntimeState) -> &'static str {
     }
 }
 
+/// The API's "running"/"stopped" strings, translated like [`state_label`].
+fn remote_state_label(state: &str) -> &'static str {
+    if state == "running" {
+        t(Msg::StateActive)
+    } else {
+        t(Msg::StateInactive)
+    }
+}
+
+/// One `asc app list` table row — the common shape of an app whether it
+/// came from the local store or from the daemon API.
+struct AppRow {
+    id: String,
+    name: String,
+    kind: String,
+    state: &'static str,
+    version: Option<String>,
+    owner: String,
+}
+
+fn local_row(app: &AppStatus) -> AppRow {
+    AppRow {
+        id: app.meta.id.clone(),
+        name: app.meta.display_name().to_string(),
+        kind: app.meta.runtime.kind().to_string(),
+        state: state_label(app.state),
+        version: app.meta.version.clone(),
+        owner: app.meta.owner.name.clone(),
+    }
+}
+
+fn remote_row(app: &RemoteApp) -> AppRow {
+    AppRow {
+        id: app.id.clone(),
+        name: app.name.clone(),
+        kind: app.kind.clone(),
+        state: remote_state_label(&app.state),
+        version: app.version.clone(),
+        owner: app.owner.clone(),
+    }
+}
+
 /// Table of apps; root gets them grouped by owner. Column headers are
 /// technical identifiers and stay English by convention (like `docker ps`).
 /// NAME is the user's custom name (or the package title): both it and the
 /// ID address the app in commands.
-fn print_app_list(apps: &[AppStatus], group_by_owner: bool) {
+fn print_app_list(apps: &[AppRow], group_by_owner: bool) {
     if apps.is_empty() {
         println!("{}", t(Msg::AppListEmpty));
         return;
     }
-    let id_w = apps
-        .iter()
-        .map(|a| a.meta.id.len())
-        .max()
-        .unwrap_or(2)
-        .max(2);
+    let id_w = apps.iter().map(|a| a.id.len()).max().unwrap_or(2).max(2);
     let name_w = apps
         .iter()
-        .map(|a| a.meta.display_name().chars().count())
+        .map(|a| a.name.chars().count())
         .max()
         .unwrap_or(4)
         .max(4);
-    let print_rows = |rows: &[&AppStatus]| {
+    let print_rows = |rows: &[&AppRow]| {
         println!(
             "{:<id_w$}  {:<name_w$}  {:<7}  {:<10}  VERSION",
             "ID", "NAME", "KIND", "STATE"
@@ -2065,16 +2323,16 @@ fn print_app_list(apps: &[AppStatus], group_by_owner: bool) {
         for app in rows {
             println!(
                 "{:<id_w$}  {:<name_w$}  {:<7}  {:<10}  {}",
-                app.meta.id,
-                app.meta.display_name(),
-                app.meta.runtime.kind(),
-                state_label(app.state),
-                app.meta.version.as_deref().unwrap_or("-"),
+                app.id,
+                app.name,
+                app.kind,
+                app.state,
+                app.version.as_deref().unwrap_or("-"),
             );
         }
     };
     if group_by_owner {
-        let mut owners: Vec<&str> = apps.iter().map(|a| a.meta.owner.name.as_str()).collect();
+        let mut owners: Vec<&str> = apps.iter().map(|a| a.owner.as_str()).collect();
         owners.sort_unstable();
         owners.dedup();
         for (i, owner) in owners.iter().enumerate() {
@@ -2082,14 +2340,11 @@ fn print_app_list(apps: &[AppStatus], group_by_owner: bool) {
                 println!();
             }
             println!("{}", tf(Msg::OwnerLabel, owner));
-            let rows: Vec<&AppStatus> = apps
-                .iter()
-                .filter(|a| a.meta.owner.name == *owner)
-                .collect();
+            let rows: Vec<&AppRow> = apps.iter().filter(|a| a.owner == *owner).collect();
             print_rows(&rows);
         }
     } else {
-        let rows: Vec<&AppStatus> = apps.iter().collect();
+        let rows: Vec<&AppRow> = apps.iter().collect();
         print_rows(&rows);
     }
 }
@@ -2134,13 +2389,25 @@ fn status_cmd(config: &Config) -> anyhow::Result<()> {
     }
     println!("asc {}", asc_daemon::VERSION);
     print_service_state()?;
-    let manager = AppManager::new(config);
-    let apps = manager.list(&UserContext::current())?;
-    let running = apps
-        .iter()
-        .filter(|a| a.state == RuntimeState::Running)
-        .count();
-    println!("{}", tf2(Msg::StatusApps, running, apps.len()));
+    // Through the daemon when it answers (the counts then reflect what the
+    // caller may see per SO_PEERCRED); silently in-process otherwise —
+    // status is diagnostics and must work with a broken daemon too.
+    let (running, total) = match client::Daemon::connect(config).ok().flatten() {
+        Some(daemon) => {
+            let (_, running, total) = daemon.status()?;
+            (running as usize, total as usize)
+        }
+        None => {
+            let manager = AppManager::new(config);
+            let apps = manager.list(&UserContext::current())?;
+            let running = apps
+                .iter()
+                .filter(|a| a.state == RuntimeState::Running)
+                .count();
+            (running, apps.len())
+        }
+    };
+    println!("{}", tf2(Msg::StatusApps, running, total));
     print_system_metrics();
     Ok(())
 }

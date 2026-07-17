@@ -52,6 +52,51 @@ impl UserContext {
             .unwrap_or_else(|| uid.to_string());
         Self { uid, name, is_root }
     }
+
+    /// Context of a unix-socket peer, from its kernel-reported uid
+    /// (SO_PEERCRED — unforgeable, unlike anything inside the request).
+    ///
+    /// `sudo_uid`/`sudo_user` are the client's *attribution hint* for `sudo
+    /// asc ...` (mirroring [`UserContext::current`]'s `SUDO_UID`/`SUDO_USER`
+    /// handling) and are honored only when the peer itself is root — a
+    /// regular user cannot claim someone else's identity by sending headers.
+    pub fn from_peer(peer_uid: u32, sudo_uid: Option<u32>, sudo_user: Option<&str>) -> Self {
+        let is_root = peer_uid == 0;
+        let uid = sudo_uid.filter(|_| is_root).unwrap_or(peer_uid);
+        let name = sudo_user
+            .filter(|_| is_root)
+            .map(str::to_string)
+            .or_else(|| username_for_uid(uid))
+            .unwrap_or_else(|| uid.to_string());
+        Self { uid, name, is_root }
+    }
+}
+
+/// Login name for a uid from the user database, `None` when the uid has no
+/// passwd entry (deleted user, container without the host's /etc/passwd).
+fn username_for_uid(uid: u32) -> Option<String> {
+    // _SC_GETPW_R_SIZE_MAX is a hint and may be -1; 4 KiB covers any sane
+    // passwd line and getpwuid_r reports ERANGE if it somehow does not.
+    let mut buf = vec![0i8; 4096];
+    // SAFETY: zeroed passwd is a valid out-parameter for getpwuid_r.
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: all pointers reference live buffers of the stated sizes.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: on success pw_name points at a NUL-terminated string in buf.
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
+    Some(name.to_string_lossy().into_owned())
 }
 
 /// Outcome of start/stop, so the CLI can report idempotent calls honestly.
@@ -524,5 +569,30 @@ mod tests {
 
         assert!(mgr.get_authorized(&user(1000), "Server").is_err());
         assert!(mgr.get_authorized(&user(1000), "app-a").is_ok());
+    }
+
+    /// SO_PEERCRED contexts: a non-root peer is exactly itself — the sudo
+    /// attribution hint must be ignored (headers are client-controlled);
+    /// a root peer keeps full visibility while attributing new apps to the
+    /// invoking sudo user, mirroring `UserContext::current`.
+    #[test]
+    fn peer_context_honors_sudo_hint_only_for_root() {
+        let plain = UserContext::from_peer(1000, None, None);
+        assert_eq!(plain.uid, 1000);
+        assert!(!plain.is_root);
+
+        let spoofed = UserContext::from_peer(1000, Some(0), Some("root"));
+        assert_eq!(spoofed.uid, 1000, "non-root peer must not escalate");
+        assert!(!spoofed.is_root);
+        assert_ne!(spoofed.name, "root");
+
+        let sudo = UserContext::from_peer(0, Some(1000), Some("alice"));
+        assert_eq!(sudo.uid, 1000);
+        assert_eq!(sudo.name, "alice");
+        assert!(sudo.is_root, "sudo keeps full visibility");
+
+        let root = UserContext::from_peer(0, None, None);
+        assert_eq!(root.uid, 0);
+        assert!(root.is_root);
     }
 }

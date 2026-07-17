@@ -181,11 +181,11 @@ If you want to say **thank you** or support the active development of asc-daemon
 
 ## 🌠 Star History
 
-<a href="https://www.star-history.com/?type=date&repos=AdminServiceCloud%2Fasc-daemon">
+<a href="https://www.star-history.com/?repos=AdminServiceCloud%2Fasc-daemon&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=AdminServiceCloud/asc-daemon&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=AdminServiceCloud/asc-daemon&type=date&theme=dark&legend=top-left&sealed_token=v0FJVSk7VB6NmVGA5YhYX-nYfTTzS2tsXBuPBLTkUi07Hftpgyxkyw1i2hEakvPUy_ke6MAPn_pTa1-aRU3MUOONNeo8dV-72nvOtDhvtY8-wzYEqzFMsvTYR-easTVZLwn5_i0TYXyg0dl3q4cyYLI3nwb2YLoLzl8pQ8ACudwsd_11uP9LdZkTYzk-" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=AdminServiceCloud/asc-daemon&type=date&legend=top-left&sealed_token=v0FJVSk7VB6NmVGA5YhYX-nYfTTzS2tsXBuPBLTkUi07Hftpgyxkyw1i2hEakvPUy_ke6MAPn_pTa1-aRU3MUOONNeo8dV-72nvOtDhvtY8-wzYEqzFMsvTYR-easTVZLwn5_i0TYXyg0dl3q4cyYLI3nwb2YLoLzl8pQ8ACudwsd_11uP9LdZkTYzk-" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=AdminServiceCloud/asc-daemon&type=date&legend=top-left&sealed_token=v0FJVSk7VB6NmVGA5YhYX-nYfTTzS2tsXBuPBLTkUi07Hftpgyxkyw1i2hEakvPUy_ke6MAPn_pTa1-aRU3MUOONNeo8dV-72nvOtDhvtY8-wzYEqzFMsvTYR-easTVZLwn5_i0TYXyg0dl3q4cyYLI3nwb2YLoLzl8pQ8ACudwsd_11uP9LdZkTYzk-" />
  </picture>
 </a>
 

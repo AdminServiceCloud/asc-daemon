@@ -188,12 +188,13 @@ fn volume_usages(
 /// crafted loop or a link outside the measured directory cannot inflate the
 /// result or escape it. A missing directory reports zero.
 ///
-/// `pub(crate)`: reused for the quick per-app disk figure in `asc stats`
-/// (`AppManager::stats`, same module) and for the clone progress bar's total
-/// (`pkg::clone`, a sibling module under `daemon`) — unlike [`usage`], it
-/// skips the Docker image query and settings/volume resolution, cheap enough
-/// to recompute on every stats refresh tick.
-pub(crate) fn dir_size(dir: &Path) -> u64 {
+/// `pub`: reused for the quick per-app disk figure in `asc stats`
+/// (`AppManager::stats`, same module), the clone progress bar's total
+/// (`pkg::clone`, a sibling module under `daemon`) and the `asc disk`
+/// summary (`cli::disk_summary_cmd`, the `asc` binary) — unlike [`usage`],
+/// it skips the Docker image query and settings/volume resolution, cheap
+/// enough to recompute on every stats refresh tick or across every app.
+pub fn dir_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {

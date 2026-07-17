@@ -311,6 +311,13 @@ fn collect_disks() -> Vec<DiskMetrics> {
     disks
 }
 
+/// Total capacity of the filesystem holding `path`, for a usage bar against
+/// an arbitrary directory (e.g. the apps store root in `asc disk`) rather
+/// than a whole mounted device — `path` need not be a mount point itself.
+pub fn filesystem_total(path: &Path) -> Option<u64> {
+    statvfs(path).map(|disk| disk.total)
+}
+
 /// Filesystem usage via statvfs(3). Sizes use `f_frsize` per POSIX.
 fn statvfs(mount: &Path) -> Option<DiskMetrics> {
     use std::os::unix::ffi::OsStrExt;

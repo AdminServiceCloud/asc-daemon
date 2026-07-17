@@ -59,6 +59,10 @@ enum Command {
     /// List apps, shorthand for `asc app list` (root sees all users' apps)
     #[command(visible_alias = "ps")]
     Ls,
+    /// Show disk usage, shorthand for `asc app disk` (root sees all users'
+    /// apps): total space occupied by apps as a bar against the store's
+    /// filesystem capacity, then each app's own usage, largest first
+    Disk,
     /// Install from a registry (<name>, <stack> or <stack>/<app>, with
     /// optional @<version>) or directly from a git repository URL
     /// (https://, ssh:// or git@host:path)
@@ -267,9 +271,10 @@ enum AppAction {
         id: String,
     },
     /// Show disk usage: quota bar (if a quota is set) and a breakdown by
-    /// image, repository, data and custom volumes
+    /// image, repository, data and custom volumes. Without an id: total
+    /// space occupied by all apps, then each app's usage, largest first.
     Disk {
-        id: String,
+        id: Option<String>,
     },
     /// Clone an app instance (data, env, settings) into a new one (DMN-019)
     Clone {
@@ -432,6 +437,7 @@ fn run() -> anyhow::Result<()> {
         Command::Stats { sort, live } => stats_cmd(sort, live, &config),
         Command::App { action } => app_cmd(action, &config),
         Command::Ls => app_cmd(AppAction::List, &config),
+        Command::Disk => app_cmd(AppAction::Disk { id: None }, &config),
         Command::Install {
             spec,
             source,
@@ -1366,7 +1372,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             }
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
-        AppAction::Disk { id } => disk_cmd(&id, config)?,
+        AppAction::Disk { id } => disk_cmd(id.as_deref(), config)?,
         AppAction::Clone { id, name } => clone_cmd(&id, name, config)?,
         AppAction::Install {
             spec,
@@ -1550,11 +1556,14 @@ fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
 /// `asc app disk <id>` (DMN-035): a quota bar when a disk quota is set, then
 /// an itemized breakdown. Column labels are technical identifiers and stay
 /// English, like the rest of `asc app info`.
-fn disk_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
+fn disk_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::disk;
 
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
+    let Some(reference) = reference else {
+        return disk_summary_cmd(&manager, &ctx);
+    };
     let meta = manager.get_authorized(&ctx, reference)?;
     let usage = disk::usage(config, manager.store(), &meta)?;
 
@@ -1594,6 +1603,91 @@ fn disk_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
                 ""
             };
             println!("    {} -> {}{note}  {size}", volume.entry, volume.path);
+        }
+    }
+    Ok(())
+}
+
+/// `asc disk` with no id: total space occupied by every visible app (root
+/// sees all users' apps, like [`print_app_list`]) as a bar against the apps
+/// store's filesystem capacity, then each app's own usage, largest first.
+/// Sizes are the cheap directory-walk figure ([`disk::dir_size`], the same
+/// one `asc stats` uses) — no image/volume breakdown, no Docker queries.
+fn disk_summary_cmd(manager: &AppManager, ctx: &UserContext) -> anyhow::Result<()> {
+    use asc_daemon::daemon::apps::disk;
+    use asc_daemon::daemon::monitor::system;
+
+    let mut rows: Vec<(AppStatus, u64)> = manager
+        .list(ctx)?
+        .into_iter()
+        .map(|app| {
+            let bytes = manager
+                .store()
+                .app_dir(&app.meta.id)
+                .map(|dir| disk::dir_size(&dir))
+                .unwrap_or(0);
+            (app, bytes)
+        })
+        .collect();
+    rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+
+    let apps_bytes: u64 = rows.iter().map(|(_, bytes)| bytes).sum();
+    match system::filesystem_total(manager.store().root()) {
+        Some(fs_total) => {
+            println!("Apps: {}", usage_string(apps_bytes, fs_total));
+            println!("{}", static_bar(apps_bytes, fs_total, 30));
+        }
+        None => println!("Apps: {}", monitor::human_bytes(apps_bytes)),
+    }
+    println!();
+
+    if rows.is_empty() {
+        println!("{}", t(Msg::AppListEmpty));
+        return Ok(());
+    }
+    let id_w = rows
+        .iter()
+        .map(|(app, _)| app.meta.id.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let name_w = rows
+        .iter()
+        .map(|(app, _)| app.meta.display_name().chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let show_user = ctx.is_root;
+    let user_w = rows
+        .iter()
+        .map(|(app, _)| app.meta.owner.name.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    if show_user {
+        println!(
+            "{:<id_w$}  {:<name_w$}  {:<user_w$}  SIZE",
+            "ID", "NAME", "USER"
+        );
+    } else {
+        println!("{:<id_w$}  {:<name_w$}  SIZE", "ID", "NAME");
+    }
+    for (app, bytes) in &rows {
+        if show_user {
+            println!(
+                "{:<id_w$}  {:<name_w$}  {:<user_w$}  {}",
+                app.meta.id,
+                app.meta.display_name(),
+                app.meta.owner.name,
+                monitor::human_bytes(*bytes),
+            );
+        } else {
+            println!(
+                "{:<id_w$}  {:<name_w$}  {}",
+                app.meta.id,
+                app.meta.display_name(),
+                monitor::human_bytes(*bytes),
+            );
         }
     }
     Ok(())
@@ -2266,6 +2360,25 @@ fn remote_state_label(state: &str) -> &'static str {
     }
 }
 
+/// Whether ANSI colors should be written: only when stdout is a real
+/// terminal and the user has not opted out via `NO_COLOR` (no-color.org).
+fn color_enabled() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// `label` padded to `width` first, *then* wrapped in a color escape — doing
+/// it in that order keeps the escape bytes out of the padding, so later
+/// `{:<n}` columns stay aligned in the terminal.
+fn colored_state(label: &str, is_running: bool, width: usize) -> String {
+    let padded = format!("{label:<width$}");
+    if !color_enabled() {
+        return padded;
+    }
+    let code = if is_running { "32" } else { "31" }; // green / red
+    format!("\x1b[{code}m{padded}\x1b[0m")
+}
+
 /// One `asc app list` table row — the common shape of an app whether it
 /// came from the local store or from the daemon API.
 struct AppRow {
@@ -2273,6 +2386,7 @@ struct AppRow {
     name: String,
     kind: String,
     state: &'static str,
+    is_running: bool,
     version: Option<String>,
     owner: String,
 }
@@ -2283,6 +2397,7 @@ fn local_row(app: &AppStatus) -> AppRow {
         name: app.meta.display_name().to_string(),
         kind: app.meta.runtime.kind().to_string(),
         state: state_label(app.state),
+        is_running: app.state == RuntimeState::Running,
         version: app.meta.version.clone(),
         owner: app.meta.owner.name.clone(),
     }
@@ -2294,16 +2409,19 @@ fn remote_row(app: &RemoteApp) -> AppRow {
         name: app.name.clone(),
         kind: app.kind.clone(),
         state: remote_state_label(&app.state),
+        is_running: app.state == "running",
         version: app.version.clone(),
         owner: app.owner.clone(),
     }
 }
 
-/// Table of apps; root gets them grouped by owner. Column headers are
-/// technical identifiers and stay English by convention (like `docker ps`).
-/// NAME is the user's custom name (or the package title): both it and the
-/// ID address the app in commands.
-fn print_app_list(apps: &[AppRow], group_by_owner: bool) {
+/// Table of apps; root also gets a USER column (their apps span every
+/// account, unlike a regular user who only ever sees their own). Column
+/// headers are technical identifiers and stay English by convention (like
+/// `docker ps`). NAME is the user's custom name (or the package title): both
+/// it and the ID address the app in commands. STATE is colored (green =
+/// running, red = stopped) when stdout is a terminal.
+fn print_app_list(apps: &[AppRow], show_user: bool) {
     if apps.is_empty() {
         println!("{}", t(Msg::AppListEmpty));
         return;
@@ -2315,37 +2433,44 @@ fn print_app_list(apps: &[AppRow], group_by_owner: bool) {
         .max()
         .unwrap_or(4)
         .max(4);
-    let print_rows = |rows: &[&AppRow]| {
+    let state_w = 10;
+    if show_user {
+        let user_w = apps
+            .iter()
+            .map(|a| a.owner.chars().count())
+            .max()
+            .unwrap_or(4)
+            .max(4);
         println!(
-            "{:<id_w$}  {:<name_w$}  {:<7}  {:<10}  VERSION",
-            "ID", "NAME", "KIND", "STATE"
+            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<user_w$}  VERSION",
+            "ID", "NAME", "KIND", "STATE", "USER"
         );
-        for app in rows {
+        for app in apps {
             println!(
-                "{:<id_w$}  {:<name_w$}  {:<7}  {:<10}  {}",
+                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<user_w$}  {}",
                 app.id,
                 app.name,
                 app.kind,
-                app.state,
+                colored_state(app.state, app.is_running, state_w),
+                app.owner,
                 app.version.as_deref().unwrap_or("-"),
             );
         }
-    };
-    if group_by_owner {
-        let mut owners: Vec<&str> = apps.iter().map(|a| a.owner.as_str()).collect();
-        owners.sort_unstable();
-        owners.dedup();
-        for (i, owner) in owners.iter().enumerate() {
-            if i > 0 {
-                println!();
-            }
-            println!("{}", tf(Msg::OwnerLabel, owner));
-            let rows: Vec<&AppRow> = apps.iter().filter(|a| a.owner == *owner).collect();
-            print_rows(&rows);
-        }
     } else {
-        let rows: Vec<&AppRow> = apps.iter().collect();
-        print_rows(&rows);
+        println!(
+            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  VERSION",
+            "ID", "NAME", "KIND", "STATE"
+        );
+        for app in apps {
+            println!(
+                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {}",
+                app.id,
+                app.name,
+                app.kind,
+                colored_state(app.state, app.is_running, state_w),
+                app.version.as_deref().unwrap_or("-"),
+            );
+        }
     }
 }
 

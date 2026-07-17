@@ -40,6 +40,7 @@ Every application lives in a directory named after its ID:
 
 - **Installation = cloning the repository** of the package into `repository/`; switching versions = checking out the desired git tag (details — [📦 package-manager](package-manager.md)).
 - `meta.json` is the source of truth for rebuilding the index after a crash/reboot.
+- **Path scoping by user**: `/asc/apps/` (with `/etc/asc/config.toml` and `/var/lib/asc`) is the tree of the **root** installation — the system daemon and `sudo asc`. Running `asc` as a regular user works against a private tree under `~/.asc/` instead: `~/.asc/apps`, `~/.asc/data`, `~/.asc/config.toml` — so the user edits their apps' settings and config without sudo. The root-managed `[policy]` section is still read from the system config and cannot be overridden per user.
 
 ### ⚙️ Core
 

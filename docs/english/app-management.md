@@ -36,12 +36,29 @@ Every application lives in a directory named after its ID:
 ├── config/        # ⚙️ application settings (see asc.settings.yaml in package-manager.md)
 ├── repository/    # 📦 the application's cloned repository (versions = git tags)
 ├── data/          # 💾 volumes — if the application runs in Docker
-└── meta.json      # 📇 application info: id, name, custom name, owner, version (tag), source, state
+└── meta.json      # 📇 application info: id, uuid, name, custom name, owner, version (tag), source, state
 ```
 
 - **Installation = cloning the repository** of the package into `repository/`; switching versions = checking out the desired git tag (details — [📦 package-manager](package-manager.md)).
 - `meta.json` is the source of truth for rebuilding the index after a crash/reboot.
 - **Path scoping by user**: `/asc/apps/` (with `/etc/asc/config.toml` and `/var/lib/asc`) is the tree of the **root** installation — the system daemon and `sudo asc`. Running `asc` as a regular user **without a running system daemon** works against a private tree under `~/.asc/` instead: `~/.asc/apps`, `~/.asc/data`, `~/.asc/config.toml` — so the user edits their apps' settings and config without sudo. With the daemon present, the lifecycle commands operate on the shared system tree through the daemon socket instead (DMN-042, see above). The root-managed `[policy]` section is still read from the system config and cannot be overridden per user.
+
+#### 🆔 Instance UUID (DMN-044)
+
+Alongside the `id`, every instance gets a **UUID** generated at `asc install` and stored in `meta.json` as `uuid`. It survives upgrades and is shown as the last column of `asc ls`:
+
+```
+ID          NAME        KIND     STATE       VERSION  UUID
+pingpong    Ping Pong   docker   stopped     0.1.0    6f8a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b
+legacy-app  Legacy App  docker   stopped     1.2.0    -
+```
+
+Why a second identifier: an `id` is **reusable**. Removing `helloworld-2` frees that id for the next install (DMN-033), so anything that outlives the app — stored credentials (DMN-045), platform records, audit history — would silently re-bind to a different application. A UUID is retired with the instance and never reissued.
+
+- Generated as a random UUIDv4 (RFC 4122) from `/dev/urandom` — no extra dependency for sixteen bytes.
+- **Optional in `meta.json`**: apps installed before DMN-044 have no `uuid` key, load normally and display `-`. Nothing is backfilled behind the user's back.
+- `asc app clone` gives the clone its **own** UUID — it is a separate instance, not a copy of an identity.
+- Exposed by the API as `App.uuid` (proto field 10, REST `uuid`), absent when unset.
 
 ### ⚙️ Core
 
@@ -54,4 +71,4 @@ Every application lives in a directory named after its ID:
 
 ## 🔗 Related tasks
 
-DMN-002, DMN-004, DMN-019, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, DMN-044, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

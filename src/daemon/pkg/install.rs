@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
 use super::settings::{SettingKind, SettingValues, SettingsFile};
-use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Quota, Runtime};
+use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Quota, Runtime, new_uuid};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
@@ -202,7 +202,7 @@ pub fn install(
     custom_name: Option<&str>,
     license_ack: bool,
 ) -> Result<InstallOutcome> {
-    let (package_spec, requested_version) = parse_spec(spec);
+    let (package_spec, version_spec) = parse_spec(spec);
     let (package, stack_app) = match package_spec.split_once('/') {
         Some((package, app)) if !package.is_empty() && !app.is_empty() => (package, Some(app)),
         Some(_) => bail!("invalid package spec '{package_spec}': use <name> or <stack>/<app>"),
@@ -214,9 +214,14 @@ pub fn install(
 
     let candidates = RegistryClient::new(config)?.resolve_all(package)?;
     let resolved = select_source(candidates, source, package)?;
-    let version = requested_version
-        .map(str::to_string)
-        .or_else(|| resolved.entry.latest.clone());
+    // The version comes from the package repository's tags, not the registry
+    // (DMN-047); `package_spec` (with any `stack/app`) re-invokes correctly.
+    let version = resolve_version(
+        version_spec,
+        package_spec,
+        source,
+        &resolved.entry.source.git,
+    )?;
 
     let opts = InstallOpts {
         version: version.as_deref(),
@@ -428,9 +433,14 @@ fn install_one(
         values.save(&app_dir.join("config"))?;
     }
 
+    // Minted before provisioning, not with the rest of the metadata below, so
+    // a credential bound to this app's uuid already applies to its first
+    // image pull (DMN-044/046).
+    let uuid = new_uuid()?;
     let runtime = provision(
         &manifest,
         name,
+        Some(&uuid),
         &app_dir,
         &manifest_dir,
         &config.docker,
@@ -449,6 +459,7 @@ fn install_one(
     let suffixed = name != base;
     let meta = AppMeta {
         id: name.to_string(),
+        uuid: Some(uuid),
         name: manifest.title.clone().unwrap_or_else(|| name.to_string()),
         custom_name: opts
             .custom_name
@@ -591,9 +602,11 @@ pub fn install_from_git(
         values.save(&app_dir.join("config"))?;
     }
 
+    let uuid = new_uuid()?;
     let runtime = provision(
         &manifest,
         &name,
+        Some(&uuid),
         &app_dir,
         &manifest_dir,
         &config.docker,
@@ -606,6 +619,7 @@ pub fn install_from_git(
         .unwrap_or_else(|| manifest.version.clone());
     let meta = AppMeta {
         id: name.clone(),
+        uuid: Some(uuid),
         name: manifest.title.clone().unwrap_or_else(|| name.clone()),
         custom_name: custom_name.map(str::to_string),
         owner: Owner {
@@ -651,11 +665,89 @@ pub(super) fn enforce_install_policy(
     Ok(())
 }
 
-/// `name@1.2.0` → (`name`, Some(`1.2.0`)).
-pub(super) fn parse_spec(spec: &str) -> (&str, Option<&str>) {
+/// The version part of an install/upgrade spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VersionSpec<'a> {
+    /// No `@` — resolve the repository's newest tag (or its HEAD if it has
+    /// none), the everyday `asc install pkg`.
+    Latest,
+    /// `pkg@` with an empty version — let the user pick a tag or branch
+    /// (DMN-048).
+    Pick,
+    /// `pkg@1.2.0` — that exact ref.
+    Exact(&'a str),
+}
+
+/// `name@1.2.0` → (`name`, [`VersionSpec::Exact`]); `name@` → [`Pick`];
+/// `name` → [`Latest`]. Splits on the first `@`, so `a@b@c` keeps `b@c` as
+/// the version.
+pub(super) fn parse_spec(spec: &str) -> (&str, VersionSpec<'_>) {
     match spec.split_once('@') {
-        Some((name, version)) if !version.is_empty() => (name, Some(version)),
-        _ => (spec, None),
+        Some((name, "")) => (name, VersionSpec::Pick),
+        Some((name, version)) => (name, VersionSpec::Exact(version)),
+        None => (spec, VersionSpec::Latest),
+    }
+}
+
+/// Typed error: `asc install pkg@` needs the user to choose a version from
+/// the repository's tags and branches (DMN-048). The CLI catches it, shows a
+/// numbered picker, and re-runs the install as `pkg@<choice>`; a
+/// non-interactive caller gets the list in the message.
+#[derive(Debug)]
+pub struct VersionChoiceRequired {
+    /// Registry spec to re-invoke with `@<choice>` (`name` or `stack/app`).
+    pub package: String,
+    /// The source that was selected, preserved across the re-invocation.
+    pub source: Option<String>,
+    pub tags: Vec<String>,
+    pub branches: Vec<String>,
+}
+
+impl std::fmt::Display for VersionChoiceRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut all = self.tags.clone();
+        all.extend(self.branches.iter().cloned());
+        write!(
+            f,
+            "{}",
+            tf2(Msg::PkgPickVersionHint, &self.package, all.join(", "))
+        )
+    }
+}
+
+impl std::error::Error for VersionChoiceRequired {}
+
+/// Resolve the version to install/clone from the spec and the package's
+/// repository (DMN-047): the version lives in the repository's git tags, not
+/// in the registry index.
+///
+/// - [`VersionSpec::Exact`] is taken as-is.
+/// - [`VersionSpec::Latest`] asks the repository for its newest tag; a
+///   repository with no tags yields `None`, i.e. clone the default branch.
+/// - [`VersionSpec::Pick`] raises [`VersionChoiceRequired`] for the CLI.
+fn resolve_version(
+    spec: VersionSpec,
+    package: &str,
+    source: Option<&str>,
+    git_url: &str,
+) -> Result<Option<String>> {
+    match spec {
+        VersionSpec::Exact(version) => Ok(Some(version.to_string())),
+        VersionSpec::Latest => Ok(super::gitref::ls_remote(git_url)?
+            .latest_tag()
+            .map(str::to_string)),
+        VersionSpec::Pick => {
+            let refs = super::gitref::ls_remote(git_url)?;
+            if refs.is_empty() {
+                bail!(tf(Msg::PkgNoRefs, git_url));
+            }
+            Err(anyhow::Error::new(VersionChoiceRequired {
+                package: package.to_string(),
+                source: source.map(str::to_string),
+                tags: refs.tags,
+                branches: refs.branches,
+            }))
+        }
     }
 }
 
@@ -865,9 +957,11 @@ pub(super) fn load_quota(
 /// Everything user-adjustable comes from the settings (asc.settings.yaml +
 /// settings.json): env, published ports, volumes, the quota and the start
 /// command — asc.yaml describes only the runtime itself.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn provision(
     manifest: &Manifest,
     id: &str,
+    app_uuid: Option<&str>,
     app_dir: &Path,
     manifest_dir: &Path,
     docker_cfg: &DockerConfig,
@@ -891,6 +985,7 @@ pub(super) fn provision(
                 docker_cfg,
                 quota,
                 start_command,
+                &[Some(id), app_uuid],
             )?;
             Ok(Runtime::Docker { container })
         }
@@ -1023,6 +1118,43 @@ pub(crate) fn runtime_inputs(
 
 /// Create (but do not start) the container via the Docker Engine API: env,
 /// published ports, volumes and quota limits all come from the settings.
+/// Registry credentials for `image`, if any are configured (DMN-046).
+///
+/// A missing or unreadable store is not fatal: public images must keep
+/// pulling on a host with no credentials at all, and a private one fails
+/// later with the Engine's own authorization error.
+pub(super) fn registry_auth_for(
+    image: &str,
+    app_ids: &[Option<&str>],
+) -> Option<docker::RegistryAuth> {
+    let store = match super::auth::GitAuth::load() {
+        Ok(store) => store,
+        Err(e) => {
+            debug!(error = %e, "cannot read the credential store; pulling anonymously");
+            return None;
+        }
+    };
+    let ids: Vec<&str> = app_ids.iter().flatten().copied().collect();
+    let cred = store.lookup_registry(image, &ids)?;
+    match (&cred.username, &cred.method) {
+        (Some(username), super::auth::Method::Token { token }) => Some(docker::RegistryAuth {
+            username: username.clone(),
+            token: token.clone(),
+        }),
+        // An ssh key cannot authorize a registry, and the Engine needs a user
+        // name; `asc auth add --type registry` rejects both, so this only
+        // happens with a hand-edited store.
+        _ => {
+            debug!(
+                pattern = cred.pattern,
+                "registry credential lacks a username/token pair; pulling anonymously"
+            );
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn docker_create(
     manifest: &Manifest,
     inputs: &RuntimeInputs,
@@ -1031,12 +1163,16 @@ fn docker_create(
     docker_cfg: &DockerConfig,
     quota: Option<&Quota>,
     command: Option<String>,
+    // Identities this app answers to (id and, once it exists, uuid) —
+    // credentials bound to either one apply (DMN-045/046).
+    app_ids: &[Option<&str>],
 ) -> Result<()> {
     let image = manifest
         .runtime
         .image
         .as_deref()
         .expect("validated: docker manifests have an image");
+    let registry_auth = registry_auth_for(image, app_ids);
     let env: Vec<String> = inputs
         .env
         .iter()
@@ -1046,7 +1182,7 @@ fn docker_create(
     // Pulling here (rather than leaving it to docker::create's own
     // pull-on-404) lets the image's declared USER be known before its
     // bind-mounted volumes are created, so they can be chowned to match.
-    docker::ensure_pulled(docker_cfg, image)?;
+    docker::ensure_pulled(docker_cfg, image, registry_auth.as_ref())?;
     let owner = docker::image_uid_gid(docker_cfg, image)?;
     let mut binds = Vec::new();
     for volume in &inputs.volumes {
@@ -1069,6 +1205,7 @@ fn docker_create(
             command,
             open_stdin: manifest.runtime.stdin,
             tty: manifest.runtime.tty,
+            registry_auth,
         },
     )
     .context("cannot create docker container")
@@ -1272,9 +1409,18 @@ mod tests {
 
     #[test]
     fn spec_parsing() {
-        assert_eq!(parse_spec("nginx"), ("nginx", None));
-        assert_eq!(parse_spec("nginx@1.27.0"), ("nginx", Some("1.27.0")));
-        assert_eq!(parse_spec("nginx@"), ("nginx@", None));
+        assert_eq!(parse_spec("nginx"), ("nginx", VersionSpec::Latest));
+        assert_eq!(
+            parse_spec("nginx@1.27.0"),
+            ("nginx", VersionSpec::Exact("1.27.0"))
+        );
+        // `pkg@` now means "let me pick", not a package literally named `pkg@`.
+        assert_eq!(parse_spec("nginx@"), ("nginx", VersionSpec::Pick));
+        // First `@` wins: the rest is the version verbatim.
+        assert_eq!(
+            parse_spec("nginx@1@2"),
+            ("nginx", VersionSpec::Exact("1@2"))
+        );
     }
 
     #[test]
@@ -1486,6 +1632,7 @@ mod tests {
         let runtime = provision(
             &manifest,
             "tool",
+            None,
             dir.path(),
             dir.path(),
             &docker_cfg,

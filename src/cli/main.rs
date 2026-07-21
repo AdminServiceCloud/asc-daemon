@@ -142,22 +142,37 @@ enum SourceAction {
 
 #[derive(Subcommand)]
 enum AuthAction {
-    /// Save credentials for a git host or prefix (e.g. github.com/myorg)
+    /// Save credentials for a git host or an image registry
+    /// (e.g. github.com/myorg, ghcr.io/myorg)
     Add {
-        /// Host, host/prefix or a repository URL
+        /// Host, host/prefix, repository URL or image reference
         target: String,
-        /// Access token for https repositories
+        /// What the credential authorizes against
+        #[arg(long = "type", value_name = "repo|registry", default_value = "repo")]
+        kind: String,
+        /// Access token (https repositories and registries)
         #[arg(long)]
         token: Option<String>,
         /// SSH key for git@/ssh repositories; omit the path to pick
         /// interactively from ~/.ssh
         #[arg(long, num_args = 0..=1)]
         ssh_key: Option<Option<std::path::PathBuf>>,
+        /// User name — required by image registries alongside the token
+        #[arg(long)]
+        username: Option<String>,
+        /// Use this credential only for one app (its uuid or id from `asc ls`)
+        #[arg(long)]
+        app: Option<String>,
     },
-    /// List configured credentials (methods only, never secrets)
+    /// List configured credentials (types and methods only, never secrets)
     List,
     /// Remove credentials for a host or prefix
-    Remove { target: String },
+    Remove {
+        target: String,
+        /// Remove only this type; by default every type with that pattern goes
+        #[arg(long = "type", value_name = "repo|registry")]
+        kind: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -547,16 +562,23 @@ fn install_cmd(
         Some(daemon) => install_daemon_loop(daemon, spec, source, name, None, None)?,
         None => {
             let ctx = UserContext::current();
+            let mut spec = spec.to_string();
             let mut source = source.map(str::to_string);
             let mut license_ack = false;
             // Interactive recoveries loop until the install passes or the user
             // declines: auth setup for private repositories, a source pick when
-            // several provide the package, license consent (DMN-028).
+            // several provide the package, a version pick for `pkg@` (DMN-048),
+            // license consent (DMN-028).
             loop {
-                match pkg::install(config, &ctx, spec, source.as_deref(), name, license_ack) {
+                match pkg::install(config, &ctx, &spec, source.as_deref(), name, license_ack) {
                     Ok(outcome) => break outcome,
                     Err(err) if offer_auth_setup(&err) => continue,
                     Err(err) => {
+                        if let Some(chosen) = pick_version(&err)? {
+                            spec = chosen.spec;
+                            source = chosen.source;
+                            continue;
+                        }
                         if let Some(chosen) = pick_source(&err)? {
                             source = Some(chosen);
                             continue;
@@ -589,12 +611,18 @@ fn install_daemon_loop(
     branch: Option<&str>,
     tag: Option<&str>,
 ) -> anyhow::Result<pkg::InstallOutcome> {
+    let mut spec = spec.to_string();
     let mut source = source.map(str::to_string);
     let mut license_ack = false;
     loop {
-        match daemon.install(spec, source.as_deref(), name, branch, tag, license_ack) {
+        match daemon.install(&spec, source.as_deref(), name, branch, tag, license_ack) {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
+                if let Some(chosen) = pick_version(&err)? {
+                    spec = chosen.spec;
+                    source = chosen.source;
+                    continue;
+                }
                 if let Some(chosen) = pick_source(&err)? {
                     source = Some(chosen);
                     continue;
@@ -779,14 +807,18 @@ fn instance_default(base: &str, config: &Config, daemon: Option<&client::Daemon>
 }
 
 fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
-    use asc_daemon::daemon::pkg::auth::{GitAuth, Method, normalize};
+    use asc_daemon::daemon::pkg::auth::{GitAuth, Kind, Method, normalize};
     let mut auth = GitAuth::load()?;
     match action {
         AuthAction::Add {
             target,
+            kind,
             token,
             ssh_key,
+            username,
+            app,
         } => {
+            let kind = Kind::parse(&kind)?;
             let method = match (token, ssh_key) {
                 (Some(token), None) => Method::Token { token },
                 (None, Some(Some(key))) => Method::SshKey { key },
@@ -795,7 +827,17 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
                 },
                 _ => anyhow::bail!(t(Msg::AuthNeedMethod)),
             };
-            let saved = auth.add(&target, method)?;
+            // A registry accepts only a token, and the Engine wants a user
+            // name with it — fail here rather than at the first pull.
+            if kind == Kind::Registry {
+                if matches!(method, Method::SshKey { .. }) {
+                    anyhow::bail!(t(Msg::AuthRegistryNeedsToken));
+                }
+                if username.is_none() {
+                    anyhow::bail!(t(Msg::AuthRegistryNeedsUsername));
+                }
+            }
+            let saved = auth.add(kind, &target, method, username, app)?;
             let (pattern, label) = (saved.pattern.clone(), saved.method.label());
             auth.save()?;
             println!("{}", tf2(Msg::AuthSaved, pattern, label));
@@ -806,18 +848,28 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
                 println!("{}", t(Msg::AuthEmpty));
             } else {
                 let name_w = all.iter().map(|(c, _)| c.pattern.len()).max().unwrap_or(4);
+                let kind_w = 8;
                 for (cred, scope) in all {
+                    // The app binding is part of what the entry addresses, so
+                    // it belongs next to the pattern; secrets never print.
+                    let bound = match &cred.app {
+                        Some(app) => format!("  app={app}"),
+                        None => String::new(),
+                    };
                     println!(
-                        "{:<name_w$}  {:<6}  {}",
+                        "{:<kind_w$}  {:<name_w$}  {:<6}  {}{}",
+                        cred.kind.label(),
                         cred.pattern,
                         scope.label(),
-                        cred.method.label()
+                        cred.method.label(),
+                        bound,
                     );
                 }
             }
         }
-        AuthAction::Remove { target } => {
-            auth.remove(&target)?;
+        AuthAction::Remove { target, kind } => {
+            let kind = kind.as_deref().map(Kind::parse).transpose()?;
+            auth.remove(kind, &target)?;
             auth.save()?;
             println!("{}", tf(Msg::AuthRemoved, normalize(&target)));
         }
@@ -1083,6 +1135,56 @@ fn pick_source(err: &anyhow::Error) -> anyhow::Result<Option<String>> {
     Ok(Some(ambiguous.candidates[index - 1].0.clone()))
 }
 
+/// The user's chosen install spec after a version pick (DMN-048).
+struct VersionChoice {
+    /// Re-invocation spec: `<package>@<ref>`.
+    spec: String,
+    /// The source that was already selected, to keep across the retry.
+    source: Option<String>,
+}
+
+/// When `err` says `asc install pkg@` needs a version and stdin is a terminal,
+/// print the repository's tags and branches as a numbered list and let the
+/// user pick one, returning the `pkg@<ref>` spec to retry with. `Ok(None)` =
+/// not that error or non-interactive (the caller then surfaces the list in the
+/// error message).
+fn pick_version(err: &anyhow::Error) -> anyhow::Result<Option<VersionChoice>> {
+    let Some(choice) = err.downcast_ref::<pkg::VersionChoiceRequired>() else {
+        return Ok(None);
+    };
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(None);
+    }
+    println!("{}", tf(Msg::PkgPickVersion, &choice.package));
+    // Tags first (the common pick), then branches; both share one numbering.
+    let mut refs: Vec<&str> = Vec::new();
+    if !choice.tags.is_empty() {
+        println!("  {}:", t(Msg::PkgTagsHeader));
+        for tag in &choice.tags {
+            println!("  {}) {tag}", refs.len() + 1);
+            refs.push(tag);
+        }
+    }
+    if !choice.branches.is_empty() {
+        println!("  {}:", t(Msg::PkgBranchesHeader));
+        for branch in &choice.branches {
+            println!("  {}) {branch}", refs.len() + 1);
+            refs.push(branch);
+        }
+    }
+    let input = read_line("> ")?;
+    let index: usize = input
+        .parse()
+        .ok()
+        .filter(|n| (1..=refs.len()).contains(n))
+        .ok_or_else(|| anyhow::anyhow!(t(Msg::AuthInvalidChoice)))?;
+    Ok(Some(VersionChoice {
+        spec: format!("{}@{}", choice.package, refs[index - 1]),
+        source: choice.source.clone(),
+    }))
+}
+
 /// When `err` says the package repository ships a license (DMN-028), print
 /// where the package comes from (source + repository), the license text, and
 /// ask for consent. Non-interactive stdin accepts automatically with a
@@ -1158,7 +1260,9 @@ fn offer_auth_setup(err: &anyhow::Error) -> bool {
             Method::Token { token }
         };
         let mut store = GitAuth::load()?;
-        let saved = store.add(&host, method)?;
+        // This recovery only ever runs for a git clone, so the credential is
+        // a repo one, applying to every app under that host.
+        let saved = store.add(auth::Kind::Repo, &host, method, None, None)?;
         let confirmation = tf2(Msg::AuthSaved, saved.pattern.clone(), saved.method.label());
         store.save()?;
         println!("{confirmation}");
@@ -1208,11 +1312,13 @@ fn search_cmd(query: &str, config: &Config) -> anyhow::Result<()> {
         .max()
         .unwrap_or(4)
         .max(4);
+    // No version column: the version is a git tag of the package repository
+    // (DMN-047), resolved at install time — printing it here would mean an
+    // `ls-remote` per row. `asc install <pkg>@` lists a package's versions.
     for pkg in results {
         println!(
-            "{:<name_w$}  {:<9}  {}",
+            "{:<name_w$}  {}",
             pkg.entry.name,
-            pkg.entry.latest.as_deref().unwrap_or("-"),
             pkg.entry.description.as_deref().unwrap_or(""),
         );
     }
@@ -2383,6 +2489,7 @@ fn colored_state(label: &str, is_running: bool, width: usize) -> String {
 /// came from the local store or from the daemon API.
 struct AppRow {
     id: String,
+    uuid: Option<String>,
     name: String,
     kind: String,
     state: &'static str,
@@ -2394,6 +2501,7 @@ struct AppRow {
 fn local_row(app: &AppStatus) -> AppRow {
     AppRow {
         id: app.meta.id.clone(),
+        uuid: app.meta.uuid.clone(),
         name: app.meta.display_name().to_string(),
         kind: app.meta.runtime.kind().to_string(),
         state: state_label(app.state),
@@ -2406,6 +2514,7 @@ fn local_row(app: &AppStatus) -> AppRow {
 fn remote_row(app: &RemoteApp) -> AppRow {
     AppRow {
         id: app.id.clone(),
+        uuid: app.uuid.clone(),
         name: app.name.clone(),
         kind: app.kind.clone(),
         state: remote_state_label(&app.state),
@@ -2434,6 +2543,13 @@ fn print_app_list(apps: &[AppRow], show_user: bool) {
         .unwrap_or(4)
         .max(4);
     let state_w = 10;
+    // VERSION is no longer the trailing column (UUID is), so it needs a width.
+    let version_w = apps
+        .iter()
+        .map(|a| a.version.as_deref().unwrap_or("-").chars().count())
+        .max()
+        .unwrap_or(7)
+        .max(7);
     if show_user {
         let user_w = apps
             .iter()
@@ -2442,33 +2558,35 @@ fn print_app_list(apps: &[AppRow], show_user: bool) {
             .unwrap_or(4)
             .max(4);
         println!(
-            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<user_w$}  VERSION",
-            "ID", "NAME", "KIND", "STATE", "USER"
+            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<user_w$}  {:<version_w$}  UUID",
+            "ID", "NAME", "KIND", "STATE", "USER", "VERSION"
         );
         for app in apps {
             println!(
-                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<user_w$}  {}",
+                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<user_w$}  {:<version_w$}  {}",
                 app.id,
                 app.name,
                 app.kind,
                 colored_state(app.state, app.is_running, state_w),
                 app.owner,
                 app.version.as_deref().unwrap_or("-"),
+                app.uuid.as_deref().unwrap_or("-"),
             );
         }
     } else {
         println!(
-            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  VERSION",
-            "ID", "NAME", "KIND", "STATE"
+            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<version_w$}  UUID",
+            "ID", "NAME", "KIND", "STATE", "VERSION"
         );
         for app in apps {
             println!(
-                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {}",
+                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<version_w$}  {}",
                 app.id,
                 app.name,
                 app.kind,
                 colored_state(app.state, app.is_running, state_w),
                 app.version.as_deref().unwrap_or("-"),
+                app.uuid.as_deref().unwrap_or("-"),
             );
         }
     }

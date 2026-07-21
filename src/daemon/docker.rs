@@ -11,6 +11,7 @@ use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use bollard::Docker;
+use bollard::auth::DockerCredentials;
 use bollard::container::AttachContainerResults;
 use bollard::errors::Error as BollardError;
 use bollard::models::{
@@ -283,12 +284,12 @@ pub fn image_size(cfg: &DockerConfig, image: &str) -> Result<Option<u64>> {
 /// Lets a caller inspect the image (e.g. [`image_uid_gid`]) before it is
 /// known to exist on the host, without duplicating [`create`]'s own
 /// pull-on-404 handling.
-pub fn ensure_pulled(cfg: &DockerConfig, image: &str) -> Result<()> {
+pub fn ensure_pulled(cfg: &DockerConfig, image: &str, auth: Option<&RegistryAuth>) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
         match docker.inspect_image(image).await {
             Ok(_) => Ok(()),
-            Err(e) if status_of(&e) == Some(404) => pull(&docker, image)
+            Err(e) if status_of(&e) == Some(404) => pull(&docker, image, auth)
                 .await
                 .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image))),
             Err(e) => Err(friendly(cfg, e)),
@@ -378,6 +379,29 @@ pub struct CreateSpec<'a> {
     pub open_stdin: bool,
     /// Allocate a pseudo-TTY (Engine `Tty`, like `docker run -t`).
     pub tty: bool,
+    /// Credentials for the image's registry (DMN-046); `None` = anonymous.
+    pub registry_auth: Option<RegistryAuth>,
+}
+
+/// Credentials for one image registry, resolved from the `asc auth` store.
+///
+/// They travel to the Engine as the `X-Registry-Auth` header and the *Engine*
+/// contacts the registry — the daemon itself never speaks to it, which is why
+/// no TLS stack is needed on this side.
+#[derive(Debug, Clone)]
+pub struct RegistryAuth {
+    pub username: String,
+    pub token: String,
+}
+
+impl RegistryAuth {
+    fn to_credentials(&self) -> DockerCredentials {
+        DockerCredentials {
+            username: Some(self.username.clone()),
+            password: Some(self.token.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Split an image reference into the `fromImage` and `tag` query parameters
@@ -401,7 +425,11 @@ fn image_ref(image: &str) -> (&str, Option<&str>) {
 /// layer event is logged at debug level — the Engine gives no other way to
 /// tell a slow pull from a stuck one — and, on a terminal, rendered as a
 /// `docker pull`-style progress bar per layer, regardless of the log level.
-async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardError> {
+async fn pull(
+    docker: &Docker,
+    image: &str,
+    auth: Option<&RegistryAuth>,
+) -> std::result::Result<(), BollardError> {
     let (from_image, tag) = image_ref(image);
     let opts = CreateImageOptions {
         from_image: Some(from_image.to_string()),
@@ -409,7 +437,7 @@ async fn pull(docker: &Docker, image: &str) -> std::result::Result<(), BollardEr
         ..Default::default()
     };
     let mut bars = progress::interactive().then(progress::LayerBars::new);
-    let mut stream = docker.create_image(Some(opts), None, None);
+    let mut stream = docker.create_image(Some(opts), None, auth.map(RegistryAuth::to_credentials));
     while let Some(step) = stream.next().await {
         let step = step?;
         let bytes = step
@@ -506,7 +534,7 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             // 404 = the image is not on the host: pull it and retry once.
             Err(e) if status_of(&e) == Some(404) => {
                 info!(image = spec.image, "image not found locally, pulling");
-                pull(&docker, spec.image)
+                pull(&docker, spec.image, spec.registry_auth.as_ref())
                     .await
                     .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, spec.image)))?;
                 docker

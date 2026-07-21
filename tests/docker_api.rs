@@ -47,6 +47,16 @@ fn spawn_mock(socket: PathBuf) -> Hits {
                     let method = parts.next().unwrap_or("");
                     let path = parts.next().unwrap_or("");
                     hits.lock().unwrap().push(format!("{method} {path}"));
+                    // Registry credentials travel as a base64 X-Registry-Auth
+                    // header (DMN-046); record it so tests can assert on it.
+                    if let Some(value) = head
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("x-registry-auth:"))
+                        .and_then(|l| l.split_once(':'))
+                        .map(|(_, v)| v.trim().to_string())
+                    {
+                        hits.lock().unwrap().push(format!("AUTH {value}"));
+                    }
 
                     let seen = hits.lock().unwrap().clone();
                     let (code, body) = route(method, path, &seen);
@@ -100,6 +110,10 @@ fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String
     }
     if path.ends_with("/restart") {
         return ("204 No Content", String::new());
+    }
+    // An image the host does not have yet, so ensure_pulled goes on to pull.
+    if path.contains("/images/") && path.contains("private") && path.ends_with("/json") {
+        return ("404 Not Found", r#"{"message":"no such image"}"#.into());
     }
     if path.contains("missing") && path.ends_with("/json") {
         return ("404 Not Found", r#"{"message":"no such container"}"#.into());
@@ -159,6 +173,62 @@ fn lifecycle_over_engine_api() {
     assert!(seen.iter().any(|h| h.starts_with("DELETE")));
 }
 
+/// DMN-046: a registry credential must reach the Engine as X-Registry-Auth,
+/// which is what lets it pull a private image on the daemon's behalf.
+#[test]
+fn pull_sends_registry_credentials() {
+    let (cfg, _dir, hits) = test_cfg();
+
+    docker::ensure_pulled(
+        &cfg,
+        "ghcr.io/org/private:1.0",
+        Some(&docker::RegistryAuth {
+            username: "statebyte".into(),
+            token: "ghp_secret".into(),
+        }),
+    )
+    .unwrap();
+
+    let seen = hits.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|h| h.contains("/images/create")),
+        "expected a pull, got {seen:?}"
+    );
+    let auth = seen
+        .iter()
+        .find_map(|h| h.strip_prefix("AUTH "))
+        .expect("pull must carry an X-Registry-Auth header");
+
+    // The header is base64 of the credentials JSON.
+    let decoded =
+        String::from_utf8(base64_decode(auth).expect("X-Registry-Auth must be valid base64"))
+            .unwrap();
+    assert!(decoded.contains("statebyte"), "decoded: {decoded}");
+    assert!(decoded.contains("ghp_secret"), "decoded: {decoded}");
+}
+
+/// Minimal standard-alphabet base64 decoder — the test needs to read one
+/// header and the crate has no base64 dependency of its own.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for byte in input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+    {
+        let value = ALPHABET.iter().position(|c| *c == byte)? as u32;
+        acc = (acc << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 #[test]
 fn create_sends_container_spec() {
     let (cfg, _dir, hits) = test_cfg();
@@ -176,6 +246,7 @@ fn create_sends_container_spec() {
             command: Some("echo ready".into()),
             open_stdin: true,
             tty: true,
+            registry_auth: None,
         },
     )
     .unwrap();
@@ -252,6 +323,7 @@ fn settings_drift_recreates_the_container() {
     let store = AppStore::new(apps.path().to_path_buf());
     let mut meta = AppMeta {
         id: "web".into(),
+        uuid: None,
         name: "web".into(),
         custom_name: None,
         owner: Owner {

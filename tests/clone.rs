@@ -26,6 +26,7 @@ fn seed_app(store: &AppStore, id: &str, quota: Option<Quota>) -> AppMeta {
 
     let meta = AppMeta {
         id: id.to_string(),
+        uuid: None,
         name: "Demo".into(),
         custom_name: None,
         owner: Owner {

@@ -51,6 +51,7 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
     let runtime = provision(
         &desired.manifest,
         &meta.id,
+        meta.uuid.as_deref(),
         app_dir,
         &desired.manifest_dir,
         &config.docker,
@@ -118,7 +119,11 @@ impl Desired {
             .image
             .as_deref()
             .map(|image| {
-                docker::ensure_pulled(&config.docker, image)?;
+                let auth = super::install::registry_auth_for(
+                    image,
+                    &[Some(meta.id.as_str()), meta.uuid.as_deref()],
+                );
+                docker::ensure_pulled(&config.docker, image, auth.as_ref())?;
                 docker::image_uid_gid(&config.docker, image)
             })
             .transpose()?

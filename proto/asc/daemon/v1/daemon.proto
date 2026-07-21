@@ -64,6 +64,9 @@ message App {
   optional string title = 8;
   // Resource quota limits, when any are set (DMN-021).
   optional AppQuota quota = 9;
+  // Stable instance identity generated at install (DMN-044); absent for apps
+  // installed before it. Unlike `id`, never reused after removal.
+  optional string uuid = 10;
 }
 
 // Per-app resource limits; every field is optional — only set limits appear.

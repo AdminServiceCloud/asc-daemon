@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 pub struct AppMeta {
     /// Unique id — the directory name under the apps root.
     pub id: String,
+    /// Stable identity of this instance, generated at install (DMN-044).
+    /// Unlike `id`, it is never reused: removing `helloworld-2` frees that id
+    /// for the next install (DMN-033), while the UUID stays retired — so
+    /// credentials and platform records bind to it safely. `None` for apps
+    /// installed before DMN-044.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
     /// Human-readable name (defaults to the id). Refreshed from the package
     /// manifest on upgrade — user renames go to `custom_name` instead.
     pub name: String,
@@ -126,6 +133,35 @@ impl AppMeta {
     }
 }
 
+/// Generate a random UUIDv4 (RFC 4122, §4.4) for a freshly installed app.
+///
+/// Reads sixteen bytes from the kernel CSPRNG rather than pulling in a crate
+/// for them: `/dev/urandom` is present on every platform the daemon targets and
+/// never blocks once the pool is initialized.
+pub fn new_uuid() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut bytes)
+        })
+        .context("cannot read /dev/urandom to generate an app uuid")?;
+
+    // Version 4 in the high nibble of byte 6, RFC 4122 variant in byte 8.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
+}
+
 /// Validate an app id before using it as a directory name.
 ///
 /// Strict on purpose: the id ends up in filesystem paths, container names and
@@ -150,6 +186,7 @@ mod tests {
     fn sample() -> AppMeta {
         AppMeta {
             id: "helloworld".into(),
+            uuid: Some("6f8a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b".into()),
             name: "Hello World".into(),
             custom_name: None,
             owner: Owner {
@@ -203,6 +240,46 @@ mod tests {
     fn runtime_tag_is_stable() {
         let json = serde_json::to_string(&sample().runtime).unwrap();
         assert!(json.contains(r#""type":"docker""#));
+    }
+
+    #[test]
+    fn uuid_is_v4_and_unique() {
+        let a = new_uuid().unwrap();
+        let b = new_uuid().unwrap();
+        assert_ne!(a, b, "two generated uuids must differ");
+
+        assert_eq!(a.len(), 36);
+        let groups: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        // Version nibble (byte 6) and RFC 4122 variant (byte 8).
+        assert!(groups[2].starts_with('4'), "expected version 4 in {a}");
+        assert!(matches!(
+            groups[3].chars().next().unwrap(),
+            '8' | '9' | 'a' | 'b'
+        ));
+    }
+
+    #[test]
+    fn uuid_is_optional_for_legacy_meta() {
+        // meta.json written before DMN-044 has no "uuid" key and must still load.
+        let dir = tempfile::tempdir().unwrap();
+        let mut legacy: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        legacy.as_object_mut().unwrap().remove("uuid");
+        fs::write(
+            dir.path().join(AppMeta::FILE),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = AppMeta::load(dir.path()).unwrap();
+        assert_eq!(loaded.uuid, None);
+        // ...and a None uuid is not written back out.
+        let json = serde_json::to_string(&loaded).unwrap();
+        assert!(!json.contains("uuid"));
     }
 
     #[test]

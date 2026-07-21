@@ -23,6 +23,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
     AppStore::new(state.config.daemon.apps_dir.clone())
         .save(&AppMeta {
             id: id.into(),
+            uuid: None,
             name: id.into(),
             custom_name: None,
             owner: Owner {

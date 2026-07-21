@@ -77,6 +77,7 @@ fn disk_to_pb(usage: &crate::daemon::apps::disk::DiskUsage) -> pb::GetAppDiskRes
 fn to_pb(status: &AppStatus) -> pb::App {
     pb::App {
         id: status.meta.id.clone(),
+        uuid: status.meta.uuid.clone(),
         name: status.meta.display_name().to_string(),
         kind: status.meta.runtime.kind().to_string(),
         state: match status.state {

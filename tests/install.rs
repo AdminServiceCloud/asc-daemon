@@ -75,7 +75,7 @@ fn install_from_file_registry() {
     fs::write(
         reg.join("categories/web.json"),
         format!(
-            r#"{{"category":"web","packages":[{{"name":"demo","type":"app","latest":"1.0.0","description":"Demo","source":{{"git":"{repo_url}"}}}},{{"name":"subdemo","type":"app","latest":"1.0.0","description":"Sub","source":{{"git":"{mono_url}","path":"pkg"}}}}]}}"#
+            r#"{{"category":"web","packages":[{{"name":"demo","type":"app","description":"Demo","source":{{"git":"{repo_url}"}}}},{{"name":"subdemo","type":"app","description":"Sub","source":{{"git":"{mono_url}","path":"pkg"}}}}]}}"#
         ),
     )
     .unwrap();
@@ -258,4 +258,39 @@ fn install_from_file_registry() {
 
     // Upgrading an unknown app fails cleanly.
     assert!(pkg::upgrade(&config, &ctx, "ghost").is_err());
+
+    // ── DMN-047: no @version installs the repository's newest tag ────────
+    // The repo now has v1.0.0 and v2.0.0; `demo` (no version) must resolve
+    // v2.0.0 from the tags, not any registry field.
+    let pkg::InstallOutcome::App(latest) =
+        pkg::install(&config, &ctx, "demo", None, None, true).unwrap()
+    else {
+        panic!("expected a single-app install");
+    };
+    assert_eq!(
+        store.get(&latest.id).unwrap().unwrap().version.as_deref(),
+        Some("v2.0.0"),
+        "no-version install resolves the newest git tag"
+    );
+    store.remove(&latest.id).unwrap();
+
+    // ── DMN-048: `demo@` asks which version, listing tags and branches ───
+    let err = pkg::install(&config, &ctx, "demo@", None, None, true).unwrap_err();
+    let choice = err
+        .downcast_ref::<pkg::VersionChoiceRequired>()
+        .unwrap_or_else(|| panic!("expected VersionChoiceRequired, got: {err:#}"));
+    assert_eq!(choice.package, "demo");
+    // Tags are newest-first; the default branch is offered too.
+    assert_eq!(choice.tags, vec!["v2.0.0", "v1.0.0"]);
+    assert!(
+        choice.branches.iter().any(|b| b == "main" || b == "master"),
+        "branches listed: {:?}",
+        choice.branches
+    );
+    // The picker raises before any install work, so no new instance appears
+    // (the original `demo` from earlier in the test is untouched).
+    assert!(
+        !store.app_dir("demo-2").unwrap().exists(),
+        "asking for a version installs nothing new"
+    );
 }

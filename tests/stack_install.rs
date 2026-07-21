@@ -76,7 +76,7 @@ apps:
     fs::write(
         reg.join("categories/game-servers.json"),
         format!(
-            r#"{{"category":"game-servers","packages":[{{"name":"demo-stack","type":"stack","latest":"1.0.0","description":"Demo stack","source":{{"git":"{repo_url}"}}}}]}}"#
+            r#"{{"category":"game-servers","packages":[{{"name":"demo-stack","type":"stack","description":"Demo stack","source":{{"git":"{repo_url}"}}}}]}}"#
         ),
     )
     .unwrap();

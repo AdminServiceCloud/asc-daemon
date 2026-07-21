@@ -82,6 +82,24 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
+        if let Some(choice) = self
+            .0
+            .downcast_ref::<crate::daemon::pkg::VersionChoiceRequired>()
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "version_choice": {
+                        "package": choice.package,
+                        "source": choice.source,
+                        "tags": choice.tags,
+                        "branches": choice.branches,
+                    },
+                })),
+            )
+                .into_response();
+        }
         let code = if msg.contains("not found") || msg.contains("не найдено") {
             StatusCode::NOT_FOUND
         } else {
@@ -106,11 +124,15 @@ struct AppJson {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota: Option<crate::daemon::apps::meta::Quota>,
+    /// Stable instance identity (DMN-044); absent for pre-DMN-044 installs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uuid: Option<String>,
 }
 
 fn to_json(status: &AppStatus) -> AppJson {
     AppJson {
         id: status.meta.id.clone(),
+        uuid: status.meta.uuid.clone(),
         name: status.meta.display_name().to_string(),
         kind: status.meta.runtime.kind(),
         state: match status.state {

@@ -14,6 +14,7 @@ use asc_daemon::daemon::config::Config;
 fn meta(id: &str, uid: u32) -> AppMeta {
     AppMeta {
         id: id.into(),
+        uuid: None,
         name: id.into(),
         custom_name: None,
         owner: Owner {

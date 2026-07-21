@@ -291,6 +291,7 @@ mod tests {
 
         let meta = AppMeta {
             id: id.to_string(),
+            uuid: None,
             name: "Demo".into(),
             custom_name: None,
             owner: Owner {

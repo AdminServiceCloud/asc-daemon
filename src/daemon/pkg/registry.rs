@@ -62,9 +62,6 @@ pub struct PackageEntry {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// Latest version — a git tag of the package repository.
-    #[serde(default)]
-    pub latest: Option<String>,
     pub source: PackageSource,
     #[serde(default)]
     pub tags: Vec<String>,

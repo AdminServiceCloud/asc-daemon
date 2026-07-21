@@ -61,7 +61,7 @@ fn make_registry(dir: &Path, repo: &Path) {
     fs::write(
         dir.join("categories/web.json"),
         format!(
-            r#"{{"category":"web","packages":[{{"name":"demo","type":"app","latest":"1.0.0","description":"Demo","source":{{"git":"{repo_url}"}}}}]}}"#
+            r#"{{"category":"web","packages":[{{"name":"demo","type":"app","description":"Demo","source":{{"git":"{repo_url}"}}}}]}}"#
         ),
     )
     .unwrap();
@@ -135,19 +135,22 @@ fn ambiguous_package_requires_source_choice() {
     let err = pkg::install(&config, &ctx, "demo", Some("ghost"), None, true).unwrap_err();
     assert!(err.to_string().contains("ghost"), "got: {err:#}");
 
-    // Explicit source pins the registry.
+    // Explicit source pins the registry; an explicit version pins the tag
+    // (without it, install would resolve the repo's newest tag, DMN-047).
     let pkg::InstallOutcome::App(report) =
-        pkg::install(&config, &ctx, "demo", Some("beta"), None, true).unwrap()
+        pkg::install(&config, &ctx, "demo@1.0.0", Some("beta"), None, true).unwrap()
     else {
         panic!("expected a single-app install");
     };
     assert_eq!(report.id, "demo");
     let meta = store.get("demo").unwrap().expect("meta.json");
     assert!(meta.source.as_deref().unwrap().starts_with("beta:"));
+    assert_eq!(meta.version.as_deref(), Some("v1.0.0"));
 
-    // Upgrade resolves through the stored source (beta has v2.0.0, alpha
-    // does not) — no ambiguity error, no accidental switch to alpha.
-    match pkg::upgrade(&config, &ctx, "demo@2.0.0").unwrap() {
+    // Upgrade with no version resolves the newest tag through the stored
+    // source (beta has v2.0.0, alpha does not) — no ambiguity error, no
+    // accidental switch to alpha, and the version comes from the repo.
+    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
         pkg::UpgradeOutcome::Upgraded { to, .. } => assert_eq!(to, "v2.0.0"),
         other => panic!("expected an upgrade, got {other:?}"),
     }

@@ -44,6 +44,7 @@ fn install_app_with_logs(state: &ApiState, id: &str, log_lines: &str) {
     store
         .save(&AppMeta {
             id: id.into(),
+            uuid: None,
             name: id.into(),
             custom_name: None,
             owner: Owner {

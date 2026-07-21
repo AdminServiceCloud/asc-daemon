@@ -12,8 +12,8 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::install::{
-    RemoveOnDrop, clone_repository, enforce_install_policy, load_quota, locate_manifest,
-    parse_spec, provision,
+    RemoveOnDrop, VersionSpec, clone_repository, enforce_install_policy, load_quota,
+    locate_manifest, parse_spec, provision,
 };
 use super::manifest::Manifest;
 use super::registry::RegistryClient;
@@ -68,13 +68,18 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         .and_then(|s| s.split_once(':'))
         .map(|(name, _)| name);
     let resolved = RegistryClient::new(config)?.resolve_preferring(package, installed_from)?;
-    let Some(version) = requested_version
-        .map(str::to_string)
-        .or_else(|| resolved.entry.latest.clone())
-    else {
-        bail!(
-            "registry entry for '{id}' has no latest version; run: asc app upgrade {id}@<version>"
-        );
+    // The version comes from the repository's tags (DMN-047): an explicit
+    // `@version` wins, otherwise upgrade to the newest tag.
+    let version = match requested_version {
+        VersionSpec::Exact(v) => v.to_string(),
+        VersionSpec::Latest | VersionSpec::Pick => {
+            match super::gitref::ls_remote(&resolved.entry.source.git)?.latest_tag() {
+                Some(tag) => tag.to_string(),
+                None => {
+                    bail!("repository for '{id}' has no tags; run: asc app upgrade {id}@<version>")
+                }
+            }
+        }
     };
     // The installed version is the tag that was actually checked out
     // (`1.2.0` or `v1.2.0`), so compare against both spellings.
@@ -126,6 +131,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     let runtime = match provision(
         &manifest,
         &id,
+        meta.uuid.as_deref(),
         &app_dir,
         &locate_manifest(&repo_dir, entry_path, stack_app)?.0,
         &config.docker,
@@ -207,6 +213,9 @@ fn rollback(
         provision(
             &manifest,
             id,
+            // Rollback recreates the runtime the app had before the upgrade,
+            // whose image is already on the host — no pull, no credentials.
+            None,
             app_dir,
             &dir,
             &config.docker,

@@ -404,6 +404,7 @@ mod tests {
         mgr.store()
             .save(&AppMeta {
                 id: id.into(),
+                uuid: None,
                 name: id.into(),
                 custom_name: custom_name.map(Into::into),
                 owner: Owner {
@@ -481,6 +482,7 @@ mod tests {
         mgr.store()
             .save(&AppMeta {
                 id: "sleeper".into(),
+                uuid: None,
                 name: "sleeper".into(),
                 custom_name: None,
                 owner: Owner {

@@ -105,6 +105,7 @@ mod tests {
     fn meta(id: &str, uid: u32) -> AppMeta {
         AppMeta {
             id: id.into(),
+            uuid: None,
             name: id.into(),
             custom_name: None,
             owner: Owner {

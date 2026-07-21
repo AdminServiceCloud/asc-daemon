@@ -1,12 +1,22 @@
-//! Git authorization for private package repositories (DMN-003).
+//! Per-user credentials for private package repositories and image
+//! registries (DMN-003, DMN-045, DMN-046).
 //!
-//! Credentials are keyed by git host or host/prefix (`github.com`,
-//! `github.com/myorg`) and live outside the source lists, in a 0600 file
-//! per scope: `/etc/asc/git-auth.toml` (root) and
-//! `~/.config/asc/git-auth.toml` (user). A token is handed to git through
-//! `GIT_ASKPASS` plus a process environment variable — never through the
-//! URL or argv, which any local user can read via /proc. SSH keys go
-//! through `GIT_SSH_COMMAND` with `IdentitiesOnly`.
+//! One store holds both kinds, told apart by `type` ([`Kind`]): `repo`
+//! credentials authorize `git clone`, `registry` credentials authorize the
+//! Docker Engine image pull. Both are keyed by a host or host/prefix
+//! (`github.com/myorg`, `ghcr.io/myorg`) and may additionally be bound to a
+//! single application ([`Credential::app`], its DMN-044 uuid or id), so a
+//! token can be scoped to exactly the app that needs it.
+//!
+//! The file is JSON, 0600, one per scope: `/etc/asc/auth.json` (root) and
+//! `~/.asc/auth.json` (user, alongside the rest of the DMN-041 tree). The
+//! pre-DMN-045 TOML files (`/etc/asc/git-auth.toml`,
+//! `~/.config/asc/git-auth.toml`) are still read when no JSON store exists
+//! and are migrated on the next write, so configured auth keeps working.
+//!
+//! A token is handed to git through `GIT_ASKPASS` plus a process environment
+//! variable — never through the URL or argv, which any local user can read
+//! via /proc. SSH keys go through `GIT_SSH_COMMAND` with `IdentitiesOnly`.
 //!
 //! Every git invocation disables interactive prompts, so cloning a private
 //! repository without configured auth fails fast with a recognizable error
@@ -23,23 +33,63 @@ use serde::{Deserialize, Serialize};
 use super::sources::Scope;
 use crate::daemon::i18n::{Msg, tf};
 
-const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/git-auth.toml";
+const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/auth.json";
+/// Pre-DMN-045 TOML store, read-only (migrated on the next write).
+const LEGACY_SYSTEM_PATH: &str = "/etc/asc/git-auth.toml";
 
-/// One credential: how to authorize against repositories under `pattern`.
+/// What a credential authorizes against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// Git repository — used by `git clone`/`fetch`.
+    #[default]
+    Repo,
+    /// Container image registry — used by the Docker Engine image pull.
+    Registry,
+}
+
+impl Kind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Kind::Repo => "repo",
+            Kind::Registry => "registry",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "repo" | "git" => Ok(Kind::Repo),
+            "registry" | "docker" => Ok(Kind::Registry),
+            other => bail!("unknown credential type '{other}': use 'repo' or 'registry'"),
+        }
+    }
+}
+
+/// One credential: how to authorize against `pattern`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
-    /// Normalized host or host/prefix, e.g. `github.com/myorg`.
+    /// `repo` (default, also for legacy entries without the field) or `registry`.
+    #[serde(rename = "type", default)]
+    pub kind: Kind,
+    /// Normalized host or host/prefix, e.g. `github.com/myorg`, `ghcr.io`.
     pub pattern: String,
+    /// Registry user name — the Engine needs it alongside the token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Bind to a single application (DMN-044 uuid, or its id). `None` — the
+    /// credential applies to every app whose URL/image matches `pattern`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
     #[serde(flatten)]
     pub method: Method,
 }
 
-/// Untagged on purpose: the TOML stays flat and readable —
-/// `token = "..."` or `key = "/path"` right next to `pattern`.
+/// Untagged on purpose: the JSON stays flat and readable —
+/// `"token": "..."` or `"key": "/path"` right next to `pattern`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Method {
-    /// Access token for https URLs (GitHub PAT and alike).
+    /// Access token for https URLs and registries (GitHub PAT and alike).
     Token { token: String },
     /// Private key for git@/ssh URLs.
     SshKey { key: PathBuf },
@@ -55,8 +105,16 @@ impl Method {
     }
 }
 
+/// JSON store: `{"credentials": [...]}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AuthFile {
+    #[serde(default)]
+    credentials: Vec<Credential>,
+}
+
+/// Pre-DMN-045 TOML store: `[[credential]]` tables.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct LegacyAuthFile {
     #[serde(default, rename = "credential")]
     credentials: Vec<Credential>,
 }
@@ -71,20 +129,29 @@ pub struct GitAuth {
 }
 
 impl GitAuth {
-    /// System file: `$ASC_GIT_AUTH` override or `/etc/asc/git-auth.toml`.
+    /// System file: `$ASC_GIT_AUTH` override or `/etc/asc/auth.json`.
     pub fn system_path() -> PathBuf {
         std::env::var_os("ASC_GIT_AUTH")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_SYSTEM_PATH))
     }
 
-    /// User file: `$ASC_USER_GIT_AUTH` override or `~/.config/asc/git-auth.toml`.
+    /// User file: `$ASC_USER_GIT_AUTH` override or `~/.asc/auth.json`.
     pub fn user_path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os("ASC_USER_GIT_AUTH") {
             return Ok(PathBuf::from(path));
         }
         let home = std::env::var_os("HOME").context("cannot determine home directory ($HOME)")?;
-        Ok(PathBuf::from(home).join(".config/asc/git-auth.toml"))
+        Ok(PathBuf::from(home).join(".asc/auth.json"))
+    }
+
+    /// Pre-DMN-045 TOML paths, consulted only when the JSON store is absent.
+    fn legacy_system_path() -> PathBuf {
+        PathBuf::from(LEGACY_SYSTEM_PATH)
+    }
+
+    fn legacy_user_path() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/asc/git-auth.toml"))
     }
 
     pub fn load() -> Result<Self> {
@@ -92,10 +159,55 @@ impl GitAuth {
     }
 
     pub fn load_with(scope: Scope) -> Result<Self> {
-        let system = read_auth(&Self::system_path())?.unwrap_or_default();
-        let user = match scope {
-            Scope::System => Vec::new(),
-            Scope::User => read_auth(&Self::user_path()?)?.unwrap_or_default(),
+        // An explicit path override also opts out of the legacy fallback:
+        // whoever points ASC_*_GIT_AUTH at a file means that file exactly.
+        let legacy_system = std::env::var_os("ASC_GIT_AUTH")
+            .is_none()
+            .then(Self::legacy_system_path);
+        let (user, legacy_user) = match scope {
+            Scope::System => (None, None),
+            Scope::User => (
+                Some(Self::user_path()?),
+                std::env::var_os("ASC_USER_GIT_AUTH")
+                    .is_none()
+                    .then(Self::legacy_user_path)
+                    .flatten(),
+            ),
+        };
+        Self::load_paths(
+            &Self::system_path(),
+            legacy_system.as_deref(),
+            user.as_deref(),
+            legacy_user.as_deref(),
+            scope,
+        )
+    }
+
+    /// Path-explicit loader — the env-free core of [`Self::load_with`], so
+    /// tests can exercise the legacy fallback without touching process env.
+    /// A missing JSON store falls back to the legacy TOML one, so an install
+    /// configured before DMN-045 keeps authenticating until the next write
+    /// migrates it.
+    fn load_paths(
+        system_path: &Path,
+        legacy_system: Option<&Path>,
+        user_path: Option<&Path>,
+        legacy_user: Option<&Path>,
+        scope: Scope,
+    ) -> Result<Self> {
+        let read_with_fallback = |json: &Path, legacy: Option<&Path>| -> Result<Vec<Credential>> {
+            if let Some(creds) = read_auth(json)? {
+                return Ok(creds);
+            }
+            match legacy {
+                Some(path) => Ok(read_legacy_auth(path)?.unwrap_or_default()),
+                None => Ok(Vec::new()),
+            }
+        };
+        let system = read_with_fallback(system_path, legacy_system)?;
+        let user = match user_path {
+            Some(path) => read_with_fallback(path, legacy_user)?,
+            None => Vec::new(),
         };
         Ok(Self {
             system,
@@ -116,10 +228,10 @@ impl GitAuth {
             fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create directory {}", dir.display()))?;
         }
-        let raw = toml::to_string_pretty(&AuthFile {
+        let raw = serde_json::to_string_pretty(&AuthFile {
             credentials: credentials.clone(),
         })
-        .context("cannot serialize git credentials")?;
+        .context("cannot serialize credentials")?;
         fs::write(&path, raw)
             .with_context(|| format!("cannot write credentials file {}", path.display()))?;
         {
@@ -139,45 +251,98 @@ impl GitAuth {
     }
 
     /// Add (or replace) a credential for a host/prefix in the editable list.
-    pub fn add(&mut self, target: &str, method: Method) -> Result<&Credential> {
+    /// An entry is identified by `(kind, pattern, app)`, so the same host can
+    /// carry a repo and a registry credential, and an app-bound one next to
+    /// a general one.
+    pub fn add(
+        &mut self,
+        kind: Kind,
+        target: &str,
+        method: Method,
+        username: Option<String>,
+        app: Option<String>,
+    ) -> Result<&Credential> {
         let pattern = normalize(target);
         if pattern.is_empty() {
-            bail!("cannot derive a git host from '{target}'");
+            bail!("cannot derive a host from '{target}'");
         }
         let list = match self.scope {
             Scope::System => &mut self.system,
             Scope::User => &mut self.user,
         };
-        list.retain(|c| c.pattern != pattern);
-        list.push(Credential { pattern, method });
+        list.retain(|c| !(c.kind == kind && c.pattern == pattern && c.app == app));
+        list.push(Credential {
+            kind,
+            pattern,
+            username,
+            app,
+            method,
+        });
         Ok(list.last().expect("just pushed"))
     }
 
-    /// Remove a credential from the editable list.
-    pub fn remove(&mut self, target: &str) -> Result<()> {
+    /// Remove credentials for a host or prefix. `kind` narrows the removal to
+    /// one type; `None` removes every entry with that pattern.
+    pub fn remove(&mut self, kind: Option<Kind>, target: &str) -> Result<()> {
         let pattern = normalize(target);
         let list = match self.scope {
             Scope::System => &mut self.system,
             Scope::User => &mut self.user,
         };
         let before = list.len();
-        list.retain(|c| c.pattern != pattern);
+        list.retain(|c| c.pattern != pattern || kind.is_some_and(|k| c.kind != k));
         if list.len() == before {
             bail!("no credentials for '{pattern}'");
         }
         Ok(())
     }
 
-    /// Best credential for a repository URL: the longest matching prefix.
-    /// `list()` puts user entries first and only a strictly longer pattern
-    /// replaces the candidate, so user entries win ties over system ones.
+    /// Best credential for a git repository URL (`Kind::Repo`).
     pub fn lookup(&self, git_url: &str) -> Option<&Credential> {
-        let url = normalize(git_url);
+        self.lookup_for(Kind::Repo, &normalize(git_url), None)
+    }
+
+    /// Best credential for a container image reference (`Kind::Registry`),
+    /// e.g. `ghcr.io/org/app:1.0` or the implicit-Docker-Hub `nginx:1.28`.
+    ///
+    /// `apps` are the identities the app answers to — its id and, once it
+    /// exists, its DMN-044 uuid — so `--app` accepts either spelling.
+    pub fn lookup_registry(&self, image: &str, apps: &[&str]) -> Option<&Credential> {
+        let target = normalize_image(image);
+        // Prefer a credential bound to one of this app's identities; fall
+        // back to an unbound one.
+        apps.iter()
+            .find_map(|app| self.lookup_for(Kind::Registry, &target, Some(app)))
+            .or_else(|| self.lookup_for(Kind::Registry, &target, None))
+    }
+
+    /// Longest matching prefix of the right kind. `list()` puts user entries
+    /// first and only a strictly longer pattern replaces the candidate, so
+    /// user entries win ties over system ones.
+    ///
+    /// A credential bound to an app (`app: Some`) only ever matches that app,
+    /// and beats an equally specific unbound one — binding is a deliberate
+    /// narrowing, so it should win where it applies.
+    fn lookup_for(&self, kind: Kind, target: &str, app: Option<&str>) -> Option<&Credential> {
         let mut best: Option<&Credential> = None;
         for (cred, _) in self.list() {
-            if prefix_matches(&cred.pattern, &url)
-                && best.is_none_or(|b| cred.pattern.len() > b.pattern.len())
-            {
+            if cred.kind != kind || !prefix_matches(&cred.pattern, target) {
+                continue;
+            }
+            match &cred.app {
+                // Bound to a different app (or to an app while we have none).
+                Some(bound) if app != Some(bound.as_str()) => continue,
+                _ => {}
+            }
+            let better = match best {
+                None => true,
+                Some(b) => match cred.pattern.len().cmp(&b.pattern.len()) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => cred.app.is_some() && b.app.is_none(),
+                    std::cmp::Ordering::Less => false,
+                },
+            };
+            if better {
                 best = Some(cred);
             }
         }
@@ -188,7 +353,7 @@ impl GitAuth {
 fn read_auth(path: &Path) -> Result<Option<Vec<Credential>>> {
     match fs::read_to_string(path) {
         Ok(raw) => {
-            let file: AuthFile = toml::from_str(&raw)
+            let file: AuthFile = serde_json::from_str(&raw)
                 .with_context(|| format!("invalid credentials file {}", path.display()))?;
             Ok(Some(file.credentials))
         }
@@ -196,6 +361,45 @@ fn read_auth(path: &Path) -> Result<Option<Vec<Credential>>> {
         Err(e) => {
             Err(e).with_context(|| format!("cannot read credentials file {}", path.display()))
         }
+    }
+}
+
+/// Read a pre-DMN-045 TOML store. Entries have no `type` and are therefore
+/// all `Kind::Repo` — the only kind that existed.
+fn read_legacy_auth(path: &Path) -> Result<Option<Vec<Credential>>> {
+    match fs::read_to_string(path) {
+        Ok(raw) => {
+            let file: LegacyAuthFile = toml::from_str(&raw)
+                .with_context(|| format!("invalid credentials file {}", path.display()))?;
+            Ok(Some(file.credentials))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        // A legacy file we cannot read must not break the whole command:
+        // the JSON store is the source of truth now.
+        Err(_) => Ok(None),
+    }
+}
+
+/// Normalize a container image reference to `registry/repository` form, so
+/// registry credentials match with the same prefix logic as repositories.
+/// A reference without a registry belongs to Docker Hub, and the first
+/// component counts as a registry only when it looks like a host.
+pub fn normalize_image(image: &str) -> String {
+    let image = image.trim();
+    // Strip the tag/digest: the part after the last ':' is a tag only when it
+    // contains no '/', otherwise the colon belonged to a registry port.
+    let repo = match image.rsplit_once('@') {
+        Some((head, _digest)) => head,
+        None => match image.rsplit_once(':') {
+            Some((head, tail)) if !tail.contains('/') => head,
+            _ => image,
+        },
+    };
+    match repo.split_once('/') {
+        Some((head, _)) if head.contains('.') || head.contains(':') || head == "localhost" => {
+            repo.to_string()
+        }
+        _ => format!("docker.io/{repo}"),
     }
 }
 
@@ -384,21 +588,24 @@ mod tests {
         assert_eq!(normalize("github.com"), "github.com");
     }
 
+    /// A repo credential with no app binding — the common case.
+    fn repo(pattern: &str, token: &str) -> Credential {
+        Credential {
+            kind: Kind::Repo,
+            pattern: pattern.into(),
+            username: None,
+            app: None,
+            method: Method::Token {
+                token: token.into(),
+            },
+        }
+    }
+
     #[test]
     fn lookup_prefers_longest_prefix_at_boundaries() {
         let auth = GitAuth {
-            system: vec![Credential {
-                pattern: "github.com".into(),
-                method: Method::Token {
-                    token: "sys".into(),
-                },
-            }],
-            user: vec![Credential {
-                pattern: "github.com/org".into(),
-                method: Method::Token {
-                    token: "usr".into(),
-                },
-            }],
+            system: vec![repo("github.com", "sys")],
+            user: vec![repo("github.com/org", "usr")],
             scope: Scope::User,
         };
         let hit = auth.lookup("https://github.com/org/repo.git").unwrap();
@@ -411,15 +618,9 @@ mod tests {
 
     #[test]
     fn user_credential_wins_an_exact_tie_with_system() {
-        let cred = |token: &str| Credential {
-            pattern: "github.com".into(),
-            method: Method::Token {
-                token: token.into(),
-            },
-        };
         let auth = GitAuth {
-            system: vec![cred("sys")],
-            user: vec![cred("usr")],
+            system: vec![repo("github.com", "sys")],
+            user: vec![repo("github.com", "usr")],
             scope: Scope::User,
         };
         let hit = auth.lookup("https://github.com/org/repo").unwrap();
@@ -451,24 +652,41 @@ mod tests {
     fn store_roundtrip_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("git-auth.toml");
+        let path = dir.path().join("auth.json");
         unsafe { std::env::set_var("ASC_USER_GIT_AUTH", &path) };
         // System file must not leak in from the host machine.
-        unsafe { std::env::set_var("ASC_GIT_AUTH", dir.path().join("none.toml")) };
+        unsafe { std::env::set_var("ASC_GIT_AUTH", dir.path().join("none.json")) };
 
         let mut auth = GitAuth::load_with(Scope::User).unwrap();
         auth.add(
+            Kind::Repo,
             "https://github.com/org/repo.git",
             Method::Token {
                 token: "secret".into(),
             },
+            None,
+            None,
         )
         .unwrap();
         auth.add(
+            Kind::Repo,
             "gitlab.com",
             Method::SshKey {
                 key: PathBuf::from("/home/u/.ssh/id_ed25519"),
             },
+            None,
+            None,
+        )
+        .unwrap();
+        // Same host, different type: both must survive.
+        auth.add(
+            Kind::Registry,
+            "ghcr.io/org",
+            Method::Token {
+                token: "ghp".into(),
+            },
+            Some("statebyte".into()),
+            None,
         )
         .unwrap();
         auth.save().unwrap();
@@ -476,15 +694,114 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600, "credentials file must be 0600");
 
         let auth = GitAuth::load_with(Scope::User).unwrap();
-        assert_eq!(auth.list().len(), 2);
+        assert_eq!(auth.list().len(), 3);
         assert!(auth.lookup("git@gitlab.com:a/b.git").is_some());
+        // A registry entry must not answer a git lookup, and vice versa.
+        assert!(auth.lookup("https://ghcr.io/org/repo").is_none());
+        let hit = auth.lookup_registry("ghcr.io/org/app:1.0", &[]).unwrap();
+        assert_eq!(hit.username.as_deref(), Some("statebyte"));
 
         let mut auth = auth;
-        auth.remove("github.com/org/repo").unwrap();
-        assert!(auth.remove("github.com/org/repo").is_err());
+        auth.remove(None, "github.com/org/repo").unwrap();
+        assert!(auth.remove(None, "github.com/org/repo").is_err());
 
         unsafe { std::env::remove_var("ASC_USER_GIT_AUTH") };
         unsafe { std::env::remove_var("ASC_GIT_AUTH") };
+    }
+
+    #[test]
+    fn image_reference_normalization() {
+        assert_eq!(normalize_image("ghcr.io/org/app:1.0"), "ghcr.io/org/app");
+        assert_eq!(normalize_image("nginx:1.28"), "docker.io/nginx");
+        assert_eq!(normalize_image("library/nginx"), "docker.io/library/nginx");
+        // A colon before a '/' is a registry port, not a tag.
+        assert_eq!(normalize_image("localhost:5000/app"), "localhost:5000/app");
+        assert_eq!(
+            normalize_image("ghcr.io/org/app@sha256:abc"),
+            "ghcr.io/org/app"
+        );
+    }
+
+    #[test]
+    fn app_bound_credential_only_serves_its_app() {
+        let bound = Credential {
+            app: Some("6f8a-uuid".into()),
+            ..repo("github.com/org", "bound")
+        };
+        let auth = GitAuth {
+            system: Vec::new(),
+            user: vec![repo("github.com/org", "general"), bound],
+            scope: Scope::User,
+        };
+        // The bound entry wins for its own app...
+        let hit = auth
+            .lookup_for(Kind::Repo, "github.com/org/repo", Some("6f8a-uuid"))
+            .unwrap();
+        assert!(matches!(&hit.method, Method::Token { token } if token == "bound"));
+        // ...and is invisible to every other app.
+        let hit = auth
+            .lookup_for(Kind::Repo, "github.com/org/repo", Some("other"))
+            .unwrap();
+        assert!(matches!(&hit.method, Method::Token { token } if token == "general"));
+        let hit = auth
+            .lookup_for(Kind::Repo, "github.com/org/repo", None)
+            .unwrap();
+        assert!(matches!(&hit.method, Method::Token { token } if token == "general"));
+    }
+
+    #[test]
+    fn legacy_toml_store_is_read_when_no_json_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("git-auth.toml");
+        fs::write(
+            &legacy,
+            "[[credential]]\npattern = \"github.com/legacy\"\ntoken = \"old\"\n",
+        )
+        .unwrap();
+
+        let auth = GitAuth::load_paths(
+            &dir.path().join("no-system.json"),
+            None,
+            Some(&dir.path().join("no-user.json")),
+            Some(&legacy),
+            Scope::User,
+        )
+        .unwrap();
+
+        let hit = auth.lookup("https://github.com/legacy/repo").unwrap();
+        // No `type` in the legacy format — it must default to repo.
+        assert_eq!(hit.kind, Kind::Repo);
+        assert!(matches!(&hit.method, Method::Token { token } if token == "old"));
+    }
+
+    #[test]
+    fn json_store_wins_over_the_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("git-auth.toml");
+        let json = dir.path().join("auth.json");
+        fs::write(
+            &legacy,
+            "[[credential]]\npattern = \"github.com\"\ntoken = \"old\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &json,
+            r#"{"credentials":[{"type":"repo","pattern":"github.com","token":"new"}]}"#,
+        )
+        .unwrap();
+
+        let auth = GitAuth::load_paths(
+            &dir.path().join("no-system.json"),
+            None,
+            Some(&json),
+            Some(&legacy),
+            Scope::User,
+        )
+        .unwrap();
+
+        let hit = auth.lookup("https://github.com/org/repo").unwrap();
+        assert!(matches!(&hit.method, Method::Token { token } if token == "new"));
+        assert_eq!(auth.list().len(), 1, "legacy entries must not be merged in");
     }
 
     #[test]

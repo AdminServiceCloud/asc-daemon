@@ -53,6 +53,7 @@ mod tests {
     fn meta(runtime: Runtime) -> AppMeta {
         AppMeta {
             id: "demo".into(),
+            uuid: None,
             name: "demo".into(),
             custom_name: None,
             owner: Owner {

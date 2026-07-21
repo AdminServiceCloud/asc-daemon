@@ -37,6 +37,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, serde::Deserialize)]
 pub struct RemoteApp {
     pub id: String,
+    /// Stable instance identity (DMN-044); absent for pre-DMN-044 installs.
+    #[serde(default)]
+    pub uuid: Option<String>,
     pub name: String,
     pub kind: String,
     pub state: String,
@@ -264,6 +267,24 @@ fn typed_error(json: &Value) -> anyhow::Error {
                 .unwrap_or_default(),
         });
     }
+    if let Some(choice) = json.get("version_choice") {
+        let strings = |key: &str| {
+            choice[key]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        return anyhow::Error::new(pkg::VersionChoiceRequired {
+            package: choice["package"].as_str().unwrap_or_default().to_string(),
+            source: choice["source"].as_str().map(str::to_string),
+            tags: strings("tags"),
+            branches: strings("branches"),
+        });
+    }
     match json.get("error").and_then(|e| e.as_str()) {
         Some(msg) => anyhow!("{msg}"),
         None => anyhow!("daemon request failed"),
@@ -297,6 +318,19 @@ mod tests {
         let ambiguous = err.downcast_ref::<pkg::AmbiguousPackage>().unwrap();
         assert_eq!(ambiguous.candidates.len(), 2);
         assert_eq!(ambiguous.candidates[1].0, "fork");
+
+        let err = typed_error(&serde_json::json!({
+            "error": "pick a version",
+            "version_choice": {
+                "package": "nginx", "source": "official",
+                "tags": ["v1.28.0", "v1.27.0"], "branches": ["main"],
+            },
+        }));
+        let choice = err.downcast_ref::<pkg::VersionChoiceRequired>().unwrap();
+        assert_eq!(choice.package, "nginx");
+        assert_eq!(choice.source.as_deref(), Some("official"));
+        assert_eq!(choice.tags, vec!["v1.28.0", "v1.27.0"]);
+        assert_eq!(choice.branches, vec!["main"]);
 
         let err = typed_error(&serde_json::json!({ "error": "boom" }));
         assert_eq!(err.to_string(), "boom");

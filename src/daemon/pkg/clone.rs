@@ -17,7 +17,7 @@ use super::install::{
 use super::manifest::Manifest;
 use super::settings::{SettingsFile, locate_installed};
 use crate::daemon::apps::disk;
-use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner};
+use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, new_uuid};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::Config;
 
@@ -124,9 +124,14 @@ pub fn clone_app(
     // copied verbatim) is the authoritative one.
     let quota = load_quota(settings.as_ref(), &dest_dir.join("config"))?;
 
+    // A clone is a distinct instance, so it gets its own identity rather than
+    // inheriting the source's (DMN-044) — minted before provisioning so an
+    // app-bound credential covers its first image pull.
+    let uuid = new_uuid()?;
     let runtime = provision(
         &manifest,
         &new_id,
+        Some(&uuid),
         &dest_dir,
         &manifest_dir,
         &config.docker,
@@ -136,6 +141,7 @@ pub fn clone_app(
 
     let meta = AppMeta {
         id: new_id.clone(),
+        uuid: Some(uuid),
         name: manifest.title.clone().unwrap_or_else(|| new_id.clone()),
         // A clone's id is always suffixed (the source already occupies the
         // unsuffixed one) — same convention as a repeat `asc install`

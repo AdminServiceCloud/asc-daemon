@@ -13,7 +13,9 @@ The core of the daemon: a single interface for managing applications of three ki
 - **`asc app disk <name>`** (DMN-035): disk usage — a quota bar when `quota.max_disk` is set, then a breakdown by Docker image, repository checkout, private data and custom volumes (Docker named volumes are marked shared and excluded from the app-directory total).
 - **`asc app clone <name> [--name <clone-name>]`** (DMN-019): a full copy of an app instance — repository, config and data — under a new id (the same `<id>-N` numbering a repeat `asc install` uses, DMN-033), with a live byte-progress bar over the copy on a terminal. The runtime itself is never copied (a Docker container/systemd unit/process cannot be), only recreated from the copied manifest and settings, exactly like a fresh install. The clone always starts stopped. Cloning across nodes (moving the copy to a different server via the platform) is a separate, later increment — see [🧬 app-cloning](../../../asc-platform/docs/features/app-cloning.md).
 - `asc app list` — a user sees **only their own** applications; `sudo asc app list` — the applications of all users. Short aliases (DMN-025): `asc ls` and `asc ps` — same output and same permissions.
+- **`asc ports [<name>]`** / **`asc app ports [<name>]`** (DMN-049): the published host==container ports of an app with their transport (`27015/tcp`, `27015/udp`, or `27015/tcp+udp` when both share the port), resolved from the app's `type: ports` settings — so a **stopped** app still reports the ports it will bind on the next start. Without a name: a table of every visible app and its ports (root sees all users' apps).
 - `asc stats [--live] [--sort cpu|mem]` — CPU, memory and disk consumption per application (like `docker stats`, see [📊 monitoring](monitoring.md)).
+- **List subcommands** (DMN-049): `asc ls ports`, `asc ls disk` and `asc ls stats` switch the same app list to the ports, disk-usage or live-stats view — mirrors of `asc ports` / `asc disk` / `asc stats`.
 - The platform performs the same operations through the daemon API.
 - After a server reboot the daemon restores the application states (running/stopped).
 
@@ -67,7 +69,7 @@ Why a second identifier: an `id` is **reusable**. Removing `helloworld-2` frees 
 - **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple *nodes* running the platform together. Multiple instances of one application on a single node already work (DMN-033/034, above).
-- **MVP CLI commands**: `asc status`, `asc stats`, `asc app list|install|remove|start|stop|restart|logs|info|disk|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list), `asc service` (managing the daemon itself).
+- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself).
 
 ## 🔗 Related tasks
 

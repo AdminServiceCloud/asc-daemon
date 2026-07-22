@@ -56,9 +56,17 @@ enum Command {
         #[command(subcommand)]
         action: AppAction,
     },
-    /// List apps, shorthand for `asc app list` (root sees all users' apps)
+    /// List apps, shorthand for `asc app list` (root sees all users' apps).
+    /// `asc ls ports|disk|stats` switch to the ports, disk-usage or live
+    /// stats views of the same apps
     #[command(visible_alias = "ps")]
-    Ls,
+    Ls {
+        #[command(subcommand)]
+        action: Option<LsAction>,
+    },
+    /// Show published ports per app, shorthand for `asc app ports` (root sees
+    /// all users' apps): each app and the host==container ports it publishes
+    Ports,
     /// Show disk usage, shorthand for `asc app disk` (root sees all users'
     /// apps): total space occupied by apps as a bar against the store's
     /// filesystem capacity, then each app's own usage, largest first
@@ -123,6 +131,19 @@ enum Command {
 enum StatsSort {
     Cpu,
     Mem,
+}
+
+/// Views of the app list reachable as `asc ls <view>` — the same apps seen
+/// through ports, disk usage or live stats. Each mirrors a top-level command
+/// (`asc ports` / `asc disk` / `asc stats`) so both spellings stay in step.
+#[derive(Subcommand)]
+enum LsAction {
+    /// Published ports per app (same as `asc ports`)
+    Ports,
+    /// Disk usage per app (same as `asc disk`)
+    Disk,
+    /// CPU, memory and disk stats per app (same as `asc stats`)
+    Stats,
 }
 
 #[derive(Subcommand)]
@@ -291,6 +312,11 @@ enum AppAction {
     Disk {
         id: Option<String>,
     },
+    /// Show published ports (host==container) with their transport. Without
+    /// an id: every app and its ports as a table.
+    Ports {
+        id: Option<String>,
+    },
     /// Clone an app instance (data, env, settings) into a new one (DMN-019)
     Clone {
         id: String,
@@ -451,7 +477,13 @@ fn run() -> anyhow::Result<()> {
         Command::Status => status_cmd(&config),
         Command::Stats { sort, live } => stats_cmd(sort, live, &config),
         Command::App { action } => app_cmd(action, &config),
-        Command::Ls => app_cmd(AppAction::List, &config),
+        Command::Ls { action } => match action {
+            None => app_cmd(AppAction::List, &config),
+            Some(LsAction::Ports) => app_cmd(AppAction::Ports { id: None }, &config),
+            Some(LsAction::Disk) => app_cmd(AppAction::Disk { id: None }, &config),
+            Some(LsAction::Stats) => stats_cmd(StatsSort::Cpu, false, &config),
+        },
+        Command::Ports => app_cmd(AppAction::Ports { id: None }, &config),
         Command::Disk => app_cmd(AppAction::Disk { id: None }, &config),
         Command::Install {
             spec,
@@ -1479,6 +1511,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             println!("  {}", tf(Msg::OwnerLabel, &m.owner.name));
         }
         AppAction::Disk { id } => disk_cmd(id.as_deref(), config)?,
+        AppAction::Ports { id } => ports_cmd(id.as_deref(), config)?,
         AppAction::Clone { id, name } => clone_cmd(&id, name, config)?,
         AppAction::Install {
             spec,
@@ -1797,6 +1830,116 @@ fn disk_summary_cmd(manager: &AppManager, ctx: &UserContext) -> anyhow::Result<(
         }
     }
     Ok(())
+}
+
+/// `asc ports [<app>]` / `asc app ports [<app>]` (DMN-049): with an id, the
+/// app's published ports one per line; without one, a table of every visible
+/// app and its ports (root sees all users' apps, like [`print_app_list`]).
+fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
+    use asc_daemon::daemon::apps::ports;
+
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+    let Some(reference) = reference else {
+        return ports_summary_cmd(&manager, &ctx, config);
+    };
+    let meta = manager.get_authorized(&ctx, reference)?;
+    let list = ports::published(config, manager.store(), &meta)?;
+
+    println!("{}  {}", meta.id, meta.display_name());
+    if list.is_empty() {
+        println!("  {}", t(Msg::PortsNone));
+    } else {
+        for (port, protocol) in &list {
+            println!("  {}", port_label(*port, *protocol));
+        }
+    }
+    Ok(())
+}
+
+/// `asc ports` with no id: every visible app and the host==container ports it
+/// publishes, as a table (root sees all users' apps, like [`print_app_list`]).
+/// Ports come from the app's settings ([`ports::published`]); an app whose
+/// manifest cannot be read shows no ports rather than failing the report.
+fn ports_summary_cmd(
+    manager: &AppManager,
+    ctx: &UserContext,
+    config: &Config,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::apps::ports;
+
+    let rows: Vec<(AppStatus, String)> = manager
+        .list(ctx)?
+        .into_iter()
+        .map(|app| {
+            let label = match ports::published(config, manager.store(), &app.meta) {
+                Ok(list) if !list.is_empty() => list
+                    .iter()
+                    .map(|(port, protocol)| port_label(*port, *protocol))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => "-".to_string(),
+            };
+            (app, label)
+        })
+        .collect();
+
+    if rows.is_empty() {
+        println!("{}", t(Msg::AppListEmpty));
+        return Ok(());
+    }
+    let id_w = rows
+        .iter()
+        .map(|(app, _)| app.meta.id.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let name_w = rows
+        .iter()
+        .map(|(app, _)| app.meta.display_name().chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let show_user = ctx.is_root;
+    let user_w = rows
+        .iter()
+        .map(|(app, _)| app.meta.owner.name.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    if show_user {
+        println!(
+            "{:<id_w$}  {:<name_w$}  {:<user_w$}  PORTS",
+            "ID", "NAME", "USER"
+        );
+    } else {
+        println!("{:<id_w$}  {:<name_w$}  PORTS", "ID", "NAME");
+    }
+    for (app, label) in &rows {
+        if show_user {
+            println!(
+                "{:<id_w$}  {:<name_w$}  {:<user_w$}  {}",
+                app.meta.id,
+                app.meta.display_name(),
+                app.meta.owner.name,
+                label,
+            );
+        } else {
+            println!(
+                "{:<id_w$}  {:<name_w$}  {}",
+                app.meta.id,
+                app.meta.display_name(),
+                label,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One published port with its transport, `docker ps`-style: `27015/tcp`,
+/// `27015/udp`, or `27015/tcp+udp` when both transports share the port.
+fn port_label(port: u16, protocol: docker::PortProtocol) -> String {
+    format!("{port}/{}", protocol.transports().join("+"))
 }
 
 /// Static `[████░░░░]`-style bar (not `indicatif` — that's for streaming
@@ -2747,10 +2890,19 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::resource_shortages;
+    use super::{port_label, resource_shortages};
+    use asc_daemon::daemon::docker::PortProtocol;
     use asc_daemon::daemon::monitor::system::{
         CpuMetrics, DiskMetrics, MemoryMetrics, SystemMetrics,
     };
+
+    #[test]
+    fn port_label_renders_transport_docker_style() {
+        assert_eq!(port_label(27015, PortProtocol::Tcp), "27015/tcp");
+        assert_eq!(port_label(27015, PortProtocol::Udp), "27015/udp");
+        // `both` shares the host==container port across transports.
+        assert_eq!(port_label(27015, PortProtocol::Both), "27015/tcp+udp");
+    }
 
     #[test]
     fn shortages_cover_ram_cpu_and_the_apps_filesystem() {

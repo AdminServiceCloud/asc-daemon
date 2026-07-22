@@ -82,6 +82,7 @@ pub enum Msg {
     AppRemoved,
     AppRemoveNeedsYes,
     AppListEmpty,
+    PortsNone,
     AppNameAmbiguous,
     AttachHint,
     AttachDockerOnly,
@@ -278,6 +279,7 @@ pub fn t(msg: Msg) -> &'static str {
             "удаление приложения '{}' сотрёт все его данные; для подтверждения повторите команду с --yes",
         ),
         Msg::AppListEmpty => ("No apps installed", "Приложения не установлены"),
+        Msg::PortsNone => ("no published ports", "нет опубликованных портов"),
         Msg::AppNameAmbiguous => (
             "several apps are named '{}' — use the app id instead",
             "названию '{}' соответствует несколько приложений — используйте id",

@@ -15,7 +15,9 @@ use tracing::{debug, info, warn};
 use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
 use super::settings::{SettingKind, SettingValues, SettingsFile};
-use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Quota, Runtime, new_uuid};
+use crate::daemon::apps::meta::{
+    AppMeta, DesiredState, ImageSource, Owner, Quota, Runtime, new_uuid,
+};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
@@ -194,6 +196,10 @@ impl Drop for RemoveOnDrop {
 /// `<prefix>-<app>` (DMN-034).
 /// `license_ack` — the caller has accepted the repository license; without
 /// it a repository shipping a LICENSE raises [`LicenseRequired`].
+/// `image_choice` picks the image when the manifest offers both a prebuilt
+/// `image` and an `image-build`; without it such a manifest raises
+/// [`ImageChoiceRequired`] (DMN-050).
+#[allow(clippy::too_many_arguments)]
 pub fn install(
     config: &Config,
     ctx: &UserContext,
@@ -201,6 +207,7 @@ pub fn install(
     source: Option<&str>,
     custom_name: Option<&str>,
     license_ack: bool,
+    image_choice: Option<ImageSource>,
 ) -> Result<InstallOutcome> {
     let (package_spec, version_spec) = parse_spec(spec);
     let (package, stack_app) = match package_spec.split_once('/') {
@@ -227,6 +234,7 @@ pub fn install(
         version: version.as_deref(),
         custom_name,
         license_ack,
+        image_choice,
     };
     if resolved.entry.package_type == "stack" {
         return install_stack(config, ctx, &resolved, package, stack_app, opts);
@@ -271,6 +279,9 @@ struct InstallOpts<'a> {
     version: Option<&'a str>,
     custom_name: Option<&'a str>,
     license_ack: bool,
+    /// Image source when the manifest offers both `image` and `image-build`
+    /// (DMN-050); `None` raises [`ImageChoiceRequired`] for such a manifest.
+    image_choice: Option<ImageSource>,
 }
 
 /// Validate a user-chosen app name (DMN-024): printable, sane length, and
@@ -446,6 +457,7 @@ fn install_one(
         &config.docker,
         quota.as_ref(),
         settings.as_ref(),
+        opts.image_choice,
     )?;
 
     let effective_version = cloned_tag.unwrap_or_else(|| manifest.version.clone());
@@ -540,6 +552,7 @@ pub fn repo_name(url: &str) -> Result<String> {
 /// branch or tag to check out; `None` clones the default branch HEAD.
 /// Private repositories reuse the same `asc auth` credentials as registry
 /// installs (host/prefix matching in [`super::auth`]).
+#[allow(clippy::too_many_arguments)]
 pub fn install_from_git(
     config: &Config,
     ctx: &UserContext,
@@ -547,6 +560,7 @@ pub fn install_from_git(
     git_ref: Option<GitRef<'_>>,
     custom_name: Option<&str>,
     license_ack: bool,
+    image_choice: Option<ImageSource>,
 ) -> Result<InstallReport> {
     if let Some(name) = custom_name {
         validate_custom_name(config, ctx, name)?;
@@ -612,6 +626,7 @@ pub fn install_from_git(
         &config.docker,
         quota.as_ref(),
         settings.as_ref(),
+        image_choice,
     )?;
 
     let effective_version = checkout
@@ -716,6 +731,153 @@ impl std::fmt::Display for VersionChoiceRequired {
 }
 
 impl std::error::Error for VersionChoiceRequired {}
+
+/// Typed error: the manifest offers both a prebuilt `image` and a local
+/// `image-build` (DMN-050), so the installer must be told which to use. The
+/// CLI catches it, offers the two options (or honors `--image` / `--build`),
+/// and retries; the platform UI renders its own choice from the fields. A
+/// non-interactive caller gets the hint to pass a flag.
+#[derive(Debug)]
+pub struct ImageChoiceRequired {
+    /// App label for the prompt (the install spec / app id).
+    pub package: String,
+    /// The prebuilt image reference the `--image` option would pull.
+    pub image: String,
+    /// Human summary of what `--build` would build (dockerfile + context).
+    pub build: String,
+}
+
+impl std::fmt::Display for ImageChoiceRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            tf3(
+                Msg::PkgImageChoiceHint,
+                &self.package,
+                &self.image,
+                &self.build
+            )
+        )
+    }
+}
+
+impl std::error::Error for ImageChoiceRequired {}
+
+/// Resolve which image source to provision from. Deterministic when the
+/// manifest offers only one; the caller's `choice` decides when it offers
+/// both; without a choice, [`ImageChoiceRequired`] asks for one. `label` is
+/// shown in that prompt.
+fn resolve_image_source(
+    manifest: &Manifest,
+    choice: Option<ImageSource>,
+    label: &str,
+) -> Result<ImageSource> {
+    match (
+        manifest.runtime.image.is_some(),
+        manifest.runtime.image_build.is_some(),
+    ) {
+        (true, false) => Ok(ImageSource::Prebuilt),
+        (false, true) => Ok(ImageSource::Build),
+        (true, true) => match choice {
+            Some(choice) => Ok(choice),
+            None => Err(anyhow::Error::new(ImageChoiceRequired {
+                package: label.to_string(),
+                image: manifest.runtime.image.clone().unwrap_or_default(),
+                build: build_summary(manifest),
+            })),
+        },
+        // Manifest::validate guarantees at least one; stay defensive.
+        (false, false) => bail!(
+            "manifest '{}': neither runtime.image nor runtime.image-build is set",
+            manifest.name
+        ),
+    }
+}
+
+/// Deterministic image source when the manifest offers only one — the value
+/// [`effective_image_ref`] uses when no choice was stored (single-option apps
+/// never persist one).
+fn single_image_source(manifest: &Manifest) -> Option<ImageSource> {
+    match (
+        manifest.runtime.image.is_some(),
+        manifest.runtime.image_build.is_some(),
+    ) {
+        (true, false) => Some(ImageSource::Prebuilt),
+        (false, true) => Some(ImageSource::Build),
+        _ => None,
+    }
+}
+
+/// Tag of the image a `type: docker` app runs, without any pull or build:
+/// the prebuilt `image`, or the deterministic local build tag. Used by the
+/// drift-recreate path to inspect the image owner (DMN-038) without deciding
+/// the source anew. `stored` is the source persisted in meta.json (set only
+/// for both-offered apps); single-option apps derive it from the manifest.
+pub(super) fn effective_image_ref(
+    manifest: &Manifest,
+    stored: Option<ImageSource>,
+    id: &str,
+) -> Option<String> {
+    match stored.or_else(|| single_image_source(manifest)) {
+        Some(ImageSource::Prebuilt) => manifest.runtime.image.clone(),
+        Some(ImageSource::Build) => Some(built_image_tag(manifest, id)),
+        None => manifest.runtime.image.clone(),
+    }
+}
+
+/// Tag for a locally built image: the manifest's `image-build.tag`, else the
+/// deterministic `asc-local/<id>:latest`.
+fn built_image_tag(manifest: &Manifest, id: &str) -> String {
+    manifest
+        .runtime
+        .image_build
+        .as_ref()
+        .and_then(|b| b.tag.clone())
+        .unwrap_or_else(|| format!("asc-local/{id}:latest"))
+}
+
+/// Human summary of an `image-build` for the choice prompt.
+fn build_summary(manifest: &Manifest) -> String {
+    let build = manifest.runtime.image_build.as_ref();
+    let context = build.and_then(|b| b.context.as_deref()).unwrap_or(".");
+    let dockerfile = build
+        .and_then(|b| b.dockerfile.as_deref())
+        .unwrap_or("Dockerfile");
+    format!("{dockerfile} ({context})")
+}
+
+/// Build the app's image from its `image-build` manifest section and return
+/// the tag it was built as. The build context resolves under the manifest
+/// directory (never outside the repository).
+fn build_app_image(
+    manifest: &Manifest,
+    docker_cfg: &DockerConfig,
+    manifest_dir: &Path,
+    id: &str,
+) -> Result<String> {
+    let build = manifest
+        .runtime
+        .image_build
+        .as_ref()
+        .expect("validated: image-build source");
+    let context = match build.context.as_deref() {
+        Some(sub) => safe_join(manifest_dir, sub)?,
+        None => manifest_dir.to_path_buf(),
+    };
+    let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
+    let tag = built_image_tag(manifest, id);
+    docker::build_image(
+        docker_cfg,
+        docker::BuildSpec {
+            context_dir: &context,
+            dockerfile,
+            tag: &tag,
+            args: &build.args,
+        },
+    )?;
+    Ok(tag)
+}
 
 /// Resolve the version to install/clone from the spec and the package's
 /// repository (DMN-047): the version lives in the repository's git tags, not
@@ -967,6 +1129,7 @@ pub(super) fn provision(
     docker_cfg: &DockerConfig,
     quota: Option<&Quota>,
     settings: Option<&SettingsFile>,
+    image_choice: Option<ImageSource>,
 ) -> Result<Runtime> {
     let inputs = runtime_inputs(settings, &app_dir.join("config"))?;
     let start_command = inputs
@@ -976,18 +1139,30 @@ pub(super) fn provision(
         .transpose()?;
     match manifest.app_type {
         AppType::Docker => {
+            // Pick prebuilt vs local build (may raise ImageChoiceRequired)
+            // before any side effect — the install's cleanup guard undoes the
+            // clone if the caller must come back with a choice.
+            let source = resolve_image_source(manifest, image_choice, id)?;
             let container = format!("asc-{id}");
             docker_create(
                 manifest,
+                source,
                 &inputs,
                 &container,
                 app_dir,
+                manifest_dir,
                 docker_cfg,
                 quota,
                 start_command,
                 &[Some(id), app_uuid],
             )?;
-            Ok(Runtime::Docker { container })
+            // Persist the choice only when the manifest offered both, so a
+            // later drift-recreate reuses it; single-option apps derive it.
+            let both = manifest.runtime.image.is_some() && manifest.runtime.image_build.is_some();
+            Ok(Runtime::Docker {
+                container,
+                image_source: both.then_some(source),
+            })
         }
         AppType::Native | AppType::Utility => {
             run_install_commands(&manifest.runtime.install, manifest_dir)?;
@@ -1157,9 +1332,11 @@ pub(super) fn registry_auth_for(
 #[allow(clippy::too_many_arguments)]
 fn docker_create(
     manifest: &Manifest,
+    source: ImageSource,
     inputs: &RuntimeInputs,
     container: &str,
     app_dir: &Path,
+    manifest_dir: &Path,
     docker_cfg: &DockerConfig,
     quota: Option<&Quota>,
     command: Option<String>,
@@ -1167,23 +1344,35 @@ fn docker_create(
     // credentials bound to either one apply (DMN-045/046).
     app_ids: &[Option<&str>],
 ) -> Result<()> {
-    let image = manifest
-        .runtime
-        .image
-        .as_deref()
-        .expect("validated: docker manifests have an image");
-    let registry_auth = registry_auth_for(image, app_ids);
+    // Make the effective image present locally: pull a prebuilt one (so its
+    // declared USER is known before bind-mounted volumes are created and can
+    // be chowned to match), or build one from the package Dockerfile (DMN-050).
+    // A built image needs no registry auth on the create spec — it will never
+    // be pull-on-404'd.
+    let id = container.strip_prefix("asc-").unwrap_or(container);
+    let (image, registry_auth) = match source {
+        ImageSource::Prebuilt => {
+            let image = manifest
+                .runtime
+                .image
+                .clone()
+                .expect("validated: prebuilt source has an image");
+            let auth = registry_auth_for(&image, app_ids);
+            docker::ensure_pulled(docker_cfg, &image, auth.as_ref())?;
+            (image, auth)
+        }
+        ImageSource::Build => (
+            build_app_image(manifest, docker_cfg, manifest_dir, id)?,
+            None,
+        ),
+    };
     let env: Vec<String> = inputs
         .env
         .iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
 
-    // Pulling here (rather than leaving it to docker::create's own
-    // pull-on-404) lets the image's declared USER be known before its
-    // bind-mounted volumes are created, so they can be chowned to match.
-    docker::ensure_pulled(docker_cfg, image, registry_auth.as_ref())?;
-    let owner = docker::image_uid_gid(docker_cfg, image)?;
+    let owner = docker::image_uid_gid(docker_cfg, &image)?;
     let mut binds = Vec::new();
     for volume in &inputs.volumes {
         binds.push(volume_bind(volume, app_dir, owner)?);
@@ -1193,7 +1382,7 @@ fn docker_create(
         docker_cfg,
         docker::CreateSpec {
             name: container,
-            image,
+            image: &image,
             env,
             ports: inputs.ports.clone(),
             binds,
@@ -1406,6 +1595,48 @@ fn run_install_commands(commands: &[String], manifest_dir: &Path) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest(yaml: &str) -> Manifest {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn image_source_resolves_by_what_the_manifest_offers() {
+        let prebuilt = manifest("name: a\nversion: '1'\ntype: docker\nruntime:\n  image: nginx\n");
+        let build = manifest("name: a\nversion: '1'\ntype: docker\nruntime:\n  image-build: {}\n");
+        let both = manifest(
+            "name: a\nversion: '1'\ntype: docker\nruntime:\n  image: nginx\n  image-build: {}\n",
+        );
+
+        // One option: the choice is forced, ignoring any passed hint.
+        assert_eq!(
+            resolve_image_source(&prebuilt, None, "a").unwrap(),
+            ImageSource::Prebuilt
+        );
+        assert_eq!(
+            resolve_image_source(&build, None, "a").unwrap(),
+            ImageSource::Build
+        );
+
+        // Both options: a hint decides; without one, the typed error asks.
+        assert_eq!(
+            resolve_image_source(&both, Some(ImageSource::Build), "a").unwrap(),
+            ImageSource::Build
+        );
+        let err = resolve_image_source(&both, None, "a").unwrap_err();
+        assert!(err.downcast_ref::<ImageChoiceRequired>().is_some());
+    }
+
+    #[test]
+    fn built_image_tag_defaults_and_overrides() {
+        let default =
+            manifest("name: web\nversion: '1'\ntype: docker\nruntime:\n  image-build: {}\n");
+        assert_eq!(built_image_tag(&default, "web"), "asc-local/web:latest");
+        let tagged = manifest(
+            "name: web\nversion: '1'\ntype: docker\nruntime:\n  image-build:\n    tag: my/web:v1\n",
+        );
+        assert_eq!(built_image_tag(&tagged, "web"), "my/web:v1");
+    }
 
     #[test]
     fn spec_parsing() {
@@ -1638,6 +1869,7 @@ mod tests {
             &docker_cfg,
             None,
             Some(&settings),
+            None,
         )
         .unwrap();
         match runtime {

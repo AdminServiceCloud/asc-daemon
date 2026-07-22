@@ -15,10 +15,12 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tracing::{info, warn};
 
-use super::install::{interpolate_env, load_quota, provision, runtime_inputs, volume_bind};
+use super::install::{
+    effective_image_ref, interpolate_env, load_quota, provision, runtime_inputs, volume_bind,
+};
 use super::manifest::Manifest;
 use super::settings::{SettingsFile, locate_installed};
-use crate::daemon::apps::meta::{AppMeta, Quota, Runtime};
+use crate::daemon::apps::meta::{AppMeta, ImageSource, Quota, Runtime};
 use crate::daemon::config::Config;
 use crate::daemon::docker;
 
@@ -29,11 +31,16 @@ use crate::daemon::docker;
 /// registry source) is logged and does not block the start — availability
 /// wins; a failed recreate is an error.
 pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Result<bool> {
-    let Runtime::Docker { container } = &meta.runtime else {
+    let Runtime::Docker {
+        container,
+        image_source,
+    } = &meta.runtime
+    else {
         return Ok(false);
     };
     let container = container.clone();
-    let desired = match Desired::load(config, meta, app_dir) {
+    let image_source = *image_source;
+    let desired = match Desired::load(config, meta, app_dir, image_source) {
         Ok(desired) => desired,
         Err(err) => {
             warn!(app = %meta.id, error = %format!("{err:#}"),
@@ -57,6 +64,7 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
         &config.docker,
         desired.quota.as_ref(),
         desired.settings.as_ref(),
+        image_source,
     )?;
     // Keep meta truthful for `asc app info`: the quota may have been
     // overridden in the settings editor.
@@ -83,7 +91,12 @@ struct Desired {
 }
 
 impl Desired {
-    fn load(config: &Config, meta: &AppMeta, app_dir: &Path) -> Result<Self> {
+    fn load(
+        config: &Config,
+        meta: &AppMeta,
+        app_dir: &Path,
+        image_source: Option<ImageSource>,
+    ) -> Result<Self> {
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
         let manifest = Manifest::load(&manifest_dir)?;
         let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
@@ -112,22 +125,24 @@ impl Desired {
             .collect();
         ports.sort();
         ports.dedup();
-        // The manifest is validated at install time: a docker-type manifest
-        // always has runtime.image (Manifest::validate).
-        let owner = manifest
-            .runtime
-            .image
-            .as_deref()
-            .map(|image| {
-                let auth = super::install::registry_auth_for(
-                    image,
-                    &[Some(meta.id.as_str()), meta.uuid.as_deref()],
-                );
-                docker::ensure_pulled(&config.docker, image, auth.as_ref())?;
-                docker::image_uid_gid(&config.docker, image)
-            })
-            .transpose()?
-            .flatten();
+        // Owner uid/gid for the volume pre-chown (DMN-038), from the image
+        // this app runs: a prebuilt one is pulled so it can be inspected; a
+        // locally built one (DMN-050) already exists on the host from install,
+        // so it is only inspected — rebuilding just to read its USER would be
+        // wasteful before the drift check even decides on a recreate.
+        let owner = match effective_image_ref(&manifest, image_source, &meta.id) {
+            Some(image) => {
+                if manifest.runtime.image.as_deref() == Some(image.as_str()) {
+                    let auth = super::install::registry_auth_for(
+                        &image,
+                        &[Some(meta.id.as_str()), meta.uuid.as_deref()],
+                    );
+                    docker::ensure_pulled(&config.docker, &image, auth.as_ref())?;
+                }
+                docker::image_uid_gid(&config.docker, &image)?
+            }
+            None => None,
+        };
         let mut binds = inputs
             .volumes
             .iter()

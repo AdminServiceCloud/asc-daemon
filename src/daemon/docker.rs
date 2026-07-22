@@ -18,8 +18,8 @@ use bollard::models::{
     ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, LogsOptions,
-    RemoveContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
+    AttachContainerOptions, BuildImageOptionsBuilder, CreateContainerOptions, CreateImageOptions,
+    LogsOptions, RemoveContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -468,6 +468,81 @@ async fn pull(
         bars.finish();
     }
     Ok(())
+}
+
+/// A local image build (DMN-050): the Engine builds `tag` from a Dockerfile
+/// in the package repository, so a package can ship its own image instead of
+/// (or beside) a prebuilt one on a registry.
+pub struct BuildSpec<'a> {
+    /// Build context directory (its contents are sent to the Engine as a tar).
+    pub context_dir: &'a std::path::Path,
+    /// Dockerfile path, relative to the context.
+    pub dockerfile: &'a str,
+    /// Tag for the built image.
+    pub tag: &'a str,
+    /// `--build-arg` values.
+    pub args: &'a std::collections::BTreeMap<String, String>,
+}
+
+/// Build a Docker image from a Dockerfile shipped in the package (DMN-050).
+/// The build context directory is streamed to the Engine as an in-memory tar;
+/// the Engine builds `tag` and the daemon reuses it exactly like a pulled
+/// image. Build output is echoed on a terminal (the in-process root path) and
+/// logged at debug otherwise; a build error surfaces the Engine's own message.
+pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
+    let tar = tar_context(spec.context_dir)?;
+    block_on(async {
+        let docker = connect(cfg)?;
+        let mut builder = BuildImageOptionsBuilder::new()
+            .dockerfile(spec.dockerfile)
+            .t(spec.tag)
+            // Remove intermediate containers on success, like `docker build`.
+            .rm(true);
+        if !spec.args.is_empty() {
+            let args: HashMap<String, String> = spec
+                .args
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            builder = builder.buildargs(&args);
+        }
+        let body = bollard::body_full(bytes::Bytes::from(tar));
+        let mut stream = docker.build_image(builder.build(), None, Some(body));
+        let echo = progress::interactive();
+        while let Some(step) = stream.next().await {
+            let info = step.map_err(|e| friendly(cfg, e))?;
+            if let Some(detail) = &info.error_detail {
+                let msg = detail.message.as_deref().unwrap_or("image build failed");
+                return Err(anyhow!("{}: {msg}", tf(Msg::ErrImageBuild, spec.tag)));
+            }
+            if let Some(line) = info
+                .stream
+                .as_deref()
+                .map(str::trim_end)
+                .filter(|l| !l.is_empty())
+            {
+                if echo {
+                    eprintln!("{line}");
+                } else {
+                    debug!(tag = spec.tag, "{line}");
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Pack a build context directory into an uncompressed tar in memory. The
+/// Engine wants a tar stream, and the contexts we build (a package repository
+/// checkout) are small, so buffering is fine.
+fn tar_context(dir: &std::path::Path) -> Result<Vec<u8>> {
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append_dir_all("", dir)
+        .map_err(|e| anyhow!("cannot pack build context {}: {e}", dir.display()))?;
+    builder
+        .into_inner()
+        .map_err(|e| anyhow!("cannot finalize build context tar: {e}"))
 }
 
 /// Create (but do not start) a container from a spec. Used by the installer.

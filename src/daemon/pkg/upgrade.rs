@@ -127,6 +127,11 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
 
     // Tear down the old runtime (the container name is reused) and build the
     // new one; on failure restore the previous repository and runtime.
+    // Keep the app's image-source choice (DMN-050) across the upgrade.
+    let image_source = match &meta.runtime {
+        Runtime::Docker { image_source, .. } => *image_source,
+        _ => None,
+    };
     teardown_runtime(config, &meta.runtime)?;
     let runtime = match provision(
         &manifest,
@@ -137,11 +142,19 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         &config.docker,
         quota.as_ref(),
         settings.as_ref(),
+        image_source,
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
             rollback(
-                config, &id, &app_dir, &repo_dir, &old_dir, entry_path, stack_app,
+                config,
+                &id,
+                &app_dir,
+                &repo_dir,
+                &old_dir,
+                entry_path,
+                stack_app,
+                image_source,
             );
             return Err(err.context(format!(
                 "upgrade of '{id}' failed, previous version restored"
@@ -184,7 +197,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
 /// `provision` from the new manifest.
 fn teardown_runtime(config: &Config, runtime: &Runtime) -> Result<()> {
     match runtime {
-        Runtime::Docker { container } => docker::remove(&config.docker, container)
+        Runtime::Docker { container, .. } => docker::remove(&config.docker, container)
             .context("cannot remove the old container before upgrade"),
         Runtime::Systemd { .. } | Runtime::Process { .. } => Ok(()),
     }
@@ -192,6 +205,7 @@ fn teardown_runtime(config: &Config, runtime: &Runtime) -> Result<()> {
 
 /// Best-effort restore after a failed provisioning: put the old repository
 /// back and re-provision the previous runtime from its manifest.
+#[allow(clippy::too_many_arguments)]
 fn rollback(
     config: &Config,
     id: &str,
@@ -200,6 +214,7 @@ fn rollback(
     old_dir: &Path,
     entry_path: Option<&str>,
     stack_app: Option<&str>,
+    image_source: Option<crate::daemon::apps::meta::ImageSource>,
 ) {
     let _ = fs::remove_dir_all(repo_dir);
     if let Err(err) = fs::rename(old_dir, repo_dir) {
@@ -213,14 +228,17 @@ fn rollback(
         provision(
             &manifest,
             id,
-            // Rollback recreates the runtime the app had before the upgrade,
-            // whose image is already on the host — no pull, no credentials.
+            // Rollback recreates the runtime the app had before the upgrade;
+            // reuse the same image source (DMN-050). A prebuilt image is
+            // already on the host, and a built one is rebuilt from the
+            // restored repository.
             None,
             app_dir,
             &dir,
             &config.docker,
             quota.as_ref(),
             settings.as_ref(),
+            image_source,
         )
     });
     if let Err(err) = restore {

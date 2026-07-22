@@ -129,6 +129,7 @@ impl ApiState {
         branch: Option<String>,
         tag: Option<String>,
         license_ack: bool,
+        image_choice: Option<crate::daemon::apps::ImageSource>,
     ) -> Result<pkg::InstallOutcome> {
         self.blocking(move |s| {
             if pkg::is_git_url(&spec) {
@@ -141,8 +142,15 @@ impl ApiState {
                     (None, None) => None,
                     (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
                 };
-                let report =
-                    pkg::install_from_git(&s.config, &ctx, &spec, git_ref, name.as_deref(), license_ack)?;
+                let report = pkg::install_from_git(
+                    &s.config,
+                    &ctx,
+                    &spec,
+                    git_ref,
+                    name.as_deref(),
+                    license_ack,
+                    image_choice,
+                )?;
                 return Ok(pkg::InstallOutcome::App(report));
             }
             if branch.is_some() || tag.is_some() {
@@ -157,6 +165,7 @@ impl ApiState {
                 source.as_deref(),
                 name.as_deref(),
                 license_ack,
+                image_choice,
             )
         })
         .await

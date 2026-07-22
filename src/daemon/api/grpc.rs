@@ -245,6 +245,10 @@ impl AppService for Grpc {
                 request.branch,
                 request.tag,
                 request.license_ack,
+                // The image-source choice (DMN-050) has no gRPC field yet; a
+                // both-image manifest surfaces ImageChoiceRequired here. The
+                // interactive flow is the CLI/REST path.
+                None,
             )
             .await
             .map_err(to_status)?;

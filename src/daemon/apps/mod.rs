@@ -8,6 +8,7 @@ pub mod disk;
 pub mod docker;
 pub mod driver;
 pub mod meta;
+pub mod ports;
 pub mod process;
 pub mod store;
 pub mod systemd;
@@ -19,7 +20,7 @@ use crate::daemon::config::Config;
 use crate::daemon::i18n::{Msg, tf};
 
 pub use driver::{ResourceUsage, RuntimeState};
-pub use meta::{AppMeta, DesiredState};
+pub use meta::{AppMeta, DesiredState, ImageSource};
 pub use store::AppStore;
 
 /// Who is asking: determines the visible group of apps.

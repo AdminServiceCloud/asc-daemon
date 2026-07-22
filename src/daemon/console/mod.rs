@@ -100,7 +100,8 @@ mod tests {
         assert!(
             logs_command(
                 &meta(Runtime::Docker {
-                    container: "asc-demo".into()
+                    container: "asc-demo".into(),
+                    image_source: None,
                 }),
                 dir,
                 50

@@ -82,6 +82,7 @@ pub enum Msg {
     AppRemoved,
     AppRemoveNeedsYes,
     AppListEmpty,
+    PortsNone,
     AppNameAmbiguous,
     AttachHint,
     AttachDockerOnly,
@@ -129,6 +130,10 @@ pub enum Msg {
     PkgNoRefs,
     PkgTagsHeader,
     PkgBranchesHeader,
+    PkgPickImage,
+    PkgImageOptionPrebuilt,
+    PkgImageOptionBuild,
+    PkgImageChoiceHint,
     SourceAdded,
     SourceRemoved,
     SourcesEmpty,
@@ -149,6 +154,7 @@ pub enum Msg {
     ErrDockerNotFound,
     ErrDockerUnreachable,
     ErrImagePull,
+    ErrImageBuild,
     ErrCurlNotFound,
     UpdSettingsHeader,
     UpdSettingLanguage,
@@ -278,6 +284,7 @@ pub fn t(msg: Msg) -> &'static str {
             "удаление приложения '{}' сотрёт все его данные; для подтверждения повторите команду с --yes",
         ),
         Msg::AppListEmpty => ("No apps installed", "Приложения не установлены"),
+        Msg::PortsNone => ("no published ports", "нет опубликованных портов"),
         Msg::AppNameAmbiguous => (
             "several apps are named '{}' — use the app id instead",
             "названию '{}' соответствует несколько приложений — используйте id",
@@ -426,6 +433,16 @@ pub fn t(msg: Msg) -> &'static str {
         ),
         Msg::PkgTagsHeader => ("tags", "теги"),
         Msg::PkgBranchesHeader => ("branches", "ветки"),
+        Msg::PkgPickImage => (
+            "'{}' can be installed from a prebuilt image or built locally — choose one:",
+            "'{}' можно установить из готового образа или собрать локально — выберите:",
+        ),
+        Msg::PkgImageOptionPrebuilt => ("pull the prebuilt image {}", "скачать готовый образ {}"),
+        Msg::PkgImageOptionBuild => ("build locally from {}", "собрать локально из {}"),
+        Msg::PkgImageChoiceHint => (
+            "'{}' offers both a prebuilt image ({}) and a local build ({}); pass --image or --build",
+            "'{}' предлагает и готовый образ ({}), и локальную сборку ({}); передайте --image или --build",
+        ),
         Msg::PkgPolicyDockerOnly => (
             "package '{}' is not a Docker app: this server allows regular users to install Docker apps only (root setting: [policy] user_install)",
             "пакет '{}' — не Docker-приложение: на этом сервере обычным пользователям разрешена установка только Docker-приложений (настройка root: [policy] user_install)",
@@ -488,6 +505,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ErrImagePull => (
             "cannot pull image '{}' from its registry (check the image name and registry access)",
             "не удаётся скачать образ '{}' из реестра (проверьте имя образа и доступ к реестру)",
+        ),
+        Msg::ErrImageBuild => (
+            "cannot build image '{}' from the package Dockerfile",
+            "не удаётся собрать образ '{}' из Dockerfile пакета",
         ),
         Msg::ErrDockerUnreachable => (
             "cannot reach Docker at {} (is Docker running? set the socket path in [docker] socket)",

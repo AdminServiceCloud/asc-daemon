@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -25,6 +25,8 @@ anyhow = "1"
 # Docker Engine API over the unix socket (no TLS stack: default features off
 # keeps ring/openssl out, preserving pure-Rust cross-compilation).
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
+# Tar build context bytes for the Docker image build (DMN-050) into a bollard body.
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3"

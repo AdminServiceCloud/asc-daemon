@@ -337,6 +337,7 @@ fn settings_drift_recreates_the_container() {
         quota: None,
         runtime: Runtime::Docker {
             container: "asc-web".into(),
+            image_source: None,
         },
     };
     store.save(&meta).unwrap();

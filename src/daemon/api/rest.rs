@@ -100,6 +100,23 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
+        if let Some(choice) = self
+            .0
+            .downcast_ref::<crate::daemon::pkg::ImageChoiceRequired>()
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "image_choice": {
+                        "package": choice.package,
+                        "image": choice.image,
+                        "build": choice.build,
+                    },
+                })),
+            )
+                .into_response();
+        }
         let code = if msg.contains("not found") || msg.contains("не найдено") {
             StatusCode::NOT_FOUND
         } else {
@@ -291,6 +308,11 @@ struct InstallBody {
     /// shipping a LICENSE fails with the structured license error.
     #[serde(default)]
     license_ack: bool,
+    /// Image source when the manifest offers both `image` and `image-build`
+    /// (DMN-050): "prebuilt" or "build". Absent → the structured image-choice
+    /// error for such manifests.
+    #[serde(default)]
+    image_choice: Option<crate::daemon::apps::ImageSource>,
 }
 
 async fn install_app(
@@ -308,6 +330,7 @@ async fn install_app(
             body.branch,
             body.tag,
             body.license_ack,
+            body.image_choice,
         )
         .await?
     {

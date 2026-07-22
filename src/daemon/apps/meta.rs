@@ -78,12 +78,31 @@ pub enum DesiredState {
     Stopped,
 }
 
+/// Which image a Docker app's container was created from when the manifest
+/// offers both a prebuilt `image` and a local `image-build` (DMN-050). Stored
+/// in `meta.json` so a settings-drift recreate (and an upgrade) reuse the same
+/// source instead of asking again; absent when the manifest offers only one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageSource {
+    /// Pull the prebuilt `runtime.image`.
+    Prebuilt,
+    /// Build the image locally from `runtime.image-build`.
+    Build,
+}
+
 /// How the app runs; determines which driver manages it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Runtime {
     /// Docker container managed by the daemon.
-    Docker { container: String },
+    Docker {
+        container: String,
+        /// Which image source the container was built from — set only when
+        /// the manifest offered both `image` and `image-build` (DMN-050).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_source: Option<ImageSource>,
+    },
     /// Native app running as a systemd unit (`asc-app-<id>.service`).
     Systemd { unit: String },
     /// Plain process supervised via pid-file.
@@ -204,6 +223,7 @@ mod tests {
             }),
             runtime: Runtime::Docker {
                 container: "asc-helloworld".into(),
+                image_source: None,
             },
         }
     }

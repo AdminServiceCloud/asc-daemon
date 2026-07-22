@@ -34,6 +34,26 @@ healthcheck: { http: /health }
 
 > ℹ️ The manifest has **no `env:`, `ports:` or `volumes:` sections** (DMN-027/030): environment variables, published ports and volumes are all declared in `asc.settings.yaml` — settings with an `env:` key and the `ports` / `volumes` setting types (see below). One source of truth: what the user can configure is exactly what the app gets.
 
+#### 🏗️ Local image build: `image-build` (DMN-050)
+
+A `type: docker` app can ship its own **Dockerfile** and have the Engine build the image locally instead of (or beside) pulling a prebuilt one:
+
+```yaml
+runtime:
+  image-build:
+    context: .              # build context dir, relative to the manifest (default '.')
+    dockerfile: Dockerfile  # relative to the context (default 'Dockerfile')
+    args:                   # optional --build-arg values
+      VERSION: "1.0"
+    tag: asc-local/my-app   # optional; default 'asc-local/<app>:latest'
+```
+
+- **Only `image`** → pull it, as before.
+- **Only `image-build`** → build the image from the package Dockerfile at install (and rebuild it on upgrade / a settings-drift recreate; layer caching keeps this cheap). The build context is packed from the package repository and never reaches outside it.
+- **Both `image` and `image-build`** → the installer offers a **choice**: interactively `asc install <app>` prints the two options and asks; non-interactively (or to skip the prompt) pass **`--image`** (pull the prebuilt one) or **`--build`** (build locally). The chosen source is recorded in `meta.json` so a later recreate or upgrade uses the same one without asking again.
+
+> ⚠️ The build runs as the daemon (root). Until per-user container policy lands (DMN-043), building is intended for trusted packages; the base image referenced by `FROM` is pulled by the Engine anonymously (private base images for a local build are a later increment).
+
 > 📐 JSON schemas of the manifests: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) and [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) in the `registry` repository.
 
 ### Application settings: asc.settings.yaml

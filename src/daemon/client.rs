@@ -137,6 +137,7 @@ impl Daemon {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn install(
         &self,
         spec: &str,
@@ -145,6 +146,7 @@ impl Daemon {
         branch: Option<&str>,
         tag: Option<&str>,
         license_ack: bool,
+        image_choice: Option<crate::daemon::apps::ImageSource>,
     ) -> Result<pkg::InstallOutcome> {
         let body = serde_json::json!({
             "spec": spec,
@@ -153,6 +155,7 @@ impl Daemon {
             "branch": branch,
             "tag": tag,
             "license_ack": license_ack,
+            "image_choice": image_choice,
         });
         let json = self.request(Method::POST, "/v1/apps", Some(body))?;
         let report = |v: &Value| pkg::InstallReport {
@@ -283,6 +286,13 @@ fn typed_error(json: &Value) -> anyhow::Error {
             source: choice["source"].as_str().map(str::to_string),
             tags: strings("tags"),
             branches: strings("branches"),
+        });
+    }
+    if let Some(choice) = json.get("image_choice") {
+        return anyhow::Error::new(pkg::ImageChoiceRequired {
+            package: choice["package"].as_str().unwrap_or_default().to_string(),
+            image: choice["image"].as_str().unwrap_or_default().to_string(),
+            build: choice["build"].as_str().unwrap_or_default().to_string(),
         });
     }
     match json.get("error").and_then(|e| e.as_str()) {

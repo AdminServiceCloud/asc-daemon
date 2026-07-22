@@ -75,7 +75,7 @@ async fn handle(socket: WebSocket, state: Arc<ApiState>, grant: ConsoleGrant, ta
 
     let result = match grant.session {
         SessionType::Logs => match &meta.runtime {
-            Runtime::Docker { container } => {
+            Runtime::Docker { container, .. } => {
                 stream_docker_logs(socket, docker_cfg, container, tail).await
             }
             _ => match console::logs_command(&meta, &dir, tail) {
@@ -84,7 +84,7 @@ async fn handle(socket: WebSocket, state: Arc<ApiState>, grant: ConsoleGrant, ta
             },
         },
         SessionType::Attach => match &meta.runtime {
-            Runtime::Docker { container } => {
+            Runtime::Docker { container, .. } => {
                 attach_docker(socket, &state, &grant.app_id, container).await
             }
             other => {

@@ -17,7 +17,7 @@ use super::install::{
 use super::manifest::Manifest;
 use super::settings::{SettingsFile, locate_installed};
 use crate::daemon::apps::disk;
-use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, new_uuid};
+use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime, new_uuid};
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::Config;
 
@@ -128,6 +128,12 @@ pub fn clone_app(
     // inheriting the source's (DMN-044) — minted before provisioning so an
     // app-bound credential covers its first image pull.
     let uuid = new_uuid()?;
+    // Reuse the source's image-source choice (DMN-050) so a clone of a
+    // both-image app builds/pulls the same way instead of re-prompting.
+    let image_source = match &source.runtime {
+        Runtime::Docker { image_source, .. } => *image_source,
+        _ => None,
+    };
     let runtime = provision(
         &manifest,
         &new_id,
@@ -137,6 +143,7 @@ pub fn clone_app(
         &config.docker,
         quota.as_ref(),
         settings.as_ref(),
+        image_source,
     )?;
 
     let meta = AppMeta {

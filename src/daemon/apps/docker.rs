@@ -22,7 +22,7 @@ impl DockerDriver {
 
 fn container_name(meta: &AppMeta) -> Result<&str> {
     match &meta.runtime {
-        Runtime::Docker { container } => Ok(container),
+        Runtime::Docker { container, .. } => Ok(container),
         other => bail!("app '{}' is not a docker app ({})", meta.id, other.kind()),
     }
 }

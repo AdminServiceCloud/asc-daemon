@@ -20,7 +20,7 @@ use crate::daemon::config::Config;
 use crate::daemon::i18n::{Msg, tf};
 
 pub use driver::{ResourceUsage, RuntimeState};
-pub use meta::{AppMeta, DesiredState};
+pub use meta::{AppMeta, DesiredState, ImageSource};
 pub use store::AppStore;
 
 /// Who is asking: determines the visible group of apps.

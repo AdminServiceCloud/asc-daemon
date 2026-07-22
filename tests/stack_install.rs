@@ -110,7 +110,7 @@ apps:
         stack,
         installed,
         skipped,
-    } = pkg::install(&config, &ctx, "demo-stack", None, None, true).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None, None, true, None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -147,7 +147,7 @@ apps:
     // ── Re-install: wanted apps become new instances (DMN-033) ───────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack", None, None, true).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None, None, true, None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -163,7 +163,7 @@ apps:
     // ── Whole stack with --name: the name prefixes every wanted app ──────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack", None, Some("my"), true).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack", None, Some("my"), true, None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -190,7 +190,7 @@ apps:
     assert!(skipped.is_empty());
     // The same prefix again collides on the resulting names — and fails
     // before anything is installed.
-    let err = pkg::install(&config, &ctx, "demo-stack", None, Some("my"), true).unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo-stack", None, Some("my"), true, None).unwrap_err();
     assert!(err.to_string().contains("my-master"), "got: {err:#}");
     assert!(
         store.get("demo-master-3").unwrap().is_none(),
@@ -202,7 +202,7 @@ apps:
     // ── Single app from the stack (optional installs when asked) ─────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack/extras", None, None, true).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack/extras", None, None, true, None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -214,7 +214,7 @@ apps:
     // already-installed dependencies are reused, not duplicated ──────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack/server", None, None, true).unwrap()
+    } = pkg::install(&config, &ctx, "demo-stack/server", None, None, true, None).unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -224,7 +224,7 @@ apps:
     store.remove("demo-server-2").unwrap();
 
     // Unknown stack app fails cleanly.
-    let err = pkg::install(&config, &ctx, "demo-stack/ghost", None, None, true).unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo-stack/ghost", None, None, true, None).unwrap_err();
     assert!(err.to_string().contains("ghost"), "got: {err:#}");
 
     // ── Upgrade one app of the stack to a new tag ─────────────────────────

@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
-    AppManager, AppStats, AppStatus, Outcome, RuntimeState, UserContext,
+    AppManager, AppStats, AppStatus, ImageSource, Outcome, RuntimeState, UserContext,
 };
 use asc_daemon::daemon::client::{self, RemoteApp};
 use asc_daemon::daemon::config::Config;
@@ -90,6 +90,14 @@ enum Command {
         /// Tag to check out (direct repository installs only)
         #[arg(long, conflicts_with = "branch")]
         tag: Option<String>,
+        /// Pull the prebuilt image when the manifest offers both `image` and
+        /// `image-build` (DMN-050); skips the interactive choice
+        #[arg(long, conflicts_with = "build")]
+        image: bool,
+        /// Build the image locally when the manifest offers both `image` and
+        /// `image-build` (DMN-050); skips the interactive choice
+        #[arg(long, conflicts_with = "image")]
+        build: bool,
     },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
@@ -342,6 +350,12 @@ enum AppAction {
         /// Tag to check out (direct repository installs only)
         #[arg(long, conflicts_with = "branch")]
         tag: Option<String>,
+        /// Pull the prebuilt image when the manifest offers both (DMN-050)
+        #[arg(long, conflicts_with = "build")]
+        image: bool,
+        /// Build the image locally when the manifest offers both (DMN-050)
+        #[arg(long, conflicts_with = "image")]
+        build: bool,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
     Attach {
@@ -491,12 +505,15 @@ fn run() -> anyhow::Result<()> {
             name,
             branch,
             tag,
+            image,
+            build,
         } => install_cmd(
             &spec,
             source.as_deref(),
             name,
             branch.as_deref(),
             tag.as_deref(),
+            image_choice_flag(image, build),
             &config,
         ),
         Command::Attach { id } => attach_cmd(&id, &config),
@@ -568,17 +585,28 @@ fn with_spinner<T>(op: impl FnOnce() -> T) -> T {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_cmd(
     spec: &str,
     source: Option<&str>,
     name: Option<String>,
     branch: Option<&str>,
     tag: Option<&str>,
+    image_choice: Option<ImageSource>,
     config: &Config,
 ) -> anyhow::Result<()> {
     let daemon = daemon_backend(config)?;
     if pkg::is_git_url(spec) {
-        return install_from_git_cmd(spec, source, name, branch, tag, config, daemon);
+        return install_from_git_cmd(
+            spec,
+            source,
+            name,
+            branch,
+            tag,
+            image_choice,
+            config,
+            daemon,
+        );
     }
     if branch.is_some() || tag.is_some() {
         anyhow::bail!(
@@ -591,18 +619,28 @@ fn install_cmd(
     };
     let name = name.as_deref();
     let outcome = match &daemon {
-        Some(daemon) => install_daemon_loop(daemon, spec, source, name, None, None)?,
+        Some(daemon) => install_daemon_loop(daemon, spec, source, name, None, None, image_choice)?,
         None => {
             let ctx = UserContext::current();
             let mut spec = spec.to_string();
             let mut source = source.map(str::to_string);
             let mut license_ack = false;
+            let mut image_choice = image_choice;
             // Interactive recoveries loop until the install passes or the user
             // declines: auth setup for private repositories, a source pick when
             // several provide the package, a version pick for `pkg@` (DMN-048),
-            // license consent (DMN-028).
+            // an image-source pick when both are offered (DMN-050), license
+            // consent (DMN-028).
             loop {
-                match pkg::install(config, &ctx, &spec, source.as_deref(), name, license_ack) {
+                match pkg::install(
+                    config,
+                    &ctx,
+                    &spec,
+                    source.as_deref(),
+                    name,
+                    license_ack,
+                    image_choice,
+                ) {
                     Ok(outcome) => break outcome,
                     Err(err) if offer_auth_setup(&err) => continue,
                     Err(err) => {
@@ -613,6 +651,10 @@ fn install_cmd(
                         }
                         if let Some(chosen) = pick_source(&err)? {
                             source = Some(chosen);
+                            continue;
+                        }
+                        if let Some(chosen) = pick_image(&err)? {
+                            image_choice = Some(chosen);
                             continue;
                         }
                         if accept_license(&err)? {
@@ -629,12 +671,24 @@ fn install_cmd(
     Ok(())
 }
 
+/// Map the mutually exclusive `--image` / `--build` flags (clap rejects both
+/// at once) to an image source; neither set leaves the choice open — the
+/// installer prompts, or errors non-interactively (DMN-050).
+fn image_choice_flag(image: bool, build: bool) -> Option<ImageSource> {
+    match (image, build) {
+        (true, _) => Some(ImageSource::Prebuilt),
+        (_, true) => Some(ImageSource::Build),
+        _ => None,
+    }
+}
+
 /// Install through the daemon, with the same interactive recoveries as the
 /// in-process path — the client reconstructs the typed errors from the
 /// structured REST payloads, so `pick_source`/`accept_license` work
 /// unchanged. Auth setup for private repositories is not offered here: the
 /// daemon clones with its own credentials, per-user git auth over the
 /// daemon is DMN-043.
+#[allow(clippy::too_many_arguments)]
 fn install_daemon_loop(
     daemon: &client::Daemon,
     spec: &str,
@@ -642,12 +696,22 @@ fn install_daemon_loop(
     name: Option<&str>,
     branch: Option<&str>,
     tag: Option<&str>,
+    image_choice: Option<ImageSource>,
 ) -> anyhow::Result<pkg::InstallOutcome> {
     let mut spec = spec.to_string();
     let mut source = source.map(str::to_string);
     let mut license_ack = false;
+    let mut image_choice = image_choice;
     loop {
-        match daemon.install(&spec, source.as_deref(), name, branch, tag, license_ack) {
+        match daemon.install(
+            &spec,
+            source.as_deref(),
+            name,
+            branch,
+            tag,
+            license_ack,
+            image_choice,
+        ) {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 if let Some(chosen) = pick_version(&err)? {
@@ -657,6 +721,10 @@ fn install_daemon_loop(
                 }
                 if let Some(chosen) = pick_source(&err)? {
                     source = Some(chosen);
+                    continue;
+                }
+                if let Some(chosen) = pick_image(&err)? {
+                    image_choice = Some(chosen);
                     continue;
                 }
                 if accept_license(&err)? {
@@ -700,12 +768,14 @@ fn print_install_outcome(outcome: &pkg::InstallOutcome) {
 /// were never published to a registry. `--branch`/`--tag` pick the ref to
 /// check out (default branch HEAD otherwise); private repositories reuse the
 /// same `asc auth` credentials as registry installs (host/prefix matching).
+#[allow(clippy::too_many_arguments)]
 fn install_from_git_cmd(
     url: &str,
     source: Option<&str>,
     name: Option<String>,
     branch: Option<&str>,
     tag: Option<&str>,
+    image_choice: Option<ImageSource>,
     config: &Config,
     daemon: Option<client::Daemon>,
 ) -> anyhow::Result<()> {
@@ -718,7 +788,7 @@ fn install_from_git_cmd(
     };
     let name = name.as_deref();
     if let Some(daemon) = &daemon {
-        let outcome = install_daemon_loop(daemon, url, None, name, branch, tag)?;
+        let outcome = install_daemon_loop(daemon, url, None, name, branch, tag, image_choice)?;
         print_install_outcome(&outcome);
         return Ok(());
     }
@@ -730,13 +800,18 @@ fn install_from_git_cmd(
         (Some(_), Some(_)) => unreachable!("clap rejects --branch together with --tag"),
     };
     let mut license_ack = false;
+    let mut image_choice = image_choice;
     // Same interactive recoveries as a registry install, minus the source
     // pick (there is only ever one source: the URL itself).
     let report = loop {
-        match pkg::install_from_git(config, &ctx, url, git_ref, name, license_ack) {
+        match pkg::install_from_git(config, &ctx, url, git_ref, name, license_ack, image_choice) {
             Ok(report) => break report,
             Err(err) if offer_auth_setup(&err) => continue,
             Err(err) => {
+                if let Some(chosen) = pick_image(&err)? {
+                    image_choice = Some(chosen);
+                    continue;
+                }
                 if accept_license(&err)? {
                     license_ack = true;
                     continue;
@@ -1167,6 +1242,29 @@ fn pick_source(err: &anyhow::Error) -> anyhow::Result<Option<String>> {
     Ok(Some(ambiguous.candidates[index - 1].0.clone()))
 }
 
+/// When `err` says the manifest offers both a prebuilt image and a local
+/// build (DMN-050) and stdin is a terminal, print the two options and let the
+/// user pick one. `Ok(None)` = not that error or non-interactive (the caller
+/// then surfaces the `--image`/`--build` hint from the error message).
+fn pick_image(err: &anyhow::Error) -> anyhow::Result<Option<ImageSource>> {
+    let Some(choice) = err.downcast_ref::<pkg::ImageChoiceRequired>() else {
+        return Ok(None);
+    };
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(None);
+    }
+    println!("{}", tf(Msg::PkgPickImage, &choice.package));
+    println!("  1) {}", tf(Msg::PkgImageOptionPrebuilt, &choice.image));
+    println!("  2) {}", tf(Msg::PkgImageOptionBuild, &choice.build));
+    let input = read_line("> ")?;
+    match input.trim() {
+        "1" => Ok(Some(ImageSource::Prebuilt)),
+        "2" => Ok(Some(ImageSource::Build)),
+        _ => Err(anyhow::anyhow!(t(Msg::AuthInvalidChoice))),
+    }
+}
+
 /// The user's chosen install spec after a version pick (DMN-048).
 struct VersionChoice {
     /// Re-invocation spec: `<package>@<ref>`.
@@ -1519,12 +1617,15 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             name,
             branch,
             tag,
+            image,
+            build,
         } => install_cmd(
             &spec,
             source.as_deref(),
             name,
             branch.as_deref(),
             tag.as_deref(),
+            image_choice_flag(image, build),
             config,
         )?,
         AppAction::Attach { id } => attach_cmd(&id, config)?,
@@ -2447,7 +2548,7 @@ fn attach_cmd(id: &str, config: &Config) -> anyhow::Result<()> {
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
     let status = manager.status(&ctx, id)?;
-    let Runtime::Docker { container } = &status.meta.runtime else {
+    let Runtime::Docker { container, .. } = &status.meta.runtime else {
         anyhow::bail!(tf2(Msg::AttachDockerOnly, id, status.meta.runtime.kind()));
     };
     if status.state != RuntimeState::Running {

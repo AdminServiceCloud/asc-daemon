@@ -14,7 +14,7 @@ pub mod upgrade;
 
 pub use clone::clone_app;
 pub use install::{
-    AmbiguousPackage, GitRef, InstallOutcome, InstallReport, LicenseRequired,
+    AmbiguousPackage, GitRef, ImageChoiceRequired, InstallOutcome, InstallReport, LicenseRequired,
     VersionChoiceRequired, install, install_from_git, instance_id, is_git_url, repo_name,
 };
 pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};

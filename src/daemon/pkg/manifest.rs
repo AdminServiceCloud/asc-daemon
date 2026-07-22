@@ -48,9 +48,15 @@ pub enum AppType {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSpec {
-    /// Docker image (type: docker).
+    /// Prebuilt Docker image to pull (type: docker). May be given alongside
+    /// `image-build`, in which case the installer offers a choice (DMN-050).
     #[serde(default)]
     pub image: Option<String>,
+    /// Build the Docker image locally from a Dockerfile in the package
+    /// instead of (or as an alternative to) pulling a prebuilt `image`
+    /// (type: docker, DMN-050).
+    #[serde(default, rename = "image-build")]
+    pub image_build: Option<ImageBuild>,
     /// Keep the container's stdin open (Engine `OpenStdin`, like `docker run
     /// -i`) so console input from `asc attach` reaches the app (type: docker).
     #[serde(default)]
@@ -69,6 +75,26 @@ pub struct RuntimeSpec {
     pub stop: Option<String>,
     #[serde(default)]
     pub uninstall: Vec<String>,
+}
+
+/// Local image build (type: docker, DMN-050): the Engine builds the image
+/// from a Dockerfile shipped in the package repository. Mirrors the
+/// `image-build` object of `asc.schema.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageBuild {
+    /// Build context directory, relative to the manifest (default `.`).
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Dockerfile path, relative to the build context (default `Dockerfile`).
+    #[serde(default)]
+    pub dockerfile: Option<String>,
+    /// Build arguments passed to the Engine (`--build-arg`).
+    #[serde(default)]
+    pub args: std::collections::BTreeMap<String, String>,
+    /// Tag for the built image (default `asc-local/<app>:latest`).
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,9 +262,11 @@ impl Manifest {
         crate::daemon::apps::meta::validate_id(&self.name)
             .with_context(|| format!("invalid app name '{}' in manifest", self.name))?;
         match self.app_type {
-            AppType::Docker if self.runtime.image.is_none() => {
+            AppType::Docker
+                if self.runtime.image.is_none() && self.runtime.image_build.is_none() =>
+            {
                 bail!(
-                    "manifest '{}': type is docker but runtime.image is missing",
+                    "manifest '{}': type is docker but neither runtime.image nor runtime.image-build is set",
                     self.name
                 )
             }
@@ -290,9 +318,59 @@ runtime:
 
     #[test]
     fn docker_without_image_is_rejected() {
+        // Neither runtime.image nor runtime.image-build — rejected.
         let yaml = "name: broken\nversion: '1.0'\ntype: docker\n";
         let m: Manifest = serde_yaml::from_str(yaml).unwrap();
         assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn image_build_satisfies_docker_and_parses() {
+        // image-build alone is enough for a docker manifest (no prebuilt image).
+        let yaml = r#"
+name: web
+version: 1.0.0
+type: docker
+runtime:
+  image-build:
+    context: ./docker
+    dockerfile: Dockerfile.prod
+    args:
+      VERSION: "1.0"
+    tag: web:local
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).unwrap();
+        m.validate().unwrap();
+        let build = m.runtime.image_build.as_ref().unwrap();
+        assert_eq!(build.context.as_deref(), Some("./docker"));
+        assert_eq!(build.dockerfile.as_deref(), Some("Dockerfile.prod"));
+        assert_eq!(build.tag.as_deref(), Some("web:local"));
+        assert_eq!(build.args.get("VERSION").map(String::as_str), Some("1.0"));
+        assert!(m.runtime.image.is_none());
+    }
+
+    #[test]
+    fn image_and_image_build_may_coexist() {
+        // Offering both is valid — the installer asks (or a flag decides).
+        let yaml = r#"
+name: web
+version: 1.0.0
+type: docker
+runtime:
+  image: nginx:1.27
+  image-build:
+    context: .
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).unwrap();
+        m.validate().unwrap();
+        assert!(m.runtime.image.is_some() && m.runtime.image_build.is_some());
+    }
+
+    #[test]
+    fn image_build_rejects_unknown_fields() {
+        let yaml =
+            "name: x\nversion: '1'\ntype: docker\nruntime:\n  image-build:\n    oops: true\n";
+        assert!(serde_yaml::from_str::<Manifest>(yaml).is_err());
     }
 
     #[test]

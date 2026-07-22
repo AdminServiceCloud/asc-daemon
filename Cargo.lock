@@ -80,6 +80,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bollard",
+ "bytes",
  "clap",
  "flate2",
  "futures-util",

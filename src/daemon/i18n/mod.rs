@@ -59,6 +59,7 @@ pub fn lang() -> Lang {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Msg {
     BannerHelpHint,
+    MoreInfo,
     ServiceInstalled,
     ServiceUninstalled,
     ServiceStarted,
@@ -228,6 +229,7 @@ pub fn t(msg: Msg) -> &'static str {
             "Run 'asc --help' to see the list of commands.",
             "Запустите 'asc --help', чтобы увидеть список команд.",
         ),
+        Msg::MoreInfo => ("More info", "Больше информации"),
         Msg::ServiceInstalled => (
             "Service installed and enabled (systemd unit 'asc'). Start it with: asc service start",
             "Сервис установлен и добавлен в автозапуск (systemd-юнит 'asc'). Запуск: asc service start",

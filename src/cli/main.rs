@@ -1,7 +1,7 @@
 //! `asc` — CLI and daemon entry point (`asc serve` runs the daemon itself,
 //! everything else is management commands).
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
@@ -442,10 +442,49 @@ fn main() {
     }
 }
 
+/// Base URL of the public docs site; update here if it ever moves (e.g. a
+/// custom domain) — every `--help` footer link is derived from it.
+const DOCS_BASE_URL: &str = "https://adminservicecloud.github.io/asc-documentaion";
+
+/// Docs-site URL for a command tree node, given its path from the root
+/// (`path[0]` is always `"asc"`). Top-level commands get their own page
+/// (`commands/app`); anything deeper is an anchor on its top-level command's
+/// page (`commands/backup#storage-add`) — see `docs/commands/` in
+/// asc-documentaion for the page/heading convention this must match.
+fn docs_url(path: &[String]) -> String {
+    let tail = match path.len() {
+        0 | 1 => "commands/asc".to_string(),
+        2 => format!("commands/{}", path[1]),
+        _ => format!("commands/{}#{}", path[1], path[2..].join("-")),
+    };
+    match i18n::lang() {
+        Lang::Ru => format!("{DOCS_BASE_URL}/ru/{tail}"),
+        Lang::En => format!("{DOCS_BASE_URL}/{tail}"),
+    }
+}
+
+/// Recursively stamps every node of the command tree with an `after_help`
+/// footer pointing at its docs page (see `docs_url`). Must run after
+/// `i18n::set_lang` (the footer text/URL is language-dependent) and before
+/// `.get_matches()` (clap prints help — and exits — from inside that call).
+fn inject_help_links(cmd: &mut clap::Command, path: &[String]) {
+    let footer = format!("{}: {}", t(Msg::MoreInfo), docs_url(path));
+    let taken = std::mem::replace(cmd, clap::Command::new(""));
+    *cmd = taken.after_help(footer);
+
+    let child_names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect();
+    for (sub, name) in cmd.get_subcommands_mut().zip(child_names) {
+        let mut child_path = path.to_vec();
+        child_path.push(name);
+        inject_help_links(sub, &child_path);
+    }
+}
+
 /// Bare `asc` (no subcommand): the ASCII banner, copyright and a pointer to
-/// `--help` — a welcome screen instead of a bare usage error. Printed before
-/// the config loads (and thus before the language setting is known), so the
-/// hint below it is the only translated line.
+/// `--help` — a welcome screen instead of a bare usage error.
 fn banner_cmd() -> anyhow::Result<()> {
     println!("{}", asc_daemon::BANNER);
     println!();
@@ -461,14 +500,29 @@ fn banner_cmd() -> anyhow::Result<()> {
 }
 
 fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Loaded once, early, best-effort: a malformed config.toml must never
+    // block `--help`/`-h` (clap prints them — and exits — from inside
+    // get_matches() below, before we'd get a chance to surface a config
+    // error). The same Result is consumed for real once a command is chosen.
+    let config_result = Config::load();
+    i18n::set_lang(
+        config_result
+            .as_ref()
+            .map(|c| c.language)
+            .unwrap_or_default(),
+    );
+
+    let mut cmd = Cli::command();
+    inject_help_links(&mut cmd, &["asc".to_string()]);
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
     // Bare `asc` (no subcommand): banner + copyright + repository link,
     // like `git` or `npm` printing a welcome screen instead of an error.
     let Some(command) = cli.command else {
         return banner_cmd();
     };
-    let config = Config::load()?;
-    i18n::set_lang(config.language);
+    let config = config_result?;
     // Every command gets tracing, not just `serve`: `asc install` and
     // friends run package/docker logic in-process, so `asc config debug on`
     // is only useful if the CLI itself emits the debug! calls it enables.

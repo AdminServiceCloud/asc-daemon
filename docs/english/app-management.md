@@ -16,6 +16,7 @@ The core of the daemon: a single interface for managing applications of three ki
 - **`asc ports [<name>]`** / **`asc app ports [<name>]`** (DMN-049): the published host==container ports of an app with their transport (`27015/tcp`, `27015/udp`, or `27015/tcp+udp` when both share the port), resolved from the app's `type: ports` settings — so a **stopped** app still reports the ports it will bind on the next start. Without a name: a table of every visible app and its ports (root sees all users' apps).
 - `asc stats [--live] [--sort cpu|mem]` — CPU, memory and disk consumption per application (like `docker stats`, see [📊 monitoring](monitoring.md)).
 - **List subcommands** (DMN-049): `asc ls ports`, `asc ls disk` and `asc ls stats` switch the same app list to the ports, disk-usage or live-stats view — mirrors of `asc ports` / `asc disk` / `asc stats`.
+- **`asc stacks`** (DMN-051): installed apps grouped by the stack (`asc.stack.yaml` package) they came from, hierarchically — a stack name header followed by its member apps' table (id, name, kind, state, version, uuid — same columns as `asc ls`), root sees all users' apps. The stack is read from `meta.package` (`"<stack>/<app>"`, recorded at install — see [📦 package-manager](package-manager.md)); an app installed on its own has no `/` in `package` and never appears here.
 - The platform performs the same operations through the daemon API.
 - After a server reboot the daemon restores the application states (running/stopped).
 
@@ -69,8 +70,8 @@ Why a second identifier: an `id` is **reusable**. Removing `helloworld-2` frees 
 - **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple *nodes* running the platform together. Multiple instances of one application on a single node already work (DMN-033/034, above).
-- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself).
+- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself).
 
 ## 🔗 Related tasks
 
-DMN-002, DMN-004, DMN-019, DMN-044, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

@@ -71,6 +71,10 @@ enum Command {
     /// apps): total space occupied by apps as a bar against the store's
     /// filesystem capacity, then each app's own usage, largest first
     Disk,
+    /// List installed stacks (`asc.stack.yaml` packages) and their member
+    /// apps, hierarchically (root sees all users' apps); apps installed on
+    /// their own, outside any stack, are not shown here — see `asc ls`
+    Stacks,
     /// Install from a registry (<name>, <stack> or <stack>/<app>, with
     /// optional @<version>) or directly from a git repository URL
     /// (https://, ssh:// or git@host:path)
@@ -553,6 +557,7 @@ fn run() -> anyhow::Result<()> {
         },
         Command::Ports => app_cmd(AppAction::Ports { id: None }, &config),
         Command::Disk => app_cmd(AppAction::Disk { id: None }, &config),
+        Command::Stacks => stacks_cmd(&config),
         Command::Install {
             spec,
             source,
@@ -1573,7 +1578,7 @@ fn app_cmd_daemon(
     match action {
         AppAction::List => {
             let rows: Vec<AppRow> = daemon.list()?.iter().map(remote_row).collect();
-            print_app_list(&rows, UserContext::current().is_root);
+            print_app_list(&rows, UserContext::current().is_root, "");
         }
         AppAction::Info { id } => {
             let app = daemon.info(&id)?;
@@ -1644,7 +1649,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
     match action {
         AppAction::List => {
             let rows: Vec<AppRow> = manager.list(&ctx)?.iter().map(local_row).collect();
-            print_app_list(&rows, ctx.is_root);
+            print_app_list(&rows, ctx.is_root, "");
         }
         AppAction::Info { id } => {
             let status = manager.status(&ctx, &id)?;
@@ -2827,12 +2832,35 @@ fn remote_row(app: &RemoteApp) -> AppRow {
 /// headers are technical identifiers and stay English by convention (like
 /// `docker ps`). NAME is the user's custom name (or the package title): both
 /// it and the ID address the app in commands. STATE is colored (green =
-/// running, red = stopped) when stdout is a terminal.
-fn print_app_list(apps: &[AppRow], show_user: bool) {
+/// running, red = stopped) when stdout is a terminal. `indent` prefixes every
+/// printed line — used by `asc stacks` to nest a stack's apps under its name;
+/// pass "" for a flat, unnested list.
+fn print_app_list(apps: &[AppRow], show_user: bool, indent: &str) {
+    print_app_list_inner(apps, show_user, indent, false);
+}
+
+/// Same table, but each row gets a tree connector (`├── `/`└── `) instead of
+/// a fixed indent — used by `asc stacks` to draw its apps as a branch under
+/// the stack name. `header_indent` must be as wide as a connector (4 cols)
+/// so the column header still lines up with the rows.
+fn print_app_tree(apps: &[AppRow], show_user: bool, header_indent: &str) {
+    print_app_list_inner(apps, show_user, header_indent, true);
+}
+
+fn print_app_list_inner(apps: &[AppRow], show_user: bool, indent: &str, tree: bool) {
     if apps.is_empty() {
-        println!("{}", t(Msg::AppListEmpty));
+        println!("{indent}{}", t(Msg::AppListEmpty));
         return;
     }
+    let row_prefix = |i: usize| -> &str {
+        if !tree {
+            indent
+        } else if i + 1 == apps.len() {
+            "└── "
+        } else {
+            "├── "
+        }
+    };
     let id_w = apps.iter().map(|a| a.id.len()).max().unwrap_or(2).max(2);
     let name_w = apps
         .iter()
@@ -2856,12 +2884,13 @@ fn print_app_list(apps: &[AppRow], show_user: bool) {
             .unwrap_or(4)
             .max(4);
         println!(
-            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<user_w$}  {:<version_w$}  UUID",
+            "{indent}{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<user_w$}  {:<version_w$}  UUID",
             "ID", "NAME", "KIND", "STATE", "USER", "VERSION"
         );
-        for app in apps {
+        for (i, app) in apps.iter().enumerate() {
             println!(
-                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<user_w$}  {:<version_w$}  {}",
+                "{}{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<user_w$}  {:<version_w$}  {}",
+                row_prefix(i),
                 app.id,
                 app.name,
                 app.kind,
@@ -2873,12 +2902,13 @@ fn print_app_list(apps: &[AppRow], show_user: bool) {
         }
     } else {
         println!(
-            "{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<version_w$}  UUID",
+            "{indent}{:<id_w$}  {:<name_w$}  {:<7}  {:<state_w$}  {:<version_w$}  UUID",
             "ID", "NAME", "KIND", "STATE", "VERSION"
         );
-        for app in apps {
+        for (i, app) in apps.iter().enumerate() {
             println!(
-                "{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<version_w$}  {}",
+                "{}{:<id_w$}  {:<name_w$}  {:<7}  {}  {:<version_w$}  {}",
+                row_prefix(i),
                 app.id,
                 app.name,
                 app.kind,
@@ -2888,6 +2918,47 @@ fn print_app_list(apps: &[AppRow], show_user: bool) {
             );
         }
     }
+}
+
+/// `asc stacks`: installed apps grouped by the stack (`asc.stack.yaml`
+/// package) they came from — a tree per stack (`├──`/`└──` branches over its
+/// apps, sorted by id), the stack name annotated with how many of its apps
+/// are running (root sees all users' apps, like [`print_app_list`]). An
+/// app's stack is read from `meta.package` (DMN-003: recorded as
+/// `"<stack>/<app>"` at install); an app installed on its own has no `/` in
+/// `package` and is not part of any stack, so it never appears here.
+fn stacks_cmd(config: &Config) -> anyhow::Result<()> {
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+
+    let mut stacks: std::collections::BTreeMap<String, Vec<AppStatus>> =
+        std::collections::BTreeMap::new();
+    for app in manager.list(&ctx)? {
+        if let Some((stack, _)) = app.meta.package.as_deref().and_then(|p| p.split_once('/')) {
+            stacks.entry(stack.to_string()).or_default().push(app);
+        }
+    }
+
+    if stacks.is_empty() {
+        println!("{}", t(Msg::StacksEmpty));
+        return Ok(());
+    }
+
+    let show_user = ctx.is_root;
+    for (i, (stack, mut apps)) in stacks.into_iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        apps.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
+        let running = apps
+            .iter()
+            .filter(|a| a.state == RuntimeState::Running)
+            .count();
+        let rows: Vec<AppRow> = apps.iter().map(local_row).collect();
+        println!("{stack} [{running}/{}]", apps.len());
+        print_app_tree(&rows, show_user, "    ");
+    }
+    Ok(())
 }
 
 fn service_cmd(action: ServiceAction) -> anyhow::Result<()> {

@@ -16,6 +16,7 @@
 - **`asc ports [<имя>]`** / **`asc app ports [<имя>]`** (DMN-049): опубликованные порты host==container приложения с транспортом (`27015/tcp`, `27015/udp` или `27015/tcp+udp`, когда оба на одном порту), взятые из настроек `type: ports` — поэтому **остановленное** приложение всё равно показывает порты, которые оно займёт при следующем старте. Без имени — таблица всех видимых приложений с их портами (root видит приложения всех пользователей).
 - `asc stats [--live] [--sort cpu|mem]` — потребление CPU, памяти и диска по приложениям (аналог `docker stats`, см. [📊 monitoring](monitoring.md)).
 - **Подкоманды списка** (DMN-049): `asc ls ports`, `asc ls disk` и `asc ls stats` переключают тот же список приложений на вид портов, использования диска или живой статистики — зеркала `asc ports` / `asc disk` / `asc stats`.
+- **`asc stacks`** (DMN-051): установленные приложения, сгруппированные по стеку (`asc.stack.yaml`), из которого они пришли, иерархически — заголовок с именем стека, за которым таблица его приложений-участников (id, name, kind, state, version, uuid — те же колонки, что и в `asc ls`), root видит приложения всех пользователей. Стек определяется по `meta.package` (`"<стек>/<приложение>"`, записывается при установке — см. [📦 package-manager](package-manager.md)); у приложения, установленного самого по себе, в `package` нет `/`, и оно сюда не попадает.
 - Платформа выполняет те же операции через API демона.
 - После ребута сервера демон восстанавливает состояние приложений (running/stopped).
 
@@ -69,8 +70,8 @@ legacy-app  Legacy App  docker   stopped     1.2.0    -
 - **Индекс приложений**: `meta.json` — источник правды; в MVP индекс строится сканированием `/asc/apps/*/meta.json` при обращении, при старте демон сверяет желаемое состояние (`desired_state`) с реальностью (контейнеры, юниты, процессы) и дозапускает упавшее. Локальная БД (SQLite) появится, когда добавится состояние сверх meta.json (метрики, история операций).
 - **Логи**: единый интерфейс — docker logs / journald / файл; стрим наружу через [🖥️ console](console.md).
 - **Cluster-мод (пост-MVP)**: несколько *узлов*, работающих вместе как платформа. Несколько инстансов одного приложения на одном узле уже работают (DMN-033/034, выше).
-- **CLI-команды MVP**: `asc status`, `asc stats`, `asc ports`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ алиасы `asc ls`/`asc ps` для списка и `asc ls ports|disk|stats` для видов портов/диска/статистики), `asc service` (управление самим демоном).
+- **CLI-команды MVP**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ алиасы `asc ls`/`asc ps` для списка и `asc ls ports|disk|stats` для видов портов/диска/статистики), `asc service` (управление самим демоном).
 
 ## 🔗 Связанные задачи
 
-DMN-002, DMN-004, DMN-019, DMN-044, FE-005 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, FE-005 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

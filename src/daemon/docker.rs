@@ -519,7 +519,18 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         let mut stream = docker.build_image(builder.build(), None, Some(body));
         let mut bars = progress::interactive().then(progress::BuildBars::new);
         while let Some(step) = stream.next().await {
-            let info = step.map_err(|e| friendly(cfg, e))?;
+            let info = match step {
+                Ok(info) => info,
+                // The Engine's BuildKit-compat translation reports some
+                // progress lines (internal solver vertices/logs) through
+                // `aux` as an opaque base64-encoded protobuf blob rather
+                // than the classic `{"ID": "sha256:..."}` this crate
+                // otherwise expects there — harmless to the build, only to
+                // this crate's ability to decode that one line, so it's
+                // skipped rather than aborting the build over it.
+                Err(BollardError::JsonDataError { .. }) => continue,
+                Err(e) => return Err(friendly(cfg, e)),
+            };
             if let Some(detail) = &info.error_detail {
                 let msg = detail.message.as_deref().unwrap_or("image build failed");
                 return Err(anyhow!("{}: {msg}", tf(Msg::ErrImageBuild, spec.tag)));

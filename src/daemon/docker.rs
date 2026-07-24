@@ -15,7 +15,8 @@ use bollard::auth::DockerCredentials;
 use bollard::container::AttachContainerResults;
 use bollard::errors::Error as BollardError;
 use bollard::models::{
-    ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, HostConfig, PortBinding, ResourcesUlimits, RestartPolicy,
+    RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     AttachContainerOptions, BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
@@ -32,6 +33,14 @@ use crate::daemon::progress;
 
 /// Seconds the Engine waits on stop before killing the container.
 const STOP_TIMEOUT_SECS: i64 = 10;
+
+/// Open-file soft/hard limit given to every container, replacing the
+/// Engine's own default (1024). A handful of game servers — 7 Days to Die's
+/// EOS SDK is the documented case — hang or crash during startup on that
+/// default with no clearer symptom than silence past their first log line;
+/// 10240 is the value the affected games' own maintainers recommend, and a
+/// higher fd limit is essentially free for everything else.
+const CONTAINER_NOFILE_LIMIT: i64 = 10240;
 
 /// Transport(s) a published port is forwarded on.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -595,6 +604,11 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             }),
             nano_cpus: spec.nano_cpus,
             memory: spec.memory_bytes,
+            ulimits: Some(vec![ResourcesUlimits {
+                name: Some("nofile".to_string()),
+                soft: Some(CONTAINER_NOFILE_LIMIT),
+                hard: Some(CONTAINER_NOFILE_LIMIT),
+            }]),
             ..Default::default()
         };
 

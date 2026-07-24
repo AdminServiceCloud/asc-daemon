@@ -34,6 +34,8 @@ healthcheck: { http: /health }
 
 > ℹ️ The manifest has **no `env:`, `ports:` or `volumes:` sections** (DMN-027/030): environment variables, published ports and volumes are all declared in `asc.settings.yaml` — settings with an `env:` key and the `ports` / `volumes` setting types (see below). One source of truth: what the user can configure is exactly what the app gets.
 
+> ℹ️ Every `type: docker` container gets a raised open-files limit (`ulimit nofile`, 10240 soft/hard) instead of the Engine's own default of 1024 — several game servers (7 Days to Die's EOS SDK is the documented case) hang or crash during startup on that default with no clearer symptom than the process going silent after its first log line.
+
 #### 🏗️ Local image build: `image-build` (DMN-050)
 
 A `type: docker` app can ship its own **Dockerfile** and have the Engine build the image locally instead of (or beside) pulling a prebuilt one:

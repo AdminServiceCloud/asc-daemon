@@ -26,15 +26,39 @@ fn parse_cpu_stat_usage_usec(raw: &str) -> Option<u64> {
         .ok()
 }
 
+/// Sum of the `rbytes=`/`wbytes=` fields across every device line of a
+/// cgroup v2 `io.stat` file (one line per `major:minor` device).
+fn parse_io_stat_bytes(raw: &str) -> (u64, u64) {
+    let (mut read, mut write) = (0u64, 0u64);
+    for field in raw.split_whitespace() {
+        if let Some(v) = field.strip_prefix("rbytes=") {
+            read += v.parse().unwrap_or(0);
+        } else if let Some(v) = field.strip_prefix("wbytes=") {
+            write += v.parse().unwrap_or(0);
+        }
+    }
+    (read, write)
+}
+
 /// Read the unit's resource counters from its cgroup; `None` when the unit
-/// is not running or the host has no unified cgroup hierarchy (v1).
+/// is not running or the host has no unified cgroup hierarchy (v1). Network
+/// I/O is not exposed by cgroup v2 for a unit sharing the host's network
+/// namespace, so it is always `None` here.
 fn cgroup_usage(unit: &str) -> Option<ResourceUsage> {
     let dir = cgroup_dir(unit);
     let cpu_stat = std::fs::read_to_string(format!("{dir}/cpu.stat")).ok()?;
     let memory = std::fs::read_to_string(format!("{dir}/memory.current")).ok()?;
+    let (disk_read_bytes, disk_write_bytes) = std::fs::read_to_string(format!("{dir}/io.stat"))
+        .ok()
+        .map(|raw| parse_io_stat_bytes(&raw))
+        .map_or((None, None), |(r, w)| (Some(r), Some(w)));
     Some(ResourceUsage {
         cpu_time_micros: parse_cpu_stat_usage_usec(&cpu_stat)?,
         memory_bytes: memory.trim().parse().ok()?,
+        disk_read_bytes,
+        disk_write_bytes,
+        net_rx_bytes: None,
+        net_tx_bytes: None,
     })
 }
 
@@ -125,5 +149,13 @@ mod tests {
         let raw = "usage_usec 123456\nuser_usec 100000\nsystem_usec 23456\n";
         assert_eq!(parse_cpu_stat_usage_usec(raw), Some(123456));
         assert_eq!(parse_cpu_stat_usage_usec("nr_periods 0\n"), None);
+    }
+
+    #[test]
+    fn io_stat_bytes_sum_across_devices() {
+        let raw = "8:0 rbytes=1000 wbytes=2000 rios=5 wios=6 dbytes=0 dios=0\n\
+                    8:16 rbytes=500 wbytes=250 rios=1 wios=1 dbytes=0 dios=0\n";
+        assert_eq!(parse_io_stat_bytes(raw), (1500, 2250));
+        assert_eq!(parse_io_stat_bytes(""), (0, 0));
     }
 }

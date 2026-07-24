@@ -243,10 +243,64 @@ pub fn remove(cfg: &DockerConfig, container: &str) -> Result<()> {
     })
 }
 
-/// One-shot resource counters of a container: cumulative CPU time in
-/// microseconds and resident memory in bytes. `None` when the container is
+/// One-shot resource counters of a container, straight off the Engine's
+/// stats endpoint.
+pub struct ContainerUsage {
+    /// Cumulative CPU time, microseconds.
+    pub cpu_time_micros: u64,
+    /// Resident memory, bytes.
+    pub memory_bytes: u64,
+    /// Bytes read from/written to block devices since the container started.
+    /// `None` on a cgroup v1 host, where the Engine omits this field.
+    pub disk_read_bytes: Option<u64>,
+    pub disk_write_bytes: Option<u64>,
+    /// Bytes received/sent on the container's network namespace since it
+    /// started, summed across all its interfaces. `None` when the container
+    /// uses `network_mode: none` (no interfaces to report).
+    pub net_rx_bytes: Option<u64>,
+    pub net_tx_bytes: Option<u64>,
+}
+
+/// Sum of `io_service_bytes_recursive` entries by op (read/write). Only
+/// `io_service_bytes_recursive` survives on a cgroup v2 host — every other
+/// `ContainerBlkioStats` field is cgroup v1-only and always `None` there.
+fn sum_blkio_bytes(
+    blkio: Option<bollard::models::ContainerBlkioStats>,
+) -> (Option<u64>, Option<u64>) {
+    let Some(entries) = blkio.and_then(|b| b.io_service_bytes_recursive) else {
+        return (None, None);
+    };
+    let (mut read, mut write) = (0u64, 0u64);
+    for entry in &entries {
+        let value = entry.value.unwrap_or(0);
+        match entry.op.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("read") => read += value,
+            Some("write") => write += value,
+            _ => {}
+        }
+    }
+    (Some(read), Some(write))
+}
+
+/// Sum of `rx_bytes`/`tx_bytes` across every network interface of the
+/// container's namespace.
+fn sum_network_bytes(
+    networks: Option<std::collections::HashMap<String, bollard::models::ContainerNetworkStats>>,
+) -> (Option<u64>, Option<u64>) {
+    let Some(networks) = networks else {
+        return (None, None);
+    };
+    let (mut rx, mut tx) = (0u64, 0u64);
+    for stats in networks.values() {
+        rx += stats.rx_bytes.unwrap_or(0);
+        tx += stats.tx_bytes.unwrap_or(0);
+    }
+    (Some(rx), Some(tx))
+}
+
+/// One-shot resource counters of a container. `None` when the container is
 /// missing (404) or the Engine reports no memory usage (not running).
-pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<(u64, u64)>> {
+pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<ContainerUsage>> {
     block_on(async {
         let docker = connect(cfg)?;
         let opts = StatsOptions {
@@ -256,11 +310,11 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<(u64, u
         let mut stream = docker.stats(container, Some(opts));
         match stream.next().await {
             Some(Ok(stats)) => {
-                let Some(memory) = stats.memory_stats.and_then(|m| m.usage) else {
+                let Some(memory_bytes) = stats.memory_stats.and_then(|m| m.usage) else {
                     return Ok(None);
                 };
                 // Engine reports CPU time in nanoseconds.
-                let Some(cpu_micros) = stats
+                let Some(cpu_time_micros) = stats
                     .cpu_stats
                     .and_then(|c| c.cpu_usage)
                     .and_then(|u| u.total_usage)
@@ -268,7 +322,16 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<(u64, u
                 else {
                     return Ok(None);
                 };
-                Ok(Some((cpu_micros, memory)))
+                let (disk_read_bytes, disk_write_bytes) = sum_blkio_bytes(stats.blkio_stats);
+                let (net_rx_bytes, net_tx_bytes) = sum_network_bytes(stats.networks);
+                Ok(Some(ContainerUsage {
+                    cpu_time_micros,
+                    memory_bytes,
+                    disk_read_bytes,
+                    disk_write_bytes,
+                    net_rx_bytes,
+                    net_tx_bytes,
+                }))
             }
             Some(Err(e)) if status_of(&e) == Some(404) => Ok(None),
             Some(Err(e)) => Err(friendly(cfg, e)),

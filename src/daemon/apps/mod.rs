@@ -122,6 +122,15 @@ pub struct AppStats {
     pub cpu_percent: Option<f64>,
     /// Resident memory, bytes. `None` when the app is stopped.
     pub memory_bytes: Option<u64>,
+    /// Bytes read from/written to block devices since the app started.
+    /// `None` when stopped or the runtime cannot report it.
+    pub disk_read_bytes: Option<u64>,
+    pub disk_write_bytes: Option<u64>,
+    /// Bytes received/sent on the network since the app started. Only
+    /// Docker apps have their own network namespace to measure — always
+    /// `None` for systemd/process apps, which share the host's.
+    pub net_rx_bytes: Option<u64>,
+    pub net_tx_bytes: Option<u64>,
     /// Everything under the app's directory, in bytes — the same figure
     /// `asc app disk` measures, computed here without the (comparatively
     /// expensive) image/volume breakdown so it stays cheap to refresh.
@@ -255,10 +264,18 @@ impl AppManager {
                 .map(|dir| disk::dir_size(&dir))
                 .unwrap_or(0);
             let quota_disk_bytes = app.meta.quota.as_ref().and_then(|q| q.disk_bytes);
+            let disk_read_bytes = second.as_ref().and_then(|u| u.disk_read_bytes);
+            let disk_write_bytes = second.as_ref().and_then(|u| u.disk_write_bytes);
+            let net_rx_bytes = second.as_ref().and_then(|u| u.net_rx_bytes);
+            let net_tx_bytes = second.as_ref().and_then(|u| u.net_tx_bytes);
             result.push(AppStats {
                 meta: app.meta,
                 cpu_percent: cpu,
                 memory_bytes: second.map(|u| u.memory_bytes),
+                disk_read_bytes,
+                disk_write_bytes,
+                net_rx_bytes,
+                net_tx_bytes,
                 disk_bytes,
                 quota_disk_bytes,
             });
@@ -463,10 +480,18 @@ mod tests {
         let a = ResourceUsage {
             cpu_time_micros: 1_000_000,
             memory_bytes: 0,
+            disk_read_bytes: None,
+            disk_write_bytes: None,
+            net_rx_bytes: None,
+            net_tx_bytes: None,
         };
         let b = ResourceUsage {
             cpu_time_micros: 1_250_000,
             memory_bytes: 0,
+            disk_read_bytes: None,
+            disk_write_bytes: None,
+            net_rx_bytes: None,
+            net_tx_bytes: None,
         };
         // 250ms of CPU over 500ms of wall clock = 50%.
         assert!((cpu_percent(&a, &b, 500_000) - 50.0).abs() < 1e-9);

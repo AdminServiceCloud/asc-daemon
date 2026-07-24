@@ -79,17 +79,44 @@ fn parse_proc_statm_rss_bytes(statm: &str, page_size: u64) -> Option<u64> {
     Some(pages * page_size)
 }
 
+/// `read_bytes`/`write_bytes` of `/proc/<pid>/io` — actual bytes fetched
+/// from/handed off to the storage layer, not `rchar`/`wchar` (which also
+/// count page-cache hits). Either may be missing if the kernel lacks
+/// `CONFIG_TASK_IO_ACCOUNTING`.
+fn parse_proc_io_bytes(raw: &str) -> (Option<u64>, Option<u64>) {
+    let mut read = None;
+    let mut write = None;
+    for line in raw.lines() {
+        if let Some(v) = line.strip_prefix("read_bytes:") {
+            read = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("write_bytes:") {
+            write = v.trim().parse().ok();
+        }
+    }
+    (read, write)
+}
+
 /// Resource counters of the main process. Children are not aggregated in the
-/// MVP (a supervised process app is a single process by design).
+/// MVP (a supervised process app is a single process by design). Network I/O
+/// is not exposed per-process on Linux without a dedicated network
+/// namespace, so it is always `None` here.
 fn usage_of_pid(pid: u32) -> Option<ResourceUsage> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let statm = fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
     // SAFETY: sysconf has no preconditions; both variables always exist on Linux.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    let (disk_read_bytes, disk_write_bytes) = fs::read_to_string(format!("/proc/{pid}/io"))
+        .ok()
+        .map(|raw| parse_proc_io_bytes(&raw))
+        .unwrap_or((None, None));
     Some(ResourceUsage {
         cpu_time_micros: parse_proc_stat_cpu_micros(&stat, ticks)?,
         memory_bytes: parse_proc_statm_rss_bytes(&statm, page)?,
+        disk_read_bytes,
+        disk_write_bytes,
+        net_rx_bytes: None,
+        net_tx_bytes: None,
     })
 }
 
@@ -197,5 +224,13 @@ mod tests {
             Some(640 * 4096)
         );
         assert_eq!(parse_proc_statm_rss_bytes("", 4096), None);
+    }
+
+    #[test]
+    fn proc_io_bytes_parses_read_and_write() {
+        let raw = "rchar: 9999\nwchar: 8888\nsyscr: 10\nsyscw: 11\n\
+                    read_bytes: 4096\nwrite_bytes: 8192\ncancelled_write_bytes: 0\n";
+        assert_eq!(parse_proc_io_bytes(raw), (Some(4096), Some(8192)));
+        assert_eq!(parse_proc_io_bytes(""), (None, None));
     }
 }

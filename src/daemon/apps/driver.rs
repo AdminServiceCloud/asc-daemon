@@ -29,6 +29,18 @@ pub struct ResourceUsage {
     pub cpu_time_micros: u64,
     /// Resident memory, bytes.
     pub memory_bytes: u64,
+    /// Bytes read from block devices since the app started. `None` when the
+    /// runtime cannot report it (e.g. cgroup v1 host).
+    pub disk_read_bytes: Option<u64>,
+    /// Bytes written to block devices since the app started. `None` when the
+    /// runtime cannot report it.
+    pub disk_write_bytes: Option<u64>,
+    /// Bytes received over the network since the app started. Only Docker
+    /// apps have their own network namespace to measure — `None` for
+    /// systemd/process apps, which share the host's.
+    pub net_rx_bytes: Option<u64>,
+    /// Bytes sent over the network since the app started; see `net_rx_bytes`.
+    pub net_tx_bytes: Option<u64>,
 }
 
 /// Lifecycle operations every runtime kind must support.

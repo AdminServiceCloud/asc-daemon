@@ -2686,6 +2686,17 @@ fn stats_cmd(sort: StatsSort, live: bool, config: &Config) -> anyhow::Result<()>
     }
 }
 
+/// "rx / tx" (or "read / write"), like `docker stats`'s NET I/O / BLOCK I/O
+/// columns — cumulative since the app started, not a rate. A dash when the
+/// runtime cannot report the pair at all (e.g. network I/O for a systemd or
+/// process app, which has no network namespace of its own).
+fn format_io_pair(a: Option<u64>, b: Option<u64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) => format!("{} / {}", monitor::human_bytes(a), monitor::human_bytes(b)),
+        _ => "-".to_string(),
+    }
+}
+
 /// One `asc stats` render: sorts (highest consumer first, stopped apps
 /// last) and prints, grouped by owner for root.
 fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bool) {
@@ -2705,8 +2716,8 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
         .max(2);
     let print_rows = |rows: &[&AppStats]| {
         println!(
-            "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  DISK",
-            "ID", "KIND", "CPU %", "MEM", "QUOTA"
+            "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<21}  DISK I/O",
+            "ID", "KIND", "CPU %", "MEM", "QUOTA", "DISK", "NET I/O"
         );
         for s in rows {
             let cpu = s
@@ -2722,13 +2733,15 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
                 None => "-".to_string(),
             };
             println!(
-                "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {}",
+                "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<21}  {}",
                 s.meta.id,
                 s.meta.runtime.kind(),
                 cpu,
                 mem,
                 quota,
                 monitor::human_bytes(s.disk_bytes),
+                format_io_pair(s.net_rx_bytes, s.net_tx_bytes),
+                format_io_pair(s.disk_read_bytes, s.disk_write_bytes),
             );
         }
     };

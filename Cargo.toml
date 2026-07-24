@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]

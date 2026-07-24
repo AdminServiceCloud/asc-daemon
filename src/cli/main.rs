@@ -2697,6 +2697,20 @@ fn format_io_pair(a: Option<u64>, b: Option<u64>) -> String {
     }
 }
 
+/// "rx/s / tx/s" (or "read/s / write/s") — current throughput, the delta of
+/// the same two samples the CPU% comes from. A dash under the same
+/// conditions as [`format_io_pair`].
+fn format_rate_pair(a: Option<f64>, b: Option<f64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) => format!(
+            "{}/s / {}/s",
+            monitor::human_bytes(a.round() as u64),
+            monitor::human_bytes(b.round() as u64)
+        ),
+        _ => "-".to_string(),
+    }
+}
+
 /// One `asc stats` render: sorts (highest consumer first, stopped apps
 /// last) and prints, grouped by owner for root.
 fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bool) {
@@ -2716,8 +2730,8 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
         .max(2);
     let print_rows = |rows: &[&AppStats]| {
         println!(
-            "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<21}  DISK I/O",
-            "ID", "KIND", "CPU %", "MEM", "QUOTA", "DISK", "NET I/O"
+            "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<24}  {:<24}  {:<21}  DISK I/O",
+            "ID", "KIND", "CPU %", "MEM", "QUOTA", "DISK", "NET/s", "DISK/s", "NET I/O"
         );
         for s in rows {
             let cpu = s
@@ -2733,13 +2747,15 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
                 None => "-".to_string(),
             };
             println!(
-                "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<21}  {}",
+                "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<24}  {:<24}  {:<21}  {}",
                 s.meta.id,
                 s.meta.runtime.kind(),
                 cpu,
                 mem,
                 quota,
                 monitor::human_bytes(s.disk_bytes),
+                format_rate_pair(s.net_rx_rate, s.net_tx_rate),
+                format_rate_pair(s.disk_read_rate, s.disk_write_rate),
                 format_io_pair(s.net_rx_bytes, s.net_tx_bytes),
                 format_io_pair(s.disk_read_bytes, s.disk_write_bytes),
             );

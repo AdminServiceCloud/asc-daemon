@@ -131,6 +131,13 @@ pub struct AppStats {
     /// `None` for systemd/process apps, which share the host's.
     pub net_rx_bytes: Option<u64>,
     pub net_tx_bytes: Option<u64>,
+    /// Current disk/network throughput, bytes/sec — the delta of the same
+    /// two samples the CPU% comes from. `None` under the same conditions as
+    /// the matching cumulative counter above.
+    pub disk_read_rate: Option<f64>,
+    pub disk_write_rate: Option<f64>,
+    pub net_rx_rate: Option<f64>,
+    pub net_tx_rate: Option<f64>,
     /// Everything under the app's directory, in bytes — the same figure
     /// `asc app disk` measures, computed here without the (comparatively
     /// expensive) image/volume breakdown so it stays cheap to refresh.
@@ -146,6 +153,18 @@ fn cpu_percent(first: &ResourceUsage, second: &ResourceUsage, elapsed_micros: u6
     }
     let delta = second.cpu_time_micros.saturating_sub(first.cpu_time_micros);
     delta as f64 / elapsed_micros as f64 * 100.0
+}
+
+/// Bytes/sec from two cumulative byte-counter readings over a wall-clock
+/// interval; `None` when either sample lacks the counter (the runtime
+/// cannot report it, same as the cumulative total it is derived from).
+fn byte_rate(first: Option<u64>, second: Option<u64>, elapsed_micros: u64) -> Option<f64> {
+    let (first, second) = (first?, second?);
+    if elapsed_micros == 0 {
+        return Some(0.0);
+    }
+    let delta = second.saturating_sub(first);
+    Some(delta as f64 / elapsed_micros as f64 * 1_000_000.0)
 }
 
 pub struct AppManager {
@@ -268,6 +287,26 @@ impl AppManager {
             let disk_write_bytes = second.as_ref().and_then(|u| u.disk_write_bytes);
             let net_rx_bytes = second.as_ref().and_then(|u| u.net_rx_bytes);
             let net_tx_bytes = second.as_ref().and_then(|u| u.net_tx_bytes);
+            let disk_read_rate = byte_rate(
+                first.as_ref().and_then(|u| u.disk_read_bytes),
+                disk_read_bytes,
+                elapsed_micros,
+            );
+            let disk_write_rate = byte_rate(
+                first.as_ref().and_then(|u| u.disk_write_bytes),
+                disk_write_bytes,
+                elapsed_micros,
+            );
+            let net_rx_rate = byte_rate(
+                first.as_ref().and_then(|u| u.net_rx_bytes),
+                net_rx_bytes,
+                elapsed_micros,
+            );
+            let net_tx_rate = byte_rate(
+                first.as_ref().and_then(|u| u.net_tx_bytes),
+                net_tx_bytes,
+                elapsed_micros,
+            );
             result.push(AppStats {
                 meta: app.meta,
                 cpu_percent: cpu,
@@ -276,6 +315,10 @@ impl AppManager {
                 disk_write_bytes,
                 net_rx_bytes,
                 net_tx_bytes,
+                disk_read_rate,
+                disk_write_rate,
+                net_rx_rate,
+                net_tx_rate,
                 disk_bytes,
                 quota_disk_bytes,
             });
@@ -498,6 +541,22 @@ mod tests {
         // Counter went backwards (restart) → 0, not a negative percentage.
         assert_eq!(cpu_percent(&b, &a, 500_000), 0.0);
         assert_eq!(cpu_percent(&a, &b, 0), 0.0);
+    }
+
+    #[test]
+    fn byte_rate_is_a_delta_over_wall_clock() {
+        // 1 MiB over 500ms = 2 MiB/s.
+        let rate = byte_rate(Some(1_000_000), Some(2_048_576), 500_000).unwrap();
+        assert!((rate - 2_097_152.0).abs() < 1e-6);
+        // Counter went backwards (restart) → 0, not negative.
+        assert_eq!(
+            byte_rate(Some(2_048_576), Some(1_000_000), 500_000),
+            Some(0.0)
+        );
+        assert_eq!(byte_rate(Some(0), Some(1000), 0), Some(0.0));
+        // Either sample missing the counter → the runtime cannot report it.
+        assert_eq!(byte_rate(None, Some(1000), 500_000), None);
+        assert_eq!(byte_rate(Some(1000), None, 500_000), None);
     }
 
     #[test]

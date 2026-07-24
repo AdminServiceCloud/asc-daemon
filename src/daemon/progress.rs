@@ -106,6 +106,91 @@ impl LayerBars {
     }
 }
 
+/// One spinner bar per BuildKit build step (`docker build`-style, DMN-050).
+/// The Engine's BuildKit backend reports build progress as plain-text
+/// trace lines of the form `#<step> [x/y] <description>` (the step's
+/// label, first line seen for that step number) followed by `#<step>
+/// <status>` sub-lines, terminated by `#<step> DONE <secs>s`, `#<step>
+/// CACHED`, or `#<step> ERROR: <message>` — this mirrors what `docker
+/// build` itself prints in non-interactive ("plain") progress mode. Lines
+/// that don't match this shape (blank separators between step groups, or a
+/// build that for some reason didn't go through BuildKit) are ignored.
+pub struct BuildBars {
+    multi: MultiProgress,
+    bars: HashMap<u32, ProgressBar>,
+}
+
+impl Default for BuildBars {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BuildBars {
+    pub fn new() -> Self {
+        Self {
+            multi: MultiProgress::new(),
+            bars: HashMap::new(),
+        }
+    }
+
+    fn style() -> ProgressStyle {
+        ProgressStyle::with_template("{spinner:.cyan} {prefix:.bold.dim} {msg}")
+            .expect("static template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
+    }
+
+    /// Feed one line of the Engine's build output. The first line seen for a
+    /// step number becomes that step's label (the bar's prefix); later lines
+    /// update the transient status message until a terminal one freezes it.
+    pub fn feed(&mut self, line: &str) {
+        let Some(rest) = line.strip_prefix('#') else {
+            return;
+        };
+        let Some((num, rest)) = rest.split_once(' ') else {
+            return;
+        };
+        let Ok(step) = num.parse::<u32>() else {
+            return;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return;
+        }
+
+        if let Some(pb) = self.bars.get(&step) {
+            if let Some(secs) = rest.strip_prefix("DONE ") {
+                pb.disable_steady_tick();
+                pb.finish_with_message(format!("done {secs}"));
+            } else if rest == "CACHED" {
+                pb.disable_steady_tick();
+                pb.finish_with_message("cached");
+            } else if let Some(msg) = rest.strip_prefix("ERROR: ") {
+                pb.disable_steady_tick();
+                pb.finish_with_message(format!("error: {msg}"));
+            } else {
+                pb.set_message(rest.to_string());
+            }
+        } else {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(Self::style());
+            pb.set_prefix(rest.to_string());
+            pb.enable_steady_tick(Duration::from_millis(100));
+            self.bars.insert(step, self.multi.add(pb));
+        }
+    }
+
+    /// Drop every bar once the build is done — the terminal ones (`DONE`,
+    /// `CACHED`) stay on screen as the summary, matching `docker build`.
+    pub fn finish(self) {
+        for pb in self.bars.values() {
+            if !pb.is_finished() {
+                pb.finish_and_clear();
+            }
+        }
+    }
+}
+
 /// One line per registry index file (`asc update`): a spinner while the
 /// fetch is in flight, frozen on its byte size or error once it lands. The
 /// registry is a handful of small JSON files fetched one `curl` process at a

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.3.3-blue)](../../version.txt)
+[![Version](https://img.shields.io/badge/version-0.3.4-blue)](../../version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 

@@ -54,6 +54,8 @@ runtime:
 
 > ⚠️ Сборка выполняется от демона (root). До появления пер-пользовательской политики контейнеров (DMN-043) сборка рассчитана на доверенные пакеты; базовый образ из `FROM` движок тянет анонимно (приватные базовые образы для локальной сборки — следующий инкремент).
 
+Сборка всегда идёт через бэкенд **BuildKit** движка, а не через старый билдер — синтаксис Dockerfile вроде `COPY --chmod`/`--chown` требует BuildKit, иначе старый билдер падает с ошибкой «the --chmod option requires BuildKit». В терминале каждый шаг сборки отображается отдельным прогресс-баром в стиле `docker build` (как и полосы по слоям при `docker pull`), независимо от уровня логирования.
+
 > 📐 JSON-схемы манифестов: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) и [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) в репозитории `registry`.
 
 ### Настройки приложения: asc.settings.yaml

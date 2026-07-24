@@ -54,6 +54,8 @@ runtime:
 
 > ⚠️ The build runs as the daemon (root). Until per-user container policy lands (DMN-043), building is intended for trusted packages; the base image referenced by `FROM` is pulled by the Engine anonymously (private base images for a local build are a later increment).
 
+The build always goes through the Engine's **BuildKit** backend, not the legacy builder — Dockerfile syntax such as `COPY --chmod`/`--chown` needs it, and the legacy builder fails with "the --chmod option requires BuildKit" otherwise. On a terminal, each build step is rendered as a `docker build`-style progress bar per step (`docker pull`-style, mirroring layer bars for a pull), regardless of the log level.
+
 > 📐 JSON schemas of the manifests: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) and [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) in the `registry` repository.
 
 ### Application settings: asc.settings.yaml

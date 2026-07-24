@@ -18,8 +18,9 @@ use bollard::models::{
     ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    AttachContainerOptions, BuildImageOptionsBuilder, CreateContainerOptions, CreateImageOptions,
-    LogsOptions, RemoveContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
+    AttachContainerOptions, BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
+    CreateImageOptions, LogsOptions, RemoveContainerOptions, StartContainerOptions, StatsOptions,
+    StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -487,8 +488,13 @@ pub struct BuildSpec<'a> {
 /// Build a Docker image from a Dockerfile shipped in the package (DMN-050).
 /// The build context directory is streamed to the Engine as an in-memory tar;
 /// the Engine builds `tag` and the daemon reuses it exactly like a pulled
-/// image. Build output is echoed on a terminal (the in-process root path) and
-/// logged at debug otherwise; a build error surfaces the Engine's own message.
+/// image. The build always runs through the Engine's BuildKit backend
+/// (`version=2`) rather than the legacy builder — the legacy builder lacks
+/// Dockerfile syntax such as `COPY --chmod`, which fails with "the --chmod
+/// option requires BuildKit" otherwise. Each build step is logged at debug
+/// level and, on a terminal, rendered as a `docker build`-style progress bar
+/// per step, regardless of the log level. A build error surfaces the
+/// Engine's own message.
 pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
     let tar = tar_context(spec.context_dir)?;
     block_on(async {
@@ -497,7 +503,10 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
             .dockerfile(spec.dockerfile)
             .t(spec.tag)
             // Remove intermediate containers on success, like `docker build`.
-            .rm(true);
+            .rm(true)
+            // Legacy builder doesn't understand `COPY --chmod`/`--chown`
+            // extensions some package Dockerfiles rely on (DMN-050).
+            .version(BuilderVersion::BuilderBuildKit);
         if !spec.args.is_empty() {
             let args: HashMap<String, String> = spec
                 .args
@@ -508,7 +517,7 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         }
         let body = bollard::body_full(bytes::Bytes::from(tar));
         let mut stream = docker.build_image(builder.build(), None, Some(body));
-        let echo = progress::interactive();
+        let mut bars = progress::interactive().then(progress::BuildBars::new);
         while let Some(step) = stream.next().await {
             let info = step.map_err(|e| friendly(cfg, e))?;
             if let Some(detail) = &info.error_detail {
@@ -521,12 +530,14 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
                 .map(str::trim_end)
                 .filter(|l| !l.is_empty())
             {
-                if echo {
-                    eprintln!("{line}");
-                } else {
-                    debug!(tag = spec.tag, "{line}");
+                debug!(tag = spec.tag, "{line}");
+                if let Some(bars) = &mut bars {
+                    bars.feed(line);
                 }
             }
+        }
+        if let Some(bars) = bars {
+            bars.finish();
         }
         Ok(())
     })

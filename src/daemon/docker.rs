@@ -489,12 +489,17 @@ pub struct BuildSpec<'a> {
 /// The build context directory is streamed to the Engine as an in-memory tar;
 /// the Engine builds `tag` and the daemon reuses it exactly like a pulled
 /// image. The build always runs through the Engine's BuildKit backend
-/// (`version=2`) rather than the legacy builder — the legacy builder lacks
-/// Dockerfile syntax such as `COPY --chmod`, which fails with "the --chmod
-/// option requires BuildKit" otherwise. Each build step is logged at debug
-/// level and, on a terminal, rendered as a `docker build`-style progress bar
-/// per step, regardless of the log level. A build error surfaces the
-/// Engine's own message.
+/// (`version=2`, over a bollard-managed session) rather than the legacy
+/// builder — the legacy builder lacks Dockerfile syntax such as `COPY
+/// --chmod`, which fails with "the --chmod option requires BuildKit"
+/// otherwise; the session is what lets `BuildInfo.aux` decode BuildKit's own
+/// progress frames instead of only the legacy builder's shape (without it,
+/// the Engine's BuildKit-compat translation sends some progress lines as an
+/// untyped protobuf blob there, and this crate aborts the whole build stream
+/// trying to decode one). Each build step is logged at debug level and, on a
+/// terminal, rendered as a `docker build`-style progress bar per step,
+/// regardless of the log level. A build error surfaces the Engine's own
+/// message.
 pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
     let tar = tar_context(spec.context_dir)?;
     block_on(async {
@@ -505,8 +510,11 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
             // Remove intermediate containers on success, like `docker build`.
             .rm(true)
             // Legacy builder doesn't understand `COPY --chmod`/`--chown`
-            // extensions some package Dockerfiles rely on (DMN-050).
-            .version(BuilderVersion::BuilderBuildKit);
+            // extensions some package Dockerfiles rely on (DMN-050). The
+            // session id just correlates this build with its side-channel
+            // callback (auth) — the tag is already unique per build.
+            .version(BuilderVersion::BuilderBuildKit)
+            .session(spec.tag);
         if !spec.args.is_empty() {
             let args: HashMap<String, String> = spec
                 .args
@@ -519,18 +527,7 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         let mut stream = docker.build_image(builder.build(), None, Some(body));
         let mut bars = progress::interactive().then(progress::BuildBars::new);
         while let Some(step) = stream.next().await {
-            let info = match step {
-                Ok(info) => info,
-                // The Engine's BuildKit-compat translation reports some
-                // progress lines (internal solver vertices/logs) through
-                // `aux` as an opaque base64-encoded protobuf blob rather
-                // than the classic `{"ID": "sha256:..."}` this crate
-                // otherwise expects there — harmless to the build, only to
-                // this crate's ability to decode that one line, so it's
-                // skipped rather than aborting the build over it.
-                Err(BollardError::JsonDataError { .. }) => continue,
-                Err(e) => return Err(friendly(cfg, e)),
-            };
+            let info = step.map_err(|e| friendly(cfg, e))?;
             if let Some(detail) = &info.error_detail {
                 let msg = detail.message.as_deref().unwrap_or("image build failed");
                 return Err(anyhow!("{}: {msg}", tf(Msg::ErrImageBuild, spec.tag)));

@@ -178,6 +178,7 @@ Reach out to the maintainers through any of these channels:
 - ❓ [GitHub Discussions](https://github.com/AdminServiceCloud/asc-daemon/discussions) — questions and ideas
 - 💬 [Discord](https://discord.gg/xzJfp3ePfV) — the official community server: chat, help, announcements
 - ☁️ [adminservice.cloud](https://adminservice.cloud) — the platform website and contact options
+- 📚 [docs.adminservice.cloud](https://docs.adminservice.cloud) — the public documentation site ([GitHub Pages mirror](https://adminservicecloud.github.io/asc-documentaion/))
 
 ## 🌟 Project assistance
 

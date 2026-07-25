@@ -166,6 +166,7 @@ Roadmap всего проекта ведётся в репозитории **asc
 - ❓ [GitHub Discussions](https://github.com/AdminServiceCloud/asc-daemon/discussions) — вопросы и идеи
 - 💬 [Discord](https://discord.gg/xzJfp3ePfV) — официальный сервер сообщества: общение, помощь, анонсы
 - ☁️ [adminservice.cloud](https://adminservice.cloud) — сайт платформы и контакты
+- 📚 [docs.adminservice.cloud](https://docs.adminservice.cloud) — сайт документации ([зеркало на GitHub Pages](https://adminservicecloud.github.io/asc-documentaion/))
 
 ## 🌟 Помощь проекту
 

@@ -78,11 +78,13 @@ pub fn connect(cfg: &DockerConfig) -> Result<Docker> {
 
 /// Map a Docker error to a user-facing one. An Engine response (any HTTP
 /// status) proves Docker is reachable — pass its own message through instead
-/// of blaming the socket. A host without the docker binary has Docker
+/// of blaming the socket. The same goes for an error the Engine reported
+/// *inside* a streamed response body (a failing build or pull): the socket
+/// was fine, the work wasn't. A host without the docker binary has Docker
 /// missing, not stopped — say that and how to install it instead of asking
 /// whether the daemon is running.
 fn friendly(cfg: &DockerConfig, err: BollardError) -> anyhow::Error {
-    if status_of(&err).is_some() {
+    if status_of(&err).is_some() || matches!(err, BollardError::DockerStreamError { .. }) {
         return anyhow!("{err}");
     }
     if !docker_binary_present() {
@@ -574,6 +576,7 @@ pub struct BuildSpec<'a> {
 /// message.
 pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
     let tar = tar_context(spec.context_dir)?;
+    let session = build_session_id();
     block_on(async {
         let docker = connect(cfg)?;
         let mut builder = BuildImageOptionsBuilder::new()
@@ -584,9 +587,9 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
             // Legacy builder doesn't understand `COPY --chmod`/`--chown`
             // extensions some package Dockerfiles rely on (DMN-050). The
             // session id just correlates this build with its side-channel
-            // callback (auth) — the tag is already unique per build.
+            // callback (auth), so any per-build id does.
             .version(BuilderVersion::BuilderBuildKit)
-            .session(spec.tag);
+            .session(&session);
         if !spec.args.is_empty() {
             let args: HashMap<String, String> = spec
                 .args
@@ -599,7 +602,17 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         let mut stream = docker.build_image(builder.build(), None, Some(body));
         let mut bars = progress::interactive().then(progress::BuildBars::new);
         while let Some(step) = stream.next().await {
-            let info = step.map_err(|e| friendly(cfg, e))?;
+            let info = match step {
+                Ok(info) => info,
+                // The Engine reporting a failure inside the build stream:
+                // a Dockerfile or BuildKit error, not a transport one, so it
+                // gets the build's own context rather than `friendly`'s
+                // connectivity wording.
+                Err(BollardError::DockerStreamError { error }) => {
+                    return Err(anyhow!("{}: {error}", tf(Msg::ErrImageBuild, spec.tag)));
+                }
+                Err(e) => return Err(friendly(cfg, e)),
+            };
             if let Some(detail) = &info.error_detail {
                 let msg = detail.message.as_deref().unwrap_or("image build failed");
                 return Err(anyhow!("{}: {msg}", tf(Msg::ErrImageBuild, spec.tag)));
@@ -621,6 +634,24 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// Id for a build's BuildKit session — opaque, unique per build, and with no
+/// colon in it.
+///
+/// The colon matters: BuildKit registers a session under the id bollard sends
+/// on the `/session` upgrade verbatim, but looks it up by everything *after*
+/// the first colon (the prefix is its own namespacing convention for solver
+/// vertices). An image tag as the id — `asc-local/app:latest` — therefore
+/// leaves every build waiting on a session named `latest` that never
+/// attaches, and BuildKit fails the first thing that needs the session (base
+/// image metadata, which goes through the session's auth provider) with "no
+/// active session for latest: context deadline exceeded".
+fn build_session_id() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("asc-build-{}-{}", std::process::id(), now.as_nanos())
 }
 
 /// Pack a build context directory into an uncompressed tar in memory. The
@@ -770,7 +801,37 @@ pub async fn attach(cfg: &DockerConfig, container: &str) -> Result<AttachContain
 
 #[cfg(test)]
 mod tests {
-    use super::image_ref;
+    use super::{BollardError, DockerConfig, build_session_id, friendly, image_ref};
+
+    /// A colon in the session id makes BuildKit look the session up under
+    /// whatever follows it — a lookup that never matches what bollard
+    /// registered, so the build hangs until its deadline ("no active session
+    /// for <suffix>").
+    #[test]
+    fn build_session_ids_are_unique_and_colon_free() {
+        let (first, second) = (build_session_id(), build_session_id());
+        assert!(!first.contains(':'), "colon in session id: {first}");
+        assert_ne!(first, second, "session id must differ per build");
+    }
+
+    #[test]
+    fn stream_errors_are_not_reported_as_unreachable() {
+        let cfg = DockerConfig {
+            socket: std::path::PathBuf::from("/var/run/docker.sock"),
+        };
+        let err = friendly(
+            &cfg,
+            BollardError::DockerStreamError {
+                error: String::from("failed to resolve source metadata"),
+            },
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to resolve source metadata"));
+        assert!(
+            !msg.contains("cannot reach Docker"),
+            "the Engine answered — this is not a connectivity failure, got: {msg}"
+        );
+    }
 
     #[test]
     fn image_refs_split_into_name_and_tag() {

@@ -56,7 +56,7 @@ runtime:
 
 > ⚠️ The build runs as the daemon (root). Until per-user container policy lands (DMN-043), building is intended for trusted packages; the base image referenced by `FROM` is pulled by the Engine anonymously (private base images for a local build are a later increment).
 
-The build always goes through the Engine's **BuildKit** backend, not the legacy builder — Dockerfile syntax such as `COPY --chmod`/`--chown` needs it, and the legacy builder fails with "the --chmod option requires BuildKit" otherwise. On a terminal, each build step is rendered as a `docker build`-style progress bar per step (`docker pull`-style, mirroring layer bars for a pull), regardless of the log level.
+The build always goes through the Engine's **BuildKit** backend, not the legacy builder — Dockerfile syntax such as `COPY --chmod`/`--chown` needs it, and the legacy builder fails with "the --chmod option requires BuildKit" otherwise. Progress comes from BuildKit's own trace (the Engine sends no `docker build`-style text lines over the API — rendering them is the client's job): on a terminal each build step gets a spinner bar, numbered in start order and frozen on `cached` / `done <secs>` / `error: …`, with byte counts underneath while a layer is being pulled, regardless of the log level. The same steps, their sub-statuses and the steps' own output go to the debug log (`asc config debug`), which is what a non-interactive caller — the daemon, a script — sees instead.
 
 > 📐 JSON schemas of the manifests: [asc.schema.json](../../../registry/schema/asc.schema.json), [asc.stack.schema.json](../../../registry/schema/asc.stack.schema.json) and [asc.settings.schema.json](../../../registry/schema/asc.settings.schema.json) in the `registry` repository.
 

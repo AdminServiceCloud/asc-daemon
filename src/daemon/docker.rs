@@ -14,8 +14,9 @@ use bollard::Docker;
 use bollard::auth::DockerCredentials;
 use bollard::container::AttachContainerResults;
 use bollard::errors::Error as BollardError;
+use bollard::moby::buildkit::v1::{StatusResponse, Vertex};
 use bollard::models::{
-    ContainerCreateBody, HostConfig, PortBinding, ResourcesUlimits, RestartPolicy,
+    BuildInfoAux, ContainerCreateBody, HostConfig, PortBinding, ResourcesUlimits, RestartPolicy,
     RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
@@ -570,10 +571,11 @@ pub struct BuildSpec<'a> {
 /// progress frames instead of only the legacy builder's shape (without it,
 /// the Engine's BuildKit-compat translation sends some progress lines as an
 /// untyped protobuf blob there, and this crate aborts the whole build stream
-/// trying to decode one). Each build step is logged at debug level and, on a
-/// terminal, rendered as a `docker build`-style progress bar per step,
-/// regardless of the log level. A build error surfaces the Engine's own
-/// message.
+/// trying to decode one). Progress comes from that trace, not from the
+/// `stream` text lines the legacy builder used to emit: each step is logged
+/// at debug level and, on a terminal, rendered as a `docker build`-style
+/// progress bar per step, regardless of the log level. A build error
+/// surfaces the Engine's own message.
 pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
     let tar = tar_context(spec.context_dir)?;
     let session = build_session_id();
@@ -617,6 +619,11 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
                 let msg = detail.message.as_deref().unwrap_or("image build failed");
                 return Err(anyhow!("{}: {msg}", tf(Msg::ErrImageBuild, spec.tag)));
             }
+            if let Some(BuildInfoAux::BuildKit(trace)) = &info.aux {
+                build_trace(spec.tag, trace, bars.as_mut());
+            }
+            // The legacy builder's text output. BuildKit sends none of it, but
+            // it costs nothing to keep logging whatever does arrive.
             if let Some(line) = info
                 .stream
                 .as_deref()
@@ -624,9 +631,6 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
                 .filter(|l| !l.is_empty())
             {
                 debug!(tag = spec.tag, "{line}");
-                if let Some(bars) = &mut bars {
-                    bars.feed(line);
-                }
             }
         }
         if let Some(bars) = bars {
@@ -634,6 +638,67 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// Render one frame of BuildKit's build trace: the vertices (Dockerfile
+/// steps) that changed state, the byte progress reported inside them, and
+/// the command output they produced. Everything is logged at debug level —
+/// the only build progress a non-terminal caller (the daemon, a script) can
+/// get — and, on a terminal, mirrored into the step bars.
+fn build_trace(tag: &str, trace: &StatusResponse, mut bars: Option<&mut progress::BuildBars>) {
+    for vertex in &trace.vertexes {
+        // A vertex is announced before it runs; docker shows nothing for it
+        // until it starts, and neither do we.
+        let Some(state) = vertex_state(vertex) else {
+            continue;
+        };
+        debug!(tag, step = vertex.name, "{}", state.label());
+        if let Some(bars) = bars.as_mut() {
+            bars.step(&vertex.digest, &vertex.name, state);
+        }
+    }
+    for status in &trace.statuses {
+        let bytes = (status.total > 0).then_some((status.current, status.total));
+        // `name` is the action ("sha256:… extracting"), `id` the layer.
+        let label = if status.name.is_empty() {
+            status.id.as_str()
+        } else {
+            status.name.as_str()
+        };
+        debug!(tag, layer = status.id, "{label}");
+        if let Some(bars) = bars.as_mut() {
+            bars.step_status(&status.vertex, label, bytes);
+        }
+    }
+    // A step's own output (compiler messages, package manager logs) — the
+    // detail behind a failing build, so it goes to the log verbatim.
+    for log in &trace.logs {
+        for line in String::from_utf8_lossy(&log.msg).lines() {
+            if !line.trim().is_empty() {
+                debug!(tag, "{line}");
+            }
+        }
+    }
+}
+
+/// What a vertex is doing, or `None` while it has not started yet. Cached
+/// steps never "start" — BuildKit marks them done in the same frame.
+fn vertex_state(vertex: &Vertex) -> Option<progress::StepState> {
+    if !vertex.error.is_empty() {
+        return Some(progress::StepState::Failed(vertex.error.clone()));
+    }
+    if vertex.cached {
+        return Some(progress::StepState::Cached);
+    }
+    match (&vertex.started, &vertex.completed) {
+        (Some(started), Some(completed)) => {
+            let secs = (completed.seconds - started.seconds) as f64
+                + f64::from(completed.nanos - started.nanos) / 1e9;
+            Some(progress::StepState::Done(secs.max(0.0)))
+        }
+        (Some(_), None) => Some(progress::StepState::Running),
+        _ => None,
+    }
 }
 
 /// Id for a build's BuildKit session — opaque, unique per build, and with no
@@ -801,7 +866,58 @@ pub async fn attach(cfg: &DockerConfig, container: &str) -> Result<AttachContain
 
 #[cfg(test)]
 mod tests {
-    use super::{BollardError, DockerConfig, build_session_id, friendly, image_ref};
+    use super::{BollardError, DockerConfig, Vertex, build_session_id, friendly, image_ref};
+    use crate::daemon::progress::StepState;
+
+    /// BuildKit announces a step before it runs and reports its outcome on
+    /// the vertex itself — the whole of a build's visible progress.
+    #[test]
+    fn vertex_states_follow_buildkit_trace() {
+        let pending = Vertex {
+            name: "[2/7] RUN pnpm install".into(),
+            ..Default::default()
+        };
+        assert!(
+            super::vertex_state(&pending).is_none(),
+            "an announced but unstarted step shows nothing"
+        );
+
+        let mut running = pending.clone();
+        running.started = Some(Default::default());
+        assert!(matches!(
+            super::vertex_state(&running),
+            Some(StepState::Running)
+        ));
+
+        let mut done = running.clone();
+        done.completed = Some(Default::default());
+        if let Some(ts) = &mut done.completed {
+            ts.seconds = 3;
+            ts.nanos = 500_000_000;
+        }
+        let Some(StepState::Done(secs)) = super::vertex_state(&done) else {
+            panic!("a completed step reports its duration");
+        };
+        assert!((secs - 3.5).abs() < f64::EPSILON, "got {secs}");
+
+        // A cached step never starts: BuildKit marks it in one frame.
+        let cached = Vertex {
+            cached: true,
+            ..pending.clone()
+        };
+        assert!(matches!(
+            super::vertex_state(&cached),
+            Some(StepState::Cached)
+        ));
+
+        let failed = Vertex {
+            error: "exit code 1".into(),
+            ..pending
+        };
+        assert!(
+            matches!(super::vertex_state(&failed), Some(StepState::Failed(e)) if e == "exit code 1")
+        );
+    }
 
     /// A colon in the session id makes BuildKit look the session up under
     /// whatever follows it — a lookup that never matches what bollard

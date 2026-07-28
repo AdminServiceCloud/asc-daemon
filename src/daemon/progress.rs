@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
 /// Whether progress bars should render. Log output goes to stderr
 /// (`logging::init`), so bars share that stream and this check.
@@ -106,18 +106,47 @@ impl LayerBars {
     }
 }
 
+/// What a build step is doing, as BuildKit's trace reports it.
+pub enum StepState {
+    /// Started, still working — the bar keeps spinning.
+    Running,
+    /// Served from the build cache; nothing was executed.
+    Cached,
+    /// Finished, with the seconds it took.
+    Done(f64),
+    /// Finished with an error message from the Engine.
+    Failed(String),
+}
+
+impl StepState {
+    /// How the step reads once it is over — the text a finished bar freezes
+    /// on, and the same wording in the debug log.
+    pub fn label(&self) -> String {
+        match self {
+            StepState::Running => "running".to_string(),
+            StepState::Cached => "cached".to_string(),
+            StepState::Done(secs) => format!("done {secs:.1}s"),
+            StepState::Failed(err) => format!("error: {err}"),
+        }
+    }
+}
+
 /// One spinner bar per BuildKit build step (`docker build`-style, DMN-050).
-/// The Engine's BuildKit backend reports build progress as plain-text
-/// trace lines of the form `#<step> [x/y] <description>` (the step's
-/// label, first line seen for that step number) followed by `#<step>
-/// <status>` sub-lines, terminated by `#<step> DONE <secs>s`, `#<step>
-/// CACHED`, or `#<step> ERROR: <message>` — this mirrors what `docker
-/// build` itself prints in non-interactive ("plain") progress mode. Lines
-/// that don't match this shape (blank separators between step groups, or a
-/// build that for some reason didn't go through BuildKit) are ignored.
+///
+/// BuildKit does not print `docker build`'s familiar `#3 [2/7] RUN …` text:
+/// that rendering is the *client's* job, and over the Engine's `/build`
+/// endpoint the daemon only forwards buildkit's own trace — a stream of
+/// vertices (one per Dockerfile step), their statuses (a layer pull's byte
+/// counts, say) and their logs. This type is that renderer: one bar per
+/// vertex, numbered in the order the steps start, spinning while the vertex
+/// runs and frozen on `cached` / `done <secs>` / `error: …` once it is
+/// finished. Bars are keyed by the vertex digest, which is what every trace
+/// message references.
 pub struct BuildBars {
     multi: MultiProgress,
-    bars: HashMap<u32, ProgressBar>,
+    bars: HashMap<String, ProgressBar>,
+    /// Numbers handed out so far — a step's `#N`, in start order.
+    steps: usize,
 }
 
 impl Default for BuildBars {
@@ -131,6 +160,7 @@ impl BuildBars {
         Self {
             multi: MultiProgress::new(),
             bars: HashMap::new(),
+            steps: 0,
         }
     }
 
@@ -140,44 +170,56 @@ impl BuildBars {
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
     }
 
-    /// Feed one line of the Engine's build output. The first line seen for a
-    /// step number becomes that step's label (the bar's prefix); later lines
-    /// update the transient status message until a terminal one freezes it.
-    pub fn feed(&mut self, line: &str) {
-        let Some(rest) = line.strip_prefix('#') else {
+    /// Report a build step (BuildKit vertex): `key` is its digest, `name` the
+    /// Dockerfile line it stands for. The first sighting creates the bar and
+    /// takes the next step number; `state` then freezes it once the step is
+    /// over.
+    pub fn step(&mut self, key: &str, name: &str, state: StepState) {
+        let label = state.label();
+        let pb = self.bar(key, name);
+        match state {
+            // Still working: the spinner and whatever sub-status it carries
+            // say more than the word "running" would.
+            StepState::Running => {}
+            _ => {
+                pb.disable_steady_tick();
+                pb.finish_with_message(label);
+            }
+        }
+    }
+
+    /// Sub-progress *inside* a step — a layer being pulled or extracted, with
+    /// `(current, total)` bytes when BuildKit reports them. Unknown steps are
+    /// ignored: a status can only be rendered under a bar that already has
+    /// the vertex's human-readable name.
+    pub fn step_status(&mut self, key: &str, label: &str, bytes: Option<(i64, i64)>) {
+        let Some(pb) = self.bars.get(key) else {
             return;
         };
-        let Some((num, rest)) = rest.split_once(' ') else {
-            return;
-        };
-        let Ok(step) = num.parse::<u32>() else {
-            return;
-        };
-        let rest = rest.trim();
-        if rest.is_empty() {
+        if pb.is_finished() {
             return;
         }
+        match bytes {
+            Some((current, total)) if total > 0 => pb.set_message(format!(
+                "{label} {}/{}",
+                HumanBytes(current.max(0) as u64),
+                HumanBytes(total as u64)
+            )),
+            _ => pb.set_message(label.to_string()),
+        }
+    }
 
-        if let Some(pb) = self.bars.get(&step) {
-            if let Some(secs) = rest.strip_prefix("DONE ") {
-                pb.disable_steady_tick();
-                pb.finish_with_message(format!("done {secs}"));
-            } else if rest == "CACHED" {
-                pb.disable_steady_tick();
-                pb.finish_with_message("cached");
-            } else if let Some(msg) = rest.strip_prefix("ERROR: ") {
-                pb.disable_steady_tick();
-                pb.finish_with_message(format!("error: {msg}"));
-            } else {
-                pb.set_message(rest.to_string());
-            }
-        } else {
+    /// The bar for one vertex, created (and numbered) on first sight.
+    fn bar(&mut self, key: &str, name: &str) -> &ProgressBar {
+        if !self.bars.contains_key(key) {
+            self.steps += 1;
             let pb = ProgressBar::new_spinner();
             pb.set_style(Self::style());
-            pb.set_prefix(rest.to_string());
+            pb.set_prefix(format!("#{} {name}", self.steps));
             pb.enable_steady_tick(Duration::from_millis(100));
-            self.bars.insert(step, self.multi.add(pb));
+            self.bars.insert(key.to_string(), self.multi.add(pb));
         }
+        self.bars.get(key).expect("just inserted")
     }
 
     /// Drop every bar once the build is done — the terminal ones (`DONE`,

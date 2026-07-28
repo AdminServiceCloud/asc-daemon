@@ -9,7 +9,10 @@
 //! token can be scoped to exactly the app that needs it.
 //!
 //! The file is JSON, 0600, one per scope: `/etc/asc/auth.json` (root) and
-//! `~/.asc/auth.json` (user, alongside the rest of the DMN-041 tree). The
+//! `~/.asc/auth.json` (user, alongside the rest of the DMN-041 tree). A
+//! regular user therefore cannot open the system store at all — that is the
+//! point of 0600 — so it reads as "no credentials in that scope" rather than
+//! as an error, and unprivileged commands keep working on `~/.asc`. The
 //! pre-DMN-045 TOML files (`/etc/asc/git-auth.toml`,
 //! `~/.config/asc/git-auth.toml`) are still read when no JSON store exists
 //! and are migrated on the next write, so configured auth keeps working.
@@ -29,6 +32,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use super::sources::Scope;
 use crate::daemon::i18n::{Msg, tf};
@@ -195,18 +199,21 @@ impl GitAuth {
         legacy_user: Option<&Path>,
         scope: Scope,
     ) -> Result<Self> {
-        let read_with_fallback = |json: &Path, legacy: Option<&Path>| -> Result<Vec<Credential>> {
-            if let Some(creds) = read_auth(json)? {
-                return Ok(creds);
-            }
-            match legacy {
-                Some(path) => Ok(read_legacy_auth(path)?.unwrap_or_default()),
-                None => Ok(Vec::new()),
-            }
-        };
-        let system = read_with_fallback(system_path, legacy_system)?;
+        let read_with_fallback =
+            |json: &Path, legacy: Option<&Path>, owner: Scope| -> Result<Vec<Credential>> {
+                if let Some(creds) = read_auth(json, owner)? {
+                    return Ok(creds);
+                }
+                match legacy {
+                    // The legacy reader already treats any unreadable file as
+                    // absent, permissions included.
+                    Some(path) => Ok(read_legacy_auth(path)?.unwrap_or_default()),
+                    None => Ok(Vec::new()),
+                }
+            };
+        let system = read_with_fallback(system_path, legacy_system, Scope::System)?;
         let user = match user_path {
-            Some(path) => read_with_fallback(path, legacy_user)?,
+            Some(path) => read_with_fallback(path, legacy_user, Scope::User)?,
             None => Vec::new(),
         };
         Ok(Self {
@@ -350,7 +357,13 @@ impl GitAuth {
     }
 }
 
-fn read_auth(path: &Path) -> Result<Option<Vec<Credential>>> {
+/// Read a store. `owner` is the scope the file belongs to, not the scope
+/// being edited: the system store is 0600 under root-owned `/etc/asc`, so a
+/// regular user cannot open it *by design* and must read "no credentials in
+/// that scope" out of the refusal. Failing instead would break every
+/// unprivileged command that merely consults credentials — `asc auth add`,
+/// which writes `~/.asc/auth.json`, included.
+fn read_auth(path: &Path, owner: Scope) -> Result<Option<Vec<Credential>>> {
     match fs::read_to_string(path) {
         Ok(raw) => {
             let file: AuthFile = serde_json::from_str(&raw)
@@ -358,10 +371,22 @@ fn read_auth(path: &Path) -> Result<Option<Vec<Credential>>> {
             Ok(Some(file.credentials))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if is_out_of_reach(&e, owner) => {
+            debug!(path = %path.display(), "system credentials not readable, skipping");
+            Ok(None)
+        }
         Err(e) => {
             Err(e).with_context(|| format!("cannot read credentials file {}", path.display()))
         }
     }
+}
+
+/// Whether the error is the system store legitimately refusing a
+/// non-privileged reader — either the file itself (0600) or its directory
+/// (`/etc/asc`) denying the open. The user's own store gets no such pass: it
+/// is theirs, and a permission error on it is a real problem worth reporting.
+fn is_out_of_reach(err: &std::io::Error, owner: Scope) -> bool {
+    owner == Scope::System && err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 /// Read a pre-DMN-045 TOML store. Entries have no `type` and are therefore
@@ -802,6 +827,63 @@ mod tests {
         let hit = auth.lookup("https://github.com/org/repo").unwrap();
         assert!(matches!(&hit.method, Method::Token { token } if token == "new"));
         assert_eq!(auth.list().len(), 1, "legacy entries must not be merged in");
+    }
+
+    /// `/etc/asc/auth.json` is 0600 root-owned: a regular user running
+    /// `asc auth add <host> --ssh-key` (which edits `~/.asc/auth.json`) must
+    /// not be stopped by the system store it is not allowed to read.
+    #[test]
+    fn unreadable_system_store_does_not_break_the_user_scope() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid() has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads every file — the case cannot arise.
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system-auth.json");
+        let user = dir.path().join("auth.json");
+        fs::write(
+            &system,
+            r#"{"credentials":[{"type":"repo","pattern":"github.com","token":"root-only"}]}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&system, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::write(
+            &user,
+            r#"{"credentials":[{"type":"repo","pattern":"gitlab.com","token":"mine"}]}"#,
+        )
+        .unwrap();
+
+        let auth = GitAuth::load_paths(&system, None, Some(&user), None, Scope::User).unwrap();
+        assert_eq!(auth.list().len(), 1, "only the user's own entry is visible");
+        assert!(auth.lookup("git@gitlab.com:a/b.git").is_some());
+        assert!(auth.lookup("https://github.com/org/repo").is_none());
+    }
+
+    /// The user's own store is a different matter: it is theirs, so a
+    /// permission error on it is reported instead of silently dropping the
+    /// credentials it holds.
+    #[test]
+    fn unreadable_user_store_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid() has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("auth.json");
+        fs::write(&user, "{}").unwrap();
+        fs::set_permissions(&user, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = GitAuth::load_paths(
+            &dir.path().join("no-system.json"),
+            None,
+            Some(&user),
+            None,
+            Scope::User,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("cannot read credentials file"));
     }
 
     #[test]

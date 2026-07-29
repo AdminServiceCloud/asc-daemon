@@ -1469,7 +1469,22 @@ fn offer_auth_setup(err: &anyhow::Error) -> bool {
     }
 }
 
+/// `asc upgrade <spec>` / `asc app upgrade <spec>` (DMN-003): through the
+/// daemon when its socket is there (DMN-053) — it owns the app tree and the
+/// git credentials, so an app installed into the system tree is upgradable
+/// without sudo. Auth setup is not offered on that path, like the daemon
+/// install path: the daemon clones with its own credentials.
 fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
+    if let Some(daemon) = daemon_backend(config)? {
+        let (reference, version) = match spec.split_once('@') {
+            Some((reference, version)) => (reference, Some(version)),
+            None => (spec, None),
+        };
+        let outcome = with_spinner(|| daemon.upgrade(reference, version))?;
+        print_upgrade_outcome(&outcome);
+        return Ok(());
+    }
+
     let ctx = UserContext::current();
     let outcome = match pkg::upgrade(config, &ctx, spec) {
         Ok(outcome) => outcome,
@@ -1477,18 +1492,22 @@ fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
         Err(err) if offer_auth_setup(&err) => pkg::upgrade(config, &ctx, spec)?,
         Err(err) => return Err(err),
     };
+    print_upgrade_outcome(&outcome);
+    Ok(())
+}
+
+fn print_upgrade_outcome(outcome: &pkg::UpgradeOutcome) {
     match outcome {
         pkg::UpgradeOutcome::Upgraded { id, from, to } => {
             println!(
                 "{}",
-                tf3(Msg::PkgUpgraded, &id, from.as_deref().unwrap_or("-"), to)
+                tf3(Msg::PkgUpgraded, id, from.as_deref().unwrap_or("-"), to)
             );
         }
         pkg::UpgradeOutcome::UpToDate { id, version } => {
-            println!("{}", tf2(Msg::PkgUpToDate, &id, version));
+            println!("{}", tf2(Msg::PkgUpToDate, id, version));
         }
     }
-    Ok(())
 }
 
 fn search_cmd(query: &str, config: &Config) -> anyhow::Result<()> {
@@ -1857,11 +1876,27 @@ fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
     parts.join(", ")
 }
 
-/// `asc app disk <id>` (DMN-035): a quota bar when a disk quota is set, then
-/// an itemized breakdown. Column labels are technical identifiers and stay
-/// English, like the rest of `asc app info`.
+/// `asc disk [<app>]` / `asc app disk [<app>]` (DMN-035): through the daemon
+/// when its socket is there (DMN-053) — the app tree belongs to the daemon,
+/// so a user who cannot read it still gets the report — in-process otherwise.
 fn disk_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::disk;
+
+    if let Some(daemon) = daemon_backend(config)? {
+        return match reference {
+            Some(reference) => {
+                let (app, usage) = daemon.app_disk(reference)?;
+                print_app_disk(&app.id, &app.name, &usage);
+                Ok(())
+            }
+            None => {
+                let summary = daemon.disk_summary()?;
+                let rows: Vec<DiskRow> = summary.apps.iter().map(remote_disk_row).collect();
+                print_disk_summary(&rows, summary.fs_total, UserContext::current().is_root);
+                Ok(())
+            }
+        };
+    }
 
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
@@ -1870,8 +1905,15 @@ fn disk_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     };
     let meta = manager.get_authorized(&ctx, reference)?;
     let usage = disk::usage(config, manager.store(), &meta)?;
+    print_app_disk(&meta.id, meta.display_name(), &usage);
+    Ok(())
+}
 
-    println!("{}  {}", meta.id, meta.display_name());
+/// One app's disk breakdown, identical for both backends: a quota bar when a
+/// disk quota is set, then an itemized breakdown. Column labels are technical
+/// identifiers and stay English, like the rest of `asc app info`.
+fn print_app_disk(id: &str, name: &str, usage: &asc_daemon::daemon::apps::disk::DiskUsage) {
+    println!("{id}  {name}");
     match usage.quota_bytes {
         Some(quota) => {
             println!("  {}", usage_string(usage.app_dir_bytes, quota));
@@ -1909,34 +1951,62 @@ fn disk_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
             println!("    {} -> {}{note}  {size}", volume.entry, volume.path);
         }
     }
-    Ok(())
 }
 
-/// `asc disk` with no id: total space occupied by every visible app (root
-/// sees all users' apps, like [`print_app_list`]) as a bar against the apps
-/// store's filesystem capacity, then each app's own usage, largest first.
-/// Sizes are the cheap directory-walk figure ([`disk::dir_size`], the same
-/// one `asc stats` uses) — no image/volume breakdown, no Docker queries.
+/// `asc disk` with no id, in-process: the same report the daemon's
+/// `disk_summary` produces — every visible app's footprint (root sees all
+/// users' apps, like [`print_app_list`]), largest first. Sizes are the cheap
+/// directory-walk figure ([`disk::dir_size`], the same one `asc stats` uses)
+/// — no image/volume breakdown, no Docker queries.
 fn disk_summary_cmd(manager: &AppManager, ctx: &UserContext) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::disk;
     use asc_daemon::daemon::monitor::system;
 
-    let mut rows: Vec<(AppStatus, u64)> = manager
+    let mut rows: Vec<DiskRow> = manager
         .list(ctx)?
         .into_iter()
-        .map(|app| {
-            let bytes = manager
+        .map(|app| DiskRow {
+            bytes: manager
                 .store()
                 .app_dir(&app.meta.id)
                 .map(|dir| disk::dir_size(&dir))
-                .unwrap_or(0);
-            (app, bytes)
+                .unwrap_or(0),
+            name: app.meta.display_name().to_string(),
+            id: app.meta.id,
+            owner: app.meta.owner.name,
         })
         .collect();
-    rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+    print_disk_summary(
+        &rows,
+        system::filesystem_total(manager.store().root()),
+        ctx.is_root,
+    );
+    Ok(())
+}
 
-    let apps_bytes: u64 = rows.iter().map(|(_, bytes)| bytes).sum();
-    match system::filesystem_total(manager.store().root()) {
+/// One app's line in the disk report, from either backend.
+struct DiskRow {
+    id: String,
+    name: String,
+    owner: String,
+    bytes: u64,
+}
+
+fn remote_disk_row(row: &client::RemoteDiskRow) -> DiskRow {
+    DiskRow {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        owner: row.owner.clone(),
+        bytes: row.bytes,
+    }
+}
+
+/// Total space occupied by the apps as a bar against the app store's
+/// filesystem capacity, then each app's own usage, largest first.
+fn print_disk_summary(rows: &[DiskRow], fs_total: Option<u64>, show_user: bool) {
+    let apps_bytes: u64 = rows.iter().map(|row| row.bytes).sum();
+    match fs_total {
         Some(fs_total) => {
             println!("Apps: {}", usage_string(apps_bytes, fs_total));
             println!("{}", static_bar(apps_bytes, fs_total, 30));
@@ -1947,24 +2017,23 @@ fn disk_summary_cmd(manager: &AppManager, ctx: &UserContext) -> anyhow::Result<(
 
     if rows.is_empty() {
         println!("{}", t(Msg::AppListEmpty));
-        return Ok(());
+        return;
     }
     let id_w = rows
         .iter()
-        .map(|(app, _)| app.meta.id.len())
+        .map(|row| row.id.len())
         .max()
         .unwrap_or(2)
         .max(2);
     let name_w = rows
         .iter()
-        .map(|(app, _)| app.meta.display_name().chars().count())
+        .map(|row| row.name.chars().count())
         .max()
         .unwrap_or(4)
         .max(4);
-    let show_user = ctx.is_root;
     let user_w = rows
         .iter()
-        .map(|(app, _)| app.meta.owner.name.chars().count())
+        .map(|row| row.owner.chars().count())
         .max()
         .unwrap_or(4)
         .max(4);
@@ -1976,32 +2045,52 @@ fn disk_summary_cmd(manager: &AppManager, ctx: &UserContext) -> anyhow::Result<(
     } else {
         println!("{:<id_w$}  {:<name_w$}  SIZE", "ID", "NAME");
     }
-    for (app, bytes) in &rows {
+    for row in rows {
         if show_user {
             println!(
                 "{:<id_w$}  {:<name_w$}  {:<user_w$}  {}",
-                app.meta.id,
-                app.meta.display_name(),
-                app.meta.owner.name,
-                monitor::human_bytes(*bytes),
+                row.id,
+                row.name,
+                row.owner,
+                monitor::human_bytes(row.bytes),
             );
         } else {
             println!(
                 "{:<id_w$}  {:<name_w$}  {}",
-                app.meta.id,
-                app.meta.display_name(),
-                monitor::human_bytes(*bytes),
+                row.id,
+                row.name,
+                monitor::human_bytes(row.bytes),
             );
         }
     }
-    Ok(())
 }
 
 /// `asc ports [<app>]` / `asc app ports [<app>]` (DMN-049): with an id, the
 /// app's published ports one per line; without one, a table of every visible
 /// app and its ports (root sees all users' apps, like [`print_app_list`]).
+/// Through the daemon when its socket is there (DMN-053), in-process
+/// otherwise.
 fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::ports;
+
+    if let Some(daemon) = daemon_backend(config)? {
+        return match reference {
+            Some(reference) => {
+                let (app, ports) = daemon.app_ports(reference)?;
+                print_app_ports(&app.id, &app.name, &ports);
+                Ok(())
+            }
+            None => {
+                let rows: Vec<PortsRow> = daemon
+                    .ports_summary()?
+                    .iter()
+                    .map(remote_ports_row)
+                    .collect();
+                print_ports_summary(&rows, UserContext::current().is_root);
+                Ok(())
+            }
+        };
+    }
 
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
@@ -2010,22 +2099,26 @@ fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     };
     let meta = manager.get_authorized(&ctx, reference)?;
     let list = ports::published(config, manager.store(), &meta)?;
-
-    println!("{}  {}", meta.id, meta.display_name());
-    if list.is_empty() {
-        println!("  {}", t(Msg::PortsNone));
-    } else {
-        for port in &list {
-            println!("  {}", port_label(*port));
-        }
-    }
+    print_app_ports(&meta.id, meta.display_name(), &list);
     Ok(())
 }
 
-/// `asc ports` with no id: every visible app and the host==container ports it
-/// publishes, as a table (root sees all users' apps, like [`print_app_list`]).
-/// Ports come from the app's settings ([`ports::published`]); an app whose
-/// manifest cannot be read shows no ports rather than failing the report.
+/// One app's published ports, one per line.
+fn print_app_ports(id: &str, name: &str, ports: &[docker::PublishedPort]) {
+    println!("{id}  {name}");
+    if ports.is_empty() {
+        println!("  {}", t(Msg::PortsNone));
+    } else {
+        for port in ports {
+            println!("  {}", port_label(*port));
+        }
+    }
+}
+
+/// `asc ports` with no id, in-process: every visible app and the ports it
+/// publishes (root sees all users' apps, like [`print_app_list`]). Ports come
+/// from the app's settings ([`ports::published`]); an app whose manifest
+/// cannot be read shows no ports rather than failing the report.
 fn ports_summary_cmd(
     manager: &AppManager,
     ctx: &UserContext,
@@ -2033,42 +2126,69 @@ fn ports_summary_cmd(
 ) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::ports;
 
-    let rows: Vec<(AppStatus, String)> = manager
+    let rows: Vec<PortsRow> = manager
         .list(ctx)?
         .into_iter()
-        .map(|app| {
-            let label = match ports::published(config, manager.store(), &app.meta) {
-                Ok(list) if !list.is_empty() => list
-                    .iter()
-                    .map(|port| port_label(*port))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                _ => "-".to_string(),
-            };
-            (app, label)
+        .map(|app| PortsRow {
+            ports: ports::published(config, manager.store(), &app.meta).unwrap_or_default(),
+            name: app.meta.display_name().to_string(),
+            id: app.meta.id,
+            owner: app.meta.owner.name,
         })
         .collect();
+    print_ports_summary(&rows, ctx.is_root);
+    Ok(())
+}
 
+/// One app's line in the ports report, from either backend.
+struct PortsRow {
+    id: String,
+    name: String,
+    owner: String,
+    ports: Vec<docker::PublishedPort>,
+}
+
+fn remote_ports_row(row: &client::RemotePortsRow) -> PortsRow {
+    PortsRow {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        owner: row.owner.clone(),
+        ports: row.ports.clone(),
+    }
+}
+
+fn print_ports_summary(rows: &[PortsRow], show_user: bool) {
     if rows.is_empty() {
         println!("{}", t(Msg::AppListEmpty));
-        return Ok(());
+        return;
     }
+    let labels: Vec<String> = rows
+        .iter()
+        .map(|row| match row.ports.is_empty() {
+            true => "-".to_string(),
+            false => row
+                .ports
+                .iter()
+                .map(|port| port_label(*port))
+                .collect::<Vec<_>>()
+                .join(", "),
+        })
+        .collect();
     let id_w = rows
         .iter()
-        .map(|(app, _)| app.meta.id.len())
+        .map(|row| row.id.len())
         .max()
         .unwrap_or(2)
         .max(2);
     let name_w = rows
         .iter()
-        .map(|(app, _)| app.meta.display_name().chars().count())
+        .map(|row| row.name.chars().count())
         .max()
         .unwrap_or(4)
         .max(4);
-    let show_user = ctx.is_root;
     let user_w = rows
         .iter()
-        .map(|(app, _)| app.meta.owner.name.chars().count())
+        .map(|row| row.owner.chars().count())
         .max()
         .unwrap_or(4)
         .max(4);
@@ -2080,25 +2200,16 @@ fn ports_summary_cmd(
     } else {
         println!("{:<id_w$}  {:<name_w$}  PORTS", "ID", "NAME");
     }
-    for (app, label) in &rows {
+    for (row, label) in rows.iter().zip(&labels) {
         if show_user {
             println!(
                 "{:<id_w$}  {:<name_w$}  {:<user_w$}  {}",
-                app.meta.id,
-                app.meta.display_name(),
-                app.meta.owner.name,
-                label,
+                row.id, row.name, row.owner, label,
             );
         } else {
-            println!(
-                "{:<id_w$}  {:<name_w$}  {}",
-                app.meta.id,
-                app.meta.display_name(),
-                label,
-            );
+            println!("{:<id_w$}  {:<name_w$}  {}", row.id, row.name, label);
         }
     }
-    Ok(())
 }
 
 /// One published port with its transport, `docker ps`-style: `27015/tcp`,
@@ -2735,10 +2846,17 @@ async fn attach_loop(
 /// interval, [`AppManager::stats`] sleeps for it) — that doubles as the live
 /// refresh cadence, no extra sleep needed.
 fn stats_cmd(sort: StatsSort, live: bool, config: &Config) -> anyhow::Result<()> {
+    // Through the daemon when its socket is there (DMN-053): it owns the app
+    // tree and the Docker connection, so the counters are readable without
+    // sudo and without the docker group. In-process otherwise (DMN-041).
+    let daemon = daemon_backend(config)?;
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
     loop {
-        let mut stats = manager.stats(&ctx)?;
+        let mut stats: Vec<StatsRow> = match &daemon {
+            Some(daemon) => daemon.stats()?.iter().map(remote_stats_row).collect(),
+            None => manager.stats(&ctx)?.iter().map(local_stats_row).collect(),
+        };
         if live {
             // Clear the screen and home the cursor before each redraw, like
             // `docker stats`/`top`.
@@ -2752,6 +2870,66 @@ fn stats_cmd(sort: StatsSort, live: bool, config: &Config) -> anyhow::Result<()>
         if !live {
             return Ok(());
         }
+    }
+}
+
+/// One app's line in the stats table, from either backend — the fields
+/// [`print_stats_table`] renders, and nothing else.
+struct StatsRow {
+    id: String,
+    kind: String,
+    owner: String,
+    cpu_percent: Option<f64>,
+    memory_bytes: Option<u64>,
+    disk_bytes: u64,
+    quota_disk_bytes: Option<u64>,
+    disk_read_bytes: Option<u64>,
+    disk_write_bytes: Option<u64>,
+    net_rx_bytes: Option<u64>,
+    net_tx_bytes: Option<u64>,
+    disk_read_rate: Option<f64>,
+    disk_write_rate: Option<f64>,
+    net_rx_rate: Option<f64>,
+    net_tx_rate: Option<f64>,
+}
+
+fn local_stats_row(s: &AppStats) -> StatsRow {
+    StatsRow {
+        id: s.meta.id.clone(),
+        kind: s.meta.runtime.kind().to_string(),
+        owner: s.meta.owner.name.clone(),
+        cpu_percent: s.cpu_percent,
+        memory_bytes: s.memory_bytes,
+        disk_bytes: s.disk_bytes,
+        quota_disk_bytes: s.quota_disk_bytes,
+        disk_read_bytes: s.disk_read_bytes,
+        disk_write_bytes: s.disk_write_bytes,
+        net_rx_bytes: s.net_rx_bytes,
+        net_tx_bytes: s.net_tx_bytes,
+        disk_read_rate: s.disk_read_rate,
+        disk_write_rate: s.disk_write_rate,
+        net_rx_rate: s.net_rx_rate,
+        net_tx_rate: s.net_tx_rate,
+    }
+}
+
+fn remote_stats_row(s: &client::RemoteStats) -> StatsRow {
+    StatsRow {
+        id: s.id.clone(),
+        kind: s.kind.clone(),
+        owner: s.owner.clone(),
+        cpu_percent: s.cpu_percent,
+        memory_bytes: s.memory_bytes,
+        disk_bytes: s.disk_bytes,
+        quota_disk_bytes: s.quota_disk_bytes,
+        disk_read_bytes: s.disk_read_bytes,
+        disk_write_bytes: s.disk_write_bytes,
+        net_rx_bytes: s.net_rx_bytes,
+        net_tx_bytes: s.net_tx_bytes,
+        disk_read_rate: s.disk_read_rate,
+        disk_write_rate: s.disk_write_rate,
+        net_rx_rate: s.net_rx_rate,
+        net_tx_rate: s.net_tx_rate,
     }
 }
 
@@ -2782,22 +2960,17 @@ fn format_rate_pair(a: Option<f64>, b: Option<f64>) -> String {
 
 /// One `asc stats` render: sorts (highest consumer first, stopped apps
 /// last) and prints, grouped by owner for root.
-fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bool) {
+fn print_stats_table(stats: &mut [StatsRow], sort: StatsSort, group_by_owner: bool) {
     stats.sort_by(|a, b| {
-        let key = |s: &AppStats| match sort {
+        let key = |s: &StatsRow| match sort {
             StatsSort::Cpu => s.cpu_percent.unwrap_or(-1.0),
             StatsSort::Mem => s.memory_bytes.map(|m| m as f64).unwrap_or(-1.0),
         };
         key(b).total_cmp(&key(a))
     });
 
-    let id_w = stats
-        .iter()
-        .map(|s| s.meta.id.len())
-        .max()
-        .unwrap_or(2)
-        .max(2);
-    let print_rows = |rows: &[&AppStats]| {
+    let id_w = stats.iter().map(|s| s.id.len()).max().unwrap_or(2).max(2);
+    let print_rows = |rows: &[&StatsRow]| {
         println!(
             "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<24}  {:<24}  {:<21}  DISK I/O",
             "ID", "KIND", "CPU %", "MEM", "QUOTA", "DISK", "NET/s", "DISK/s", "NET I/O"
@@ -2817,8 +2990,8 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
             };
             println!(
                 "{:<id_w$}  {:<7}  {:>7}  {:>10}  {:<12}  {:>10}  {:<24}  {:<24}  {:<21}  {}",
-                s.meta.id,
-                s.meta.runtime.kind(),
+                s.id,
+                s.kind,
                 cpu,
                 mem,
                 quota,
@@ -2831,7 +3004,7 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
         }
     };
     if group_by_owner {
-        let mut owners: Vec<&str> = stats.iter().map(|s| s.meta.owner.name.as_str()).collect();
+        let mut owners: Vec<&str> = stats.iter().map(|s| s.owner.as_str()).collect();
         owners.sort_unstable();
         owners.dedup();
         for (i, owner) in owners.iter().enumerate() {
@@ -2839,14 +3012,11 @@ fn print_stats_table(stats: &mut [AppStats], sort: StatsSort, group_by_owner: bo
                 println!();
             }
             println!("{}", tf(Msg::OwnerLabel, owner));
-            let rows: Vec<&AppStats> = stats
-                .iter()
-                .filter(|s| s.meta.owner.name == *owner)
-                .collect();
+            let rows: Vec<&StatsRow> = stats.iter().filter(|s| s.owner == *owner).collect();
             print_rows(&rows);
         }
     } else {
-        let rows: Vec<&AppStats> = stats.iter().collect();
+        let rows: Vec<&StatsRow> = stats.iter().collect();
         print_rows(&rows);
     }
 }
@@ -3026,15 +3196,25 @@ fn print_app_list_inner(apps: &[AppRow], show_user: bool, indent: &str, tree: bo
 /// `"<stack>/<app>"` at install); an app installed on its own has no `/` in
 /// `package` and is not part of any stack, so it never appears here.
 fn stacks_cmd(config: &Config) -> anyhow::Result<()> {
-    let manager = AppManager::new(config);
-    let ctx = UserContext::current();
+    // Same backend rule as `asc ls` (DMN-053): the daemon when it is there,
+    // in-process otherwise. The grouping is the CLI's own work either way.
+    let apps: Vec<(String, AppRow)> = match daemon_backend(config)? {
+        Some(daemon) => daemon
+            .list()?
+            .iter()
+            .filter_map(|app| Some((stack_of(app.package.as_deref())?, remote_row(app))))
+            .collect(),
+        None => AppManager::new(config)
+            .list(&UserContext::current())?
+            .iter()
+            .filter_map(|app| Some((stack_of(app.meta.package.as_deref())?, local_row(app))))
+            .collect(),
+    };
 
-    let mut stacks: std::collections::BTreeMap<String, Vec<AppStatus>> =
+    let mut stacks: std::collections::BTreeMap<String, Vec<AppRow>> =
         std::collections::BTreeMap::new();
-    for app in manager.list(&ctx)? {
-        if let Some((stack, _)) = app.meta.package.as_deref().and_then(|p| p.split_once('/')) {
-            stacks.entry(stack.to_string()).or_default().push(app);
-        }
+    for (stack, row) in apps {
+        stacks.entry(stack).or_default().push(row);
     }
 
     if stacks.is_empty() {
@@ -3042,21 +3222,25 @@ fn stacks_cmd(config: &Config) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let show_user = ctx.is_root;
+    let show_user = UserContext::current().is_root;
     for (i, (stack, mut apps)) in stacks.into_iter().enumerate() {
         if i > 0 {
             println!();
         }
-        apps.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
-        let running = apps
-            .iter()
-            .filter(|a| a.state == RuntimeState::Running)
-            .count();
-        let rows: Vec<AppRow> = apps.iter().map(local_row).collect();
+        apps.sort_by(|a, b| a.id.cmp(&b.id));
+        let running = apps.iter().filter(|a| a.is_running).count();
         println!("{stack} [{running}/{}]", apps.len());
-        print_app_tree(&rows, show_user, "    ");
+        print_app_tree(&apps, show_user, "    ");
     }
     Ok(())
+}
+
+/// The stack an app belongs to: the part before the `/` of its install spec
+/// (`"<stack>/<app>"`). `None` for an app installed on its own.
+fn stack_of(package: Option<&str>) -> Option<String> {
+    package
+        .and_then(|package| package.split_once('/'))
+        .map(|(stack, _)| stack.to_string())
 }
 
 fn service_cmd(action: ServiceAction) -> anyhow::Result<()> {

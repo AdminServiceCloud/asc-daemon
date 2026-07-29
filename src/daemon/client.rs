@@ -25,7 +25,9 @@ use serde_json::Value;
 use tokio::net::UnixStream;
 
 use crate::daemon::api::uds::{SUDO_UID_HEADER, SUDO_USER_HEADER};
+use crate::daemon::apps::disk::DiskUsage;
 use crate::daemon::config::Config;
+use crate::daemon::docker::PublishedPort;
 use crate::daemon::i18n::{Msg, tf};
 use crate::daemon::pkg;
 use crate::daemon::pkg::settings::{SettingValues, SettingsFile};
@@ -49,6 +51,10 @@ pub struct RemoteApp {
     pub owner: String,
     /// Package title when the app carries a custom name.
     pub title: Option<String>,
+    /// Registry install spec (`name` or `stack/app`) — the app's stack
+    /// membership for `asc stacks`.
+    #[serde(default)]
+    pub package: Option<String>,
     pub quota: Option<crate::daemon::apps::meta::Quota>,
 }
 
@@ -56,6 +62,61 @@ impl RemoteApp {
     pub fn running(&self) -> bool {
         self.state == "running"
     }
+}
+
+/// The app a per-app report is about: the daemon resolves the reference the
+/// caller passed (an id or a custom name) and names the app it answered for.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteAppRef {
+    pub id: String,
+    /// The name to show: the user's custom name, else the package title.
+    pub name: String,
+}
+
+/// One app's line in the daemon's apps-wide disk report (DMN-053).
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteDiskRow {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub bytes: u64,
+}
+
+/// `asc disk` with no app, as the daemon reports it: every visible app's
+/// footprint plus the capacity of the filesystem holding the app store.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteDiskSummary {
+    pub fs_total: Option<u64>,
+    pub apps: Vec<RemoteDiskRow>,
+}
+
+/// One app and the ports it publishes (DMN-049).
+#[derive(Debug, serde::Deserialize)]
+pub struct RemotePortsRow {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub ports: Vec<PublishedPort>,
+}
+
+/// One app's resource counters, mirroring `AppStats` of the in-process path.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteStats {
+    pub id: String,
+    pub kind: String,
+    pub owner: String,
+    pub cpu_percent: Option<f64>,
+    pub memory_bytes: Option<u64>,
+    pub disk_bytes: u64,
+    pub quota_disk_bytes: Option<u64>,
+    pub disk_read_bytes: Option<u64>,
+    pub disk_write_bytes: Option<u64>,
+    pub net_rx_bytes: Option<u64>,
+    pub net_tx_bytes: Option<u64>,
+    pub disk_read_rate: Option<f64>,
+    pub disk_write_rate: Option<f64>,
+    pub net_rx_rate: Option<f64>,
+    pub net_tx_rate: Option<f64>,
 }
 
 /// Blocking client of the daemon's unix-socket API.
@@ -105,6 +166,69 @@ impl Daemon {
     pub fn info(&self, id: &str) -> Result<RemoteApp> {
         let json = self.request(Method::GET, &format!("/v1/apps/{id}"), None)?;
         serde_json::from_value(json["app"].clone()).context("malformed app info from the daemon")
+    }
+
+    /// Disk usage of one app, broken down by image/repository/data/volumes,
+    /// together with the resolved app (`reference` may be a custom name).
+    pub fn app_disk(&self, reference: &str) -> Result<(RemoteAppRef, DiskUsage)> {
+        let json = self.request(Method::GET, &format!("/v1/apps/{reference}/disk"), None)?;
+        let app = serde_json::from_value(json.clone()).context("malformed app from the daemon")?;
+        let usage = serde_json::from_value(json).context("malformed disk usage from the daemon")?;
+        Ok((app, usage))
+    }
+
+    /// Space taken by every app the caller may see (DMN-053), largest first,
+    /// with the capacity of the filesystem holding the app store.
+    pub fn disk_summary(&self) -> Result<RemoteDiskSummary> {
+        let json = self.request(Method::GET, "/v1/disk", None)?;
+        serde_json::from_value(json).context("malformed disk report from the daemon")
+    }
+
+    /// The ports one app publishes, with the resolved app.
+    pub fn app_ports(&self, reference: &str) -> Result<(RemoteAppRef, Vec<PublishedPort>)> {
+        let json = self.request(Method::GET, &format!("/v1/apps/{reference}/ports"), None)?;
+        let ports = serde_json::from_value(json["ports"].clone())
+            .context("malformed port list from the daemon")?;
+        let app = serde_json::from_value(json).context("malformed app from the daemon")?;
+        Ok((app, ports))
+    }
+
+    pub fn ports_summary(&self) -> Result<Vec<RemotePortsRow>> {
+        let json = self.request(Method::GET, "/v1/ports", None)?;
+        serde_json::from_value(json["apps"].clone())
+            .context("malformed port report from the daemon")
+    }
+
+    /// Resource consumption per app. The daemon samples twice ~500 ms apart,
+    /// so this call takes about that long.
+    pub fn stats(&self) -> Result<Vec<RemoteStats>> {
+        let json = self.request(Method::GET, "/v1/stats", None)?;
+        serde_json::from_value(json["apps"].clone()).context("malformed stats from the daemon")
+    }
+
+    /// Upgrade an app (DMN-053): `reference` is its id or custom name,
+    /// `version` an explicit tag (`None` — the newest one, or the tracked
+    /// branch of a direct repository install). The daemon clones with its own
+    /// git credentials, so there is no interactive auth setup on this path.
+    pub fn upgrade(&self, reference: &str, version: Option<&str>) -> Result<pkg::UpgradeOutcome> {
+        let body = serde_json::json!({ "version": version });
+        let json = self.request(
+            Method::POST,
+            &format!("/v1/apps/{reference}/upgrade"),
+            Some(body),
+        )?;
+        let id = json["id"].as_str().unwrap_or(reference).to_string();
+        if json["up_to_date"].as_bool().unwrap_or(false) {
+            return Ok(pkg::UpgradeOutcome::UpToDate {
+                id,
+                version: json["version"].as_str().unwrap_or_default().to_string(),
+            });
+        }
+        Ok(pkg::UpgradeOutcome::Upgraded {
+            id,
+            from: json["from"].as_str().map(str::to_string),
+            to: json["to"].as_str().unwrap_or_default().to_string(),
+        })
     }
 
     /// `true` when the app was already running (idempotent call).

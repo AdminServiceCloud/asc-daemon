@@ -164,6 +164,7 @@ pub fn clone_app(
         },
         version: source.version.clone(),
         source: source.source.clone(),
+        branch: source.branch.clone(),
         // Recorded like a suffixed install instance, so `asc app upgrade`
         // keeps resolving the clone against the same registry package.
         package: Some(source.package.clone().unwrap_or_else(|| source.id.clone())),

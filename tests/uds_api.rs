@@ -23,6 +23,7 @@ fn meta(id: &str, uid: u32) -> AppMeta {
         },
         version: None,
         source: None,
+        branch: None,
         package: None,
         desired_state: DesiredState::Stopped,
         quota: None,
@@ -231,6 +232,63 @@ fn console_tokens_are_scoped_to_the_callers_apps() {
             format!("{err:#}").contains("not found") || format!("{err:#}").contains("не найдено"),
             "got: {err:#}"
         );
+    }
+}
+
+/// DMN-053: the apps-wide reports (`asc disk`, `asc ports`, `asc stats`) are
+/// scoped by the peer uid like `asc ls` is — before they went through the
+/// daemon they read the caller's own app tree, so a user whose apps live in
+/// the system tree saw them listed by `asc ls` and "no apps installed"
+/// everywhere else.
+#[test]
+fn reports_are_scoped_to_the_callers_apps() {
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    config.api.socket = ws.path().join("asc.sock");
+
+    // SAFETY: geteuid() has no preconditions and cannot fail.
+    let my_uid = unsafe { libc::geteuid() };
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    store.save(&meta("mine", my_uid)).unwrap();
+    store.save(&meta("foreign", my_uid + 1)).unwrap();
+    std::fs::write(store.app_dir("mine").unwrap().join("payload"), [0u8; 4096]).unwrap();
+
+    let state = ApiState::new(config.clone(), "unused-token".into());
+    let _stop = spawn_uds(state);
+    wait_for_socket(&config.api.socket);
+    let daemon = Daemon::connect(&config)
+        .expect("daemon answers")
+        .expect("socket file exists");
+
+    let expected = if my_uid == 0 { 2 } else { 1 };
+    let disk = daemon.disk_summary().unwrap();
+    assert_eq!(disk.apps.len(), expected);
+    let mine = disk.apps.iter().find(|app| app.id == "mine").unwrap();
+    assert!(mine.bytes >= 4096, "the app directory is measured");
+    assert_eq!(daemon.ports_summary().unwrap().len(), expected);
+    assert_eq!(daemon.stats().unwrap().len(), expected);
+
+    // Per-app reports resolve through the same authorization as the rest.
+    let (app, usage) = daemon.app_disk("mine").unwrap();
+    assert_eq!(app.id, "mine");
+    assert!(usage.app_dir_bytes >= 4096);
+    let (app, ports) = daemon.app_ports("mine").unwrap();
+    assert_eq!(app.id, "mine");
+    assert!(ports.is_empty(), "no manifest, so no published ports");
+
+    if my_uid != 0 {
+        for err in [
+            daemon.app_disk("foreign").unwrap_err(),
+            daemon.app_ports("foreign").unwrap_err(),
+        ] {
+            assert!(
+                format!("{err:#}").contains("not found")
+                    || format!("{err:#}").contains("не найдено"),
+                "foreign apps must be indistinguishable from missing ones, got: {err:#}"
+            );
+        }
     }
 }
 

@@ -29,6 +29,7 @@ The core of the daemon: a single interface for managing applications of three ki
 - Via `sudo` (or as `root`) the applications of **all users** are visible and accessible — the output is grouped by owner.
 - The daemon API applies the same rule: the request context determines the visible group.
 - **With the system daemon running** (DMN-042), the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`) go through its unix socket `/run/asc/asc.sock`: the daemon reads the caller's uid from the kernel (SO_PEERCRED) and enforces this rule on the shared system store — a regular user manages their apps in `/asc/apps` **without sudo and without the docker group**, and `asc ls` / `sudo asc ls` finally agree on what is installed. Details — [📡 api](api.md).
+- **The reporting commands take the same route** (DMN-053): `asc disk`, `asc ports`, `asc stats`, `asc stacks` and `asc upgrade` go through the socket too. They used to read the caller's *own* app tree in-process, so a user whose apps live in the system tree saw them in `asc ls` and "No apps installed" in every report next to it — and `asc app upgrade <id>` answered "app not found" for an app that was plainly there. What is left in-process is `asc app clone` and `asc backup`, which still need the system tree directly (root or no daemon).
 
 ### 📂 Application storage: /asc/apps/
 
@@ -39,7 +40,7 @@ Every application lives in a directory named after its ID:
 ├── config/        # ⚙️ application settings (see asc.settings.yaml in package-manager.md)
 ├── repository/    # 📦 the application's cloned repository (versions = git tags)
 ├── data/          # 💾 volumes — if the application runs in Docker
-└── meta.json      # 📇 application info: id, uuid, name, custom name, owner, version (tag), source, state
+└── meta.json      # 📇 application info: id, uuid, name, custom name, owner, version (tag), source, tracked branch, state
 ```
 
 - **Installation = cloning the repository** of the package into `repository/`; switching versions = checking out the desired git tag (details — [📦 package-manager](package-manager.md)).
@@ -74,4 +75,4 @@ Why a second identifier: an `id` is **reusable**. Removing `helloworld-2` frees 
 
 ## 🔗 Related tasks
 
-DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, DMN-053, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

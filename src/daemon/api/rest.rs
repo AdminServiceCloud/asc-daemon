@@ -23,8 +23,16 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
         .route("/v1/apps", get(list_apps).post(install_app))
+        // Apps-wide reports (DMN-053): the per-app routes below answer for
+        // one app, these for every app the caller may see — the figures the
+        // CLI cannot compute itself without reading the app tree.
+        .route("/v1/disk", get(disk_summary))
+        .route("/v1/ports", get(ports_summary))
+        .route("/v1/stats", get(stats))
         .route("/v1/apps/{id}", get(get_app).delete(remove_app))
         .route("/v1/apps/{id}/disk", get(app_disk))
+        .route("/v1/apps/{id}/ports", get(app_ports))
+        .route("/v1/apps/{id}/upgrade", post(upgrade_app))
         .route("/v1/apps/{id}/start", post(start_app))
         .route("/v1/apps/{id}/stop", post(stop_app))
         .route("/v1/apps/{id}/restart", post(restart_app))
@@ -143,6 +151,11 @@ struct AppJson {
     /// is the custom name).
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    /// Registry install spec (`name` or `stack/app`) — what groups an app
+    /// under its stack in `asc stacks` (DMN-051); absent for apps installed
+    /// straight from a repository URL and for pre-DMN-003 installs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota: Option<crate::daemon::apps::meta::Quota>,
     /// Stable instance identity (DMN-044); absent for pre-DMN-044 installs.
@@ -168,6 +181,7 @@ fn to_json(status: &AppStatus) -> AppJson {
             .custom_name
             .is_some()
             .then(|| status.meta.name.clone()),
+        package: status.meta.package.clone(),
         quota: status.meta.quota,
     }
 }
@@ -274,8 +288,11 @@ async fn app_disk(
     Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let usage = state.app_disk(ctx, id).await?;
+    let (meta, usage) = state.app_disk(ctx, id).await?;
     Ok(Json(serde_json::json!({
+        // The resolved app: `id` in the path may have been a custom name.
+        "id": meta.id,
+        "name": meta.display_name(),
         "app_dir_bytes": usage.app_dir_bytes,
         "quota_bytes": usage.quota_bytes,
         "image_bytes": usage.image_bytes,
@@ -290,6 +307,122 @@ async fn app_disk(
         })).collect::<Vec<_>>(),
     }))
     .into_response())
+}
+
+/// `asc disk` with no app: every visible app's footprint plus the capacity of
+/// the filesystem the app store lives on (DMN-053).
+async fn disk_summary(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let summary = state.disk_summary(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "fs_total": summary.fs_total,
+        "apps": summary.apps.iter().map(|app| serde_json::json!({
+            "id": app.id,
+            "name": app.name,
+            "owner": app.owner,
+            "bytes": app.bytes,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+async fn app_ports(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (meta, ports) = state.app_ports(ctx, id).await?;
+    Ok(Json(serde_json::json!({
+        "id": meta.id,
+        "name": meta.display_name(),
+        "ports": ports,
+    }))
+    .into_response())
+}
+
+async fn ports_summary(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let rows = state.ports_summary(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "apps": rows.iter().map(|app| serde_json::json!({
+            "id": app.id,
+            "name": app.name,
+            "owner": app.owner,
+            "ports": app.ports,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Resource consumption per app, like `docker stats --no-stream`. Costs the
+/// sampling interval (~500 ms) per call — the CPU percentage is a delta of
+/// two readings.
+async fn stats(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let stats = state.stats(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "apps": stats.iter().map(|s| serde_json::json!({
+            "id": s.meta.id,
+            "name": s.meta.display_name(),
+            "kind": s.meta.runtime.kind(),
+            "owner": s.meta.owner.name,
+            "cpu_percent": s.cpu_percent,
+            "memory_bytes": s.memory_bytes,
+            "disk_bytes": s.disk_bytes,
+            "quota_disk_bytes": s.quota_disk_bytes,
+            "disk_read_bytes": s.disk_read_bytes,
+            "disk_write_bytes": s.disk_write_bytes,
+            "net_rx_bytes": s.net_rx_bytes,
+            "net_tx_bytes": s.net_tx_bytes,
+            "disk_read_rate": s.disk_read_rate,
+            "disk_write_rate": s.disk_write_rate,
+            "net_rx_rate": s.net_rx_rate,
+            "net_tx_rate": s.net_tx_rate,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct UpgradeBody {
+    /// Target version (a git tag of the package repository); absent — the
+    /// newest tag, or the tracked branch for a direct repository install.
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// Upgrade one app (DMN-053). The app must be stopped; the caller must own
+/// it. Cloning uses the daemon's git credentials.
+async fn upgrade_app(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    body: Option<Json<UpgradeBody>>,
+) -> Result<Response, ApiError> {
+    let spec = match body.and_then(|Json(body)| body.version) {
+        Some(version) => format!("{id}@{version}"),
+        None => id,
+    };
+    let json = match state.upgrade(ctx, spec).await? {
+        crate::daemon::pkg::UpgradeOutcome::Upgraded { id, from, to } => serde_json::json!({
+            "id": id,
+            "up_to_date": false,
+            "from": from,
+            "to": to,
+        }),
+        crate::daemon::pkg::UpgradeOutcome::UpToDate { id, version } => serde_json::json!({
+            "id": id,
+            "up_to_date": true,
+            "version": version,
+        }),
+    };
+    Ok(Json(json).into_response())
 }
 
 #[derive(Deserialize)]

@@ -23,6 +23,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use tracing::info;
 
+use crate::daemon::apps::meta::AppMeta;
 use crate::daemon::apps::{AppManager, AppStatus, Outcome, UserContext};
 use crate::daemon::config::Config;
 use crate::daemon::monitor::Monitor;
@@ -41,6 +42,30 @@ pub struct ApiState {
     pub monitor: Arc<Monitor>,
     /// Bearer token required on every request.
     token: String,
+}
+
+/// Apps-wide disk report (`asc disk` with no app): what each app occupies,
+/// against the capacity of the filesystem the app store lives on.
+pub struct DiskSummary {
+    /// `None` when the filesystem cannot be queried (statvfs failure).
+    pub fs_total: Option<u64>,
+    /// Largest first.
+    pub apps: Vec<AppDiskRow>,
+}
+
+pub struct AppDiskRow {
+    pub id: String,
+    /// The name shown to the user: their custom name, else the package title.
+    pub name: String,
+    pub owner: String,
+    pub bytes: u64,
+}
+
+pub struct AppPortsRow {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub ports: Vec<crate::daemon::docker::PublishedPort>,
 }
 
 /// Context of bearer-token (TCP) calls: full visibility — the platform
@@ -106,12 +131,106 @@ impl ApiState {
         self: &Arc<Self>,
         ctx: UserContext,
         id: String,
-    ) -> Result<crate::daemon::apps::disk::DiskUsage> {
+    ) -> Result<(AppMeta, crate::daemon::apps::disk::DiskUsage)> {
         self.blocking(move |s| {
             let meta = s.manager.get_authorized(&ctx, &id)?;
-            crate::daemon::apps::disk::usage(&s.config, s.manager.store(), &meta)
+            let usage = crate::daemon::apps::disk::usage(&s.config, s.manager.store(), &meta)?;
+            Ok((meta, usage))
         })
         .await
+    }
+
+    /// Space taken by every app the caller may see, largest first, with the
+    /// capacity of the filesystem holding the app store (DMN-053). The sizes
+    /// are the cheap directory walk `asc stats` uses — no image or volume
+    /// breakdown, no Docker queries.
+    pub async fn disk_summary(self: &Arc<Self>, ctx: UserContext) -> Result<DiskSummary> {
+        use crate::daemon::apps::disk;
+        use crate::daemon::monitor::system;
+
+        self.blocking(move |s| {
+            let mut apps: Vec<AppDiskRow> = s
+                .manager
+                .list(&ctx)?
+                .into_iter()
+                .map(|app| AppDiskRow {
+                    bytes: s
+                        .manager
+                        .store()
+                        .app_dir(&app.meta.id)
+                        .map(|dir| disk::dir_size(&dir))
+                        .unwrap_or(0),
+                    id: app.meta.id,
+                    name: app.meta.custom_name.unwrap_or(app.meta.name),
+                    owner: app.meta.owner.name,
+                })
+                .collect();
+            apps.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+            Ok(DiskSummary {
+                fs_total: system::filesystem_total(s.manager.store().root()),
+                apps,
+            })
+        })
+        .await
+    }
+
+    /// The ports one app publishes (DMN-049), resolved from its settings —
+    /// so a stopped app reports what it will bind on the next start.
+    pub async fn app_ports(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+    ) -> Result<(AppMeta, Vec<crate::daemon::docker::PublishedPort>)> {
+        self.blocking(move |s| {
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let ports = crate::daemon::apps::ports::published(&s.config, s.manager.store(), &meta)?;
+            Ok((meta, ports))
+        })
+        .await
+    }
+
+    /// The same, for every app the caller may see. An app whose manifest
+    /// cannot be read reports no ports rather than failing the report.
+    pub async fn ports_summary(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<AppPortsRow>> {
+        self.blocking(move |s| {
+            Ok(s.manager
+                .list(&ctx)?
+                .into_iter()
+                .map(|app| AppPortsRow {
+                    ports: crate::daemon::apps::ports::published(
+                        &s.config,
+                        s.manager.store(),
+                        &app.meta,
+                    )
+                    .unwrap_or_default(),
+                    id: app.meta.id,
+                    name: app.meta.custom_name.unwrap_or(app.meta.name),
+                    owner: app.meta.owner.name,
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Resource consumption of the caller's apps. Blocks for the sampling
+    /// interval (~500 ms, two readings apart) on a worker thread.
+    pub async fn stats(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<Vec<crate::daemon::apps::AppStats>> {
+        self.blocking(move |s| s.manager.stats(&ctx)).await
+    }
+
+    /// Upgrade an app the caller owns (DMN-053): `spec` is its id or custom
+    /// name, optionally `@version`. Cloning happens with the daemon's own git
+    /// credentials, like an install over this API.
+    pub async fn upgrade(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        spec: String,
+    ) -> Result<pkg::UpgradeOutcome> {
+        self.blocking(move |s| pkg::upgrade(&s.config, &ctx, &spec))
+            .await
     }
 
     /// Install from a registry spec or directly from a git URL (mirrors the

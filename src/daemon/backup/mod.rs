@@ -300,6 +300,7 @@ mod tests {
             },
             version: Some("1.0.0".into()),
             source: None,
+            branch: None,
             package: None,
             desired_state: DesiredState::Stopped,
             quota: None,

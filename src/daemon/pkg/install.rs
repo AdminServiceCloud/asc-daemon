@@ -486,6 +486,8 @@ fn install_one(
             "{}:{}",
             resolved.source_name, resolved.entry.source.git
         )),
+        // Registry installs are pinned to a tag, never to a branch.
+        branch: None,
         package: match stack_app {
             Some(app) => Some(format!("{}/{app}", resolved.entry.name)),
             None if suffixed => Some(resolved.entry.name.clone()),
@@ -642,9 +644,16 @@ pub fn install_from_git(
             name: ctx.name.clone(),
         },
         version: Some(effective_version.clone()),
-        // No registry source name for a direct install — the URL is the
-        // source of truth; `asc upgrade` does not resolve these apps yet.
+        // No registry source name for a direct install — the URL *is* the
+        // source of truth, and `asc app upgrade` re-resolves the app from it
+        // instead of looking the id up in the registries (DMN-053).
         source: Some(format!("git:{url}")),
+        // A branch install tracks that branch across upgrades; a tag install
+        // is pinned by `version` and moves tag by tag like a registry app.
+        branch: match git_ref {
+            Some(GitRef::Branch(branch)) => Some(branch.to_string()),
+            _ => None,
+        },
         package: None,
         desired_state: DesiredState::Stopped,
         quota,

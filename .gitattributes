@@ -1,0 +1,12 @@
+# Files that must keep Unix line endings in the working tree, whatever the
+# checkout platform's autocrlf setting says.
+#
+# The shell scripts are executed (install.sh) or sourced (completions/) on
+# Linux, where a CR at the end of every line is a syntax error. The completion
+# scripts are additionally embedded into the `asc` binary verbatim
+# (`include_str!` in src/cli/complete.rs), so a CRLF checkout on a developer's
+# Windows machine would ship CRLF to every host `asc completion` runs on.
+install.sh          text eol=lf
+completions/*.bash  text eol=lf
+completions/*.zsh   text eol=lf
+completions/*.fish  text eol=lf

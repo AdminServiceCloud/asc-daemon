@@ -197,6 +197,70 @@ impl ApiState {
         self.blocking(move |s| s.manager.remove(&ctx, &id)).await
     }
 
+    /// An app's settings schema and the values chosen so far (DMN-043): what
+    /// an editor running outside the daemon — the CLI of a user who cannot
+    /// read the system app tree — needs to render the same menu it renders
+    /// in-process. `None` for an app whose package defines no settings.
+    pub async fn app_settings(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+    ) -> Result<(
+        Option<pkg::settings::SettingsFile>,
+        pkg::settings::SettingValues,
+    )> {
+        self.blocking(move |s| {
+            let (file, mut values, _) = s.settings_of(&ctx, &id)?;
+            if let Some(file) = &file {
+                values.merge_defaults(&file.settings);
+            }
+            Ok((file, values))
+        })
+        .await
+    }
+
+    /// Replace an app's chosen values, validated against its own schema.
+    /// The runtime picks them up on the next (re)start, exactly as it does
+    /// after an in-process edit.
+    pub async fn set_app_settings(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        values: pkg::settings::SettingValues,
+    ) -> Result<()> {
+        self.blocking(move |s| {
+            let (file, _, config_dir) = s.settings_of(&ctx, &id)?;
+            let defs = file.as_ref().map(|f| f.settings.as_slice()).unwrap_or(&[]);
+            values.validate_against(defs)?;
+            std::fs::create_dir_all(&config_dir)
+                .with_context(|| format!("cannot create directory {}", config_dir.display()))?;
+            values.save(&config_dir)
+        })
+        .await
+    }
+
+    /// `(schema, current values, config dir)` of an app the caller may
+    /// manage — the shared half of the two settings operations.
+    fn settings_of(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+    ) -> Result<(
+        Option<pkg::settings::SettingsFile>,
+        pkg::settings::SettingValues,
+        std::path::PathBuf,
+    )> {
+        use pkg::settings::{SettingValues, SettingsFile, manifest_dir_of};
+        let meta = self.manager.get_authorized(ctx, id)?;
+        let app_dir = self.manager.store().app_dir(&meta.id)?;
+        let manifest_dir = manifest_dir_of(&self.config, &app_dir)?;
+        let manifest = pkg::manifest::Manifest::load(&manifest_dir)?;
+        let file = SettingsFile::load_for(&manifest_dir, &manifest)?;
+        let config_dir = app_dir.join("config");
+        let values = SettingValues::load(&config_dir)?;
+        Ok((file, values, config_dir))
+    }
+
     /// Issue a one-time console token after verifying the app exists.
     pub async fn issue_console_token(
         self: &Arc<Self>,

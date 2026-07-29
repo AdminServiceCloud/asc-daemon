@@ -575,6 +575,40 @@ impl SettingValues {
             .context("invalid $backup override in settings.json")
     }
 
+    /// The chosen values as they are stored, for a client that edits them
+    /// out of process (the CLI over the daemon socket, DMN-043).
+    pub fn as_map(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.map
+    }
+
+    /// Values received from such a client, ready to be validated and saved.
+    pub fn from_map(map: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self { map }
+    }
+
+    /// Reject anything the app's own schema does not define. Values arriving
+    /// over the API are untrusted input: an unknown key would silently
+    /// accumulate in `settings.json`, and a reserved `$…` key that no editor
+    /// wrote could smuggle a quota or backup policy past the CLI's checks —
+    /// so those two are parsed with the very types that consume them.
+    pub fn validate_against(&self, defs: &[SettingDef]) -> Result<()> {
+        for key in self.map.keys() {
+            match key.as_str() {
+                Self::QUOTA_KEY | Self::START_COMMAND_KEY | Self::BACKUP_KEY => {}
+                key if defs.iter().any(|d| d.key == key) => {}
+                other => bail!("unknown setting '{other}' for this app"),
+            }
+        }
+        if let Some(value) = self.get(Self::START_COMMAND_KEY)
+            && !value.is_string()
+        {
+            bail!("{} must be a string", Self::START_COMMAND_KEY);
+        }
+        self.quota_override()?;
+        self.backup_policy()?;
+        Ok(())
+    }
+
     /// Load the values; a missing file means nothing was chosen yet.
     pub fn load(config_dir: &Path) -> Result<Self> {
         let path = config_dir.join(Self::FILE);

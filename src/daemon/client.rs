@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::header::{CONTENT_TYPE, HOST};
@@ -28,6 +28,7 @@ use crate::daemon::api::uds::{SUDO_UID_HEADER, SUDO_USER_HEADER};
 use crate::daemon::config::Config;
 use crate::daemon::i18n::{Msg, tf};
 use crate::daemon::pkg;
+use crate::daemon::pkg::settings::{SettingValues, SettingsFile};
 
 /// How long a connection attempt may take before the daemon is declared
 /// unreachable. Local socket: a healthy daemon answers instantly.
@@ -179,6 +180,108 @@ impl Daemon {
             installed: apps.iter().map(report).collect(),
             skipped,
         })
+    }
+
+    /// An app's settings schema and current values (DMN-043). The editor
+    /// then runs entirely in the CLI, exactly as it does in-process — only
+    /// the reading and the writing move to the daemon, which is the half a
+    /// user without access to the system app tree cannot do themselves.
+    pub fn settings(&self, id: &str) -> Result<(Option<SettingsFile>, SettingValues)> {
+        let json = self.request(Method::GET, &format!("/v1/apps/{id}/settings"), None)?;
+        let file: Option<SettingsFile> = serde_json::from_value(json["settings"].clone())
+            .context("malformed settings schema from the daemon")?;
+        let values = match json["values"].clone() {
+            Value::Object(map) => SettingValues::from_map(map),
+            Value::Null => SettingValues::default(),
+            other => bail!("malformed setting values from the daemon: {other}"),
+        };
+        Ok((file, values))
+    }
+
+    /// Persist the edited values; the daemon validates them against the
+    /// app's own schema before writing.
+    pub fn save_settings(&self, id: &str, values: &SettingValues) -> Result<()> {
+        let body = serde_json::json!({ "values": values.as_map() });
+        self.request(Method::PUT, &format!("/v1/apps/{id}/settings"), Some(body))?;
+        Ok(())
+    }
+
+    /// A one-time console token for `id` (`"logs"` or `"attach"`). Issued
+    /// only for an app the caller may manage, and consumed by the first
+    /// `/v1/console` connection that presents it.
+    pub fn console_token(&self, id: &str, session: &str) -> Result<String> {
+        let body = serde_json::json!({ "session": session });
+        let json = self.request(
+            Method::POST,
+            &format!("/v1/apps/{id}/console-token"),
+            Some(body),
+        )?;
+        json["token"]
+            .as_str()
+            .map(str::to_string)
+            .context("the daemon issued no console token")
+    }
+
+    /// Attach to an app's console through the daemon (DMN-043): the daemon
+    /// holds the Docker connection, so this works for a user who is not in
+    /// the `docker` group and cannot read the system app tree. The terminal's
+    /// stdin goes to the app, the app's output to stdout — the same contract
+    /// as the in-process attach, and the same shared session the browser
+    /// console joins (all clients of one app see the same live output).
+    ///
+    /// Returns when the app stops, the socket closes or stdin reaches EOF.
+    pub fn attach(&self, id: &str) -> Result<()> {
+        let token = self.console_token(id, "attach")?;
+        self.rt.block_on(self.attach_loop(&token))
+    }
+
+    async fn attach_loop(&self, token: &str) -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.socket))
+            .await
+            .context("connection timed out")?
+            .with_context(|| format!("cannot reach the daemon at {}", self.socket.display()))?;
+        // The host is meaningless over a unix socket, but the handshake
+        // needs a syntactically valid ws:// URL to derive its headers from.
+        let url = format!("ws://asc-daemon/v1/console?token={token}");
+        let (mut socket, _) = tokio_tungstenite::client_async(url, stream)
+            .await
+            .context("cannot open the console session")?;
+
+        let mut stdin = tokio::io::stdin();
+        let mut stdout = tokio::io::stdout();
+        let mut buf = [0u8; 4096];
+        loop {
+            tokio::select! {
+                frame = socket.next() => match frame {
+                    Some(Ok(Message::Binary(data))) => {
+                        stdout.write_all(&data).await?;
+                        stdout.flush().await?;
+                    }
+                    // The console reports its own failures as text before
+                    // closing (app stopped, attach unsupported).
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(err) = text.strip_prefix("error: ") {
+                            bail!("{err}");
+                        }
+                        stdout.write_all(text.as_bytes()).await?;
+                        stdout.flush().await?;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(err).context("console session failed"),
+                },
+                read = stdin.read(&mut buf) => match read? {
+                    0 => break, // stdin closed: detach, the app keeps running
+                    n => socket.send(Message::Binary(buf[..n].to_vec().into())).await?,
+                },
+            }
+        }
+        socket.close(None).await.ok();
+        Ok(())
     }
 
     /// One request/response round-trip; non-2xx responses become errors,

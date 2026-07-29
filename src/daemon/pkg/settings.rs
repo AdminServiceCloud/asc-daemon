@@ -147,6 +147,32 @@ pub struct SettingDef {
     /// Transport(s) to publish on (kind: ports only). Defaults to `tcp`.
     #[serde(default)]
     pub protocol: Option<PortProtocol>,
+    /// Container-side ports of a `type: ports` setting (DMN-052): where the
+    /// **package author** knows the app listens inside the container, while
+    /// the setting's own value — what the **user** edits — picks the host
+    /// ports. Paired by index, so the author also fixes how many ports the
+    /// app publishes. Unset means host == container, which is what every
+    /// package written before this field keeps doing.
+    #[serde(default)]
+    pub container: Option<ContainerPorts>,
+}
+
+/// The `container:` field: one port (`container: 3000`) or a list
+/// (`container: [3000, 3443]`) paired by index with the user's host ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContainerPorts {
+    One(u16),
+    Many(Vec<u16>),
+}
+
+impl ContainerPorts {
+    pub fn as_slice(&self) -> &[u16] {
+        match self {
+            ContainerPorts::One(port) => std::slice::from_ref(port),
+            ContainerPorts::Many(ports) => ports,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,8 +183,9 @@ pub enum SettingKind {
     Boolean,
     Enum,
     Secret,
-    /// Published container ports; the value is a list of port numbers.
-    /// With `env:` the list is exposed comma-joined (a single port — as is).
+    /// Published ports; the value is a list of host port numbers, paired
+    /// with the package's `container:` ports when it declares them. With
+    /// `env:` the list is exposed comma-joined (a single port — as is).
     Ports,
     /// App volumes; the value is a list of `/container/path[:host]` or
     /// `name:/container/path[:ro]` entries (see the package-manager doc).
@@ -295,6 +322,37 @@ impl SettingsFile {
                     def.kind
                 );
             }
+            if def.container.is_some() && def.kind != SettingKind::Ports {
+                bail!(
+                    "setting '{}' has 'container' but is not of type ports",
+                    def.key
+                );
+            }
+            if def.container.is_some() {
+                let container = def.container_ports();
+                if container.is_empty() {
+                    bail!(
+                        "setting '{}': 'container' must list at least one port",
+                        def.key
+                    );
+                }
+                if container.contains(&0) {
+                    bail!("setting '{}': 0 is not a container port", def.key);
+                }
+                // Host and container ports pair by index, so a default that
+                // does not line up would publish a mapping the author never
+                // described — catch it in the package, not at install time.
+                if let Some(serde_yaml::Value::Sequence(items)) = &def.default
+                    && items.len() != container.len()
+                {
+                    bail!(
+                        "setting '{}': 'default' lists {} port(s) but 'container' declares {} — they pair by index",
+                        def.key,
+                        items.len(),
+                        container.len()
+                    );
+                }
+            }
             if def.kind == SettingKind::Volumes
                 && let Some(serde_yaml::Value::Sequence(items)) = &def.default
             {
@@ -343,6 +401,15 @@ impl SettingDef {
     /// Transport(s) a `type: ports` setting publishes on; `tcp` when unset.
     pub fn port_protocol(&self) -> PortProtocol {
         self.protocol.unwrap_or_default()
+    }
+
+    /// Container-side ports the package fixed, empty when it publishes
+    /// host == container (see [`SettingDef::container`]).
+    pub fn container_ports(&self) -> &[u16] {
+        self.container
+            .as_ref()
+            .map(ContainerPorts::as_slice)
+            .unwrap_or_default()
     }
 
     /// Validate raw user input against this definition and return the typed
@@ -411,6 +478,13 @@ impl SettingDef {
                 if ports.is_empty() {
                     bail!(t(Msg::ErrSettingPort));
                 }
+                // With container ports declared the count is the package
+                // author's, not the user's: each host port answers exactly
+                // one container port.
+                let container = self.container_ports();
+                if !container.is_empty() && ports.len() != container.len() {
+                    bail!(tf(Msg::ErrSettingPortCount, container.len()));
+                }
                 Ok(serde_json::Value::Array(ports))
             }
             SettingKind::Volumes => {
@@ -433,10 +507,28 @@ impl SettingDef {
     pub fn constraint_hint(&self) -> Option<String> {
         match self.kind {
             SettingKind::Enum => Some(self.values_hint()),
-            SettingKind::Number | SettingKind::Ports => {
+            SettingKind::Number => {
                 let limits = self.limits.as_ref()?;
                 (limits.min.is_some() || limits.max.is_some())
                     .then(|| range_hint(limits.min, limits.max))
+            }
+            // Ports show their allowed range and, when the package fixed the
+            // container side, what the chosen host ports map onto — the user
+            // is picking the outside of `8080 → 3000`, not the inside.
+            SettingKind::Ports => {
+                let range = self
+                    .limits
+                    .as_ref()
+                    .filter(|limits| limits.min.is_some() || limits.max.is_some())
+                    .map(|limits| range_hint(limits.min, limits.max));
+                let container = self.container_ports();
+                let mapping =
+                    (!container.is_empty()).then(|| format!("→ {}", join_ports(container)));
+                match (range, mapping) {
+                    (Some(range), Some(mapping)) => Some(format!("{range} {mapping}")),
+                    (Some(range), None) => Some(range),
+                    (None, mapping) => mapping,
+                }
             }
             SettingKind::Volumes => None,
             SettingKind::String | SettingKind::Secret => {
@@ -521,6 +613,15 @@ fn yaml_scalar(value: &serde_yaml::Value) -> String {
     }
 }
 
+/// Port numbers comma-joined, the same shape list values reach the env in.
+fn join_ports(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// JSON value as a plain string; lists (ports, volumes) join with a comma —
 /// a single-element list reads as the bare value (`CS2_PORT=27015`).
 fn json_scalar(value: &serde_json::Value) -> String {
@@ -603,6 +704,24 @@ impl SettingValues {
             && !value.is_string()
         {
             bail!("{} must be a string", Self::START_COMMAND_KEY);
+        }
+        // A port list that no longer pairs with the package's container
+        // ports would install cleanly and only fail at start, so refuse it
+        // while the user is still looking at the editor.
+        for def in defs {
+            let container = def.container_ports();
+            if def.kind != SettingKind::Ports || container.is_empty() {
+                continue;
+            }
+            if let Some(value) = self.get(&def.key)
+                && value.as_array().map(Vec::len) != Some(container.len())
+            {
+                bail!(
+                    "setting '{}' must list {} port(s), one per container port",
+                    def.key,
+                    container.len()
+                );
+            }
         }
         self.quota_override()?;
         self.backup_policy()?;
@@ -690,6 +809,14 @@ impl SettingValues {
             .filter_map(|def| {
                 let name = def.env.clone()?;
                 let value = self.get(&def.key)?;
+                // A port setting with a fixed container side exposes **that**
+                // side: the variable tells the app where to listen inside the
+                // container, and the publish points at it. Without
+                // `container:` the two are the same number anyway.
+                let container = def.container_ports();
+                if def.kind == SettingKind::Ports && !container.is_empty() {
+                    return Some((name, join_ports(container)));
+                }
                 Some((name, json_scalar(value)))
             })
             .collect()
@@ -938,6 +1065,85 @@ settings:
     }
 
     #[test]
+    fn container_ports_accept_a_scalar_or_a_list() {
+        let none = def("{ key: p, type: ports, default: [3000] }");
+        assert!(
+            none.container_ports().is_empty(),
+            "no 'container' means host == container"
+        );
+
+        let one = def("{ key: p, type: ports, default: [8080], container: 3000 }");
+        assert_eq!(one.container_ports(), [3000]);
+
+        let many = def("{ key: p, type: ports, default: [8080, 8443], container: [3000, 3443] }");
+        assert_eq!(many.container_ports(), [3000, 3443]);
+    }
+
+    #[test]
+    fn container_ports_are_validated_against_the_package() {
+        let file = |yaml: &str| -> SettingsFile { serde_yaml::from_str(yaml).unwrap() };
+
+        // 'container' only makes sense on 'type: ports'.
+        assert!(
+            file("settings:\n  - { key: p, type: number, container: 3000 }\n")
+                .validate()
+                .is_err()
+        );
+        // Host and container sides pair by index, so a default that does not
+        // line up is a package bug.
+        assert!(
+            file(
+                "settings:\n  - { key: p, type: ports, default: [8080], container: [3000, 3443] }\n"
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            file("settings:\n  - { key: p, type: ports, default: [8080], container: [] }\n")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            file("settings:\n  - { key: p, type: ports, default: [8080], container: 0 }\n")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            file("settings:\n  - { key: p, type: ports, default: [8080, 8443], container: [3000, 3443] }\n")
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_remapped_setting_fixes_how_many_ports_the_user_picks() {
+        let d = def("{ key: p, type: ports, default: [8080, 8443], container: [3000, 3443] }");
+        assert_eq!(
+            d.parse_value("9080 9443").unwrap(),
+            serde_json::json!([9080, 9443])
+        );
+        // One port for two container ports would leave a publish undefined.
+        assert!(d.parse_value("9080").is_err());
+        assert!(d.parse_value("9080 9443 9444").is_err());
+    }
+
+    #[test]
+    fn the_editor_hint_shows_what_a_host_port_maps_onto() {
+        let plain = def("{ key: p, type: ports, limits: { min: 1024, max: 65535 } }");
+        assert_eq!(plain.constraint_hint().as_deref(), Some("1024..=65535"));
+
+        let mapped =
+            def("{ key: p, type: ports, container: 3000, limits: { min: 1024, max: 65535 } }");
+        assert_eq!(
+            mapped.constraint_hint().as_deref(),
+            Some("1024..=65535 → 3000")
+        );
+
+        let no_limits = def("{ key: p, type: ports, container: [3000, 3443] }");
+        assert_eq!(no_limits.constraint_hint().as_deref(), Some("→ 3000,3443"));
+    }
+
+    #[test]
     fn volumes_values_parse_and_validate() {
         let d = def("{ key: vols, type: volumes }");
         assert_eq!(d.kind.category(), SettingCategory::Volumes);
@@ -1017,6 +1223,54 @@ settings:
                 ("SERVER_NAME".to_string(), "My Server".to_string()),
                 ("MAX_PLAYERS".to_string(), "50".to_string()),
                 ("PVP".to_string(), "true".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn values_from_a_client_must_pair_with_the_container_ports() {
+        let defs = [def(
+            "{ key: http_port, type: ports, default: [8080], container: [3000, 3443] }",
+        )];
+        let ok = SettingValues::from_map(
+            serde_json::json!({ "http_port": [8080, 8443] })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert!(ok.validate_against(&defs).is_ok());
+
+        // Half a mapping must not reach settings.json over the API — it
+        // would install fine and only fail at the next start.
+        let short = SettingValues::from_map(
+            serde_json::json!({ "http_port": [8080] })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert!(short.validate_against(&defs).is_err());
+
+        // A setting the user has not touched is simply absent.
+        assert!(SettingValues::default().validate_against(&defs).is_ok());
+    }
+
+    #[test]
+    fn env_of_a_remapped_port_is_the_container_side() {
+        let defs = [
+            def("{ key: http_port, type: ports, default: [8080], container: 3000, env: PORT }"),
+            def("{ key: game_port, type: ports, default: [27015], env: CS2_PORT }"),
+        ];
+        let mut values = SettingValues::default();
+        values.merge_defaults(&defs);
+        values.set("http_port", serde_json::json!([9090]));
+        assert_eq!(
+            values.env_pairs(&defs),
+            [
+                // The app listens inside the container, where the publish
+                // points — not on the host port the user picked.
+                ("PORT".to_string(), "3000".to_string()),
+                // Without 'container' the two sides are the same number.
+                ("CS2_PORT".to_string(), "27015".to_string()),
             ]
         );
     }

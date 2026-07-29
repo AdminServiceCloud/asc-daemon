@@ -65,7 +65,8 @@ enum Command {
         action: Option<LsAction>,
     },
     /// Show published ports per app, shorthand for `asc app ports` (root sees
-    /// all users' apps): each app and the host==container ports it publishes
+    /// all users' apps): each app and the host ports it publishes, with the
+    /// container port after `->` when the two differ
     Ports,
     /// Show disk usage, shorthand for `asc app disk` (root sees all users'
     /// apps): total space occupied by apps as a bar against the store's
@@ -324,8 +325,9 @@ enum AppAction {
     Disk {
         id: Option<String>,
     },
-    /// Show published ports (host==container) with their transport. Without
-    /// an id: every app and its ports as a table.
+    /// Show published ports with their transport (`8080->3000/tcp` when the
+    /// host and container sides differ). Without an id: every app and its
+    /// ports as a table.
     Ports {
         id: Option<String>,
     },
@@ -2013,8 +2015,8 @@ fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     if list.is_empty() {
         println!("  {}", t(Msg::PortsNone));
     } else {
-        for (port, protocol) in &list {
-            println!("  {}", port_label(*port, *protocol));
+        for port in &list {
+            println!("  {}", port_label(*port));
         }
     }
     Ok(())
@@ -2038,7 +2040,7 @@ fn ports_summary_cmd(
             let label = match ports::published(config, manager.store(), &app.meta) {
                 Ok(list) if !list.is_empty() => list
                     .iter()
-                    .map(|(port, protocol)| port_label(*port, *protocol))
+                    .map(|port| port_label(*port))
                     .collect::<Vec<_>>()
                     .join(", "),
                 _ => "-".to_string(),
@@ -2100,9 +2102,17 @@ fn ports_summary_cmd(
 }
 
 /// One published port with its transport, `docker ps`-style: `27015/tcp`,
-/// `27015/udp`, or `27015/tcp+udp` when both transports share the port.
-fn port_label(port: u16, protocol: docker::PortProtocol) -> String {
-    format!("{port}/{}", protocol.transports().join("+"))
+/// `27015/udp`, or `27015/tcp+udp` when both transports share the port. A
+/// port the package remaps (`container:`) reads as `8080->3000/tcp`: the
+/// host side first, because that is the one the user connects to and the one
+/// they chose.
+fn port_label(port: docker::PublishedPort) -> String {
+    let transports = port.protocol.transports().join("+");
+    if port.is_remapped() {
+        format!("{}->{}/{transports}", port.host, port.container)
+    } else {
+        format!("{}/{transports}", port.host)
+    }
 }
 
 /// Static `[████░░░░]`-style bar (not `indicatif` — that's for streaming
@@ -3205,17 +3215,38 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{port_label, resource_shortages};
-    use asc_daemon::daemon::docker::PortProtocol;
+    use asc_daemon::daemon::docker::{PortProtocol, PublishedPort};
     use asc_daemon::daemon::monitor::system::{
         CpuMetrics, DiskMetrics, MemoryMetrics, SystemMetrics,
     };
 
     #[test]
     fn port_label_renders_transport_docker_style() {
-        assert_eq!(port_label(27015, PortProtocol::Tcp), "27015/tcp");
-        assert_eq!(port_label(27015, PortProtocol::Udp), "27015/udp");
-        // `both` shares the host==container port across transports.
-        assert_eq!(port_label(27015, PortProtocol::Both), "27015/tcp+udp");
+        let direct = |protocol| port_label(PublishedPort::direct(27015, protocol));
+        assert_eq!(direct(PortProtocol::Tcp), "27015/tcp");
+        assert_eq!(direct(PortProtocol::Udp), "27015/udp");
+        // `both` shares the same port across transports.
+        assert_eq!(direct(PortProtocol::Both), "27015/tcp+udp");
+    }
+
+    #[test]
+    fn port_label_shows_the_mapping_only_when_the_sides_differ() {
+        let remapped = PublishedPort {
+            host: 8080,
+            container: 3000,
+            protocol: PortProtocol::Tcp,
+        };
+        assert_eq!(port_label(remapped), "8080->3000/tcp");
+        // Same number on both sides stays a bare port — the overwhelming
+        // majority of packages, and `8080->8080/tcp` reads as noise.
+        assert_eq!(
+            port_label(PublishedPort {
+                host: 8080,
+                container: 8080,
+                protocol: PortProtocol::Tcp,
+            }),
+            "8080/tcp"
+        );
     }
 
     #[test]

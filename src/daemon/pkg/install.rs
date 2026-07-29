@@ -1222,9 +1222,10 @@ fn process_runtime(start: &str) -> Runtime {
 pub(crate) struct RuntimeInputs {
     /// `(ENV_NAME, value)` for every setting with an `env:` key.
     pub env: Vec<(String, String)>,
-    /// Flattened values of every `type: ports` setting, each with its
-    /// transport(s) (`protocol:`, default `tcp`).
-    pub ports: Vec<(u16, docker::PortProtocol)>,
+    /// Flattened values of every `type: ports` setting: the user's host port
+    /// paired with the package's container port (`container:`, equal when
+    /// unset) and their transport(s) (`protocol:`, default `tcp`).
+    pub ports: Vec<docker::PublishedPort>,
     /// Flattened values of every `type: volumes` setting.
     pub volumes: Vec<String>,
     /// The user's `$start_command` override, else the package's.
@@ -1256,13 +1257,32 @@ pub(crate) fn runtime_inputs(
                 let list = value
                     .as_array()
                     .with_context(|| format!("setting '{}' must be a list of ports", def.key))?;
-                for item in list {
-                    let port = item
+                // The chosen ports are the host side; the package's
+                // `container:` fixes the inside, paired by index. A count
+                // that no longer lines up (a hand-edited settings.json, an
+                // upgrade that changed the package) is refused rather than
+                // guessed at — a wrong mapping publishes the app on a port
+                // nothing listens on.
+                let container = def.container_ports();
+                if !container.is_empty() && list.len() != container.len() {
+                    bail!(
+                        "setting '{}': {} port(s) chosen but the package publishes {} — they pair by index",
+                        def.key,
+                        list.len(),
+                        container.len()
+                    );
+                }
+                for (index, item) in list.iter().enumerate() {
+                    let host = item
                         .as_u64()
                         .and_then(|p| u16::try_from(p).ok())
                         .filter(|p| *p != 0)
                         .with_context(|| format!("setting '{}': invalid port {item}", def.key))?;
-                    ports.push((port, def.port_protocol()));
+                    ports.push(docker::PublishedPort {
+                        host,
+                        container: container.get(index).copied().unwrap_or(host),
+                        protocol: def.port_protocol(),
+                    });
                 }
             }
             SettingKind::Volumes => {
@@ -1277,6 +1297,21 @@ pub(crate) fn runtime_inputs(
                 }
             }
             _ => {}
+        }
+    }
+    // Two settings aiming at the same container port would collapse into one
+    // Engine binding and silently drop a publish. Two settings on the same
+    // *host* port need no check here: the Engine refuses the second one out
+    // loud when the container starts.
+    let mut published = std::collections::HashSet::new();
+    for port in &ports {
+        for transport in port.protocol.transports() {
+            if !published.insert((port.container, *transport)) {
+                bail!(
+                    "container port {}/{transport} is published by more than one setting — each takes a single host port",
+                    port.container
+                );
+            }
         }
     }
     let start_command = values
@@ -1776,7 +1811,13 @@ mod tests {
                 ("CS2_PORT".to_string(), "27015".to_string())
             ]
         );
-        assert_eq!(inputs.ports, [(27015, docker::PortProtocol::Tcp)]);
+        assert_eq!(
+            inputs.ports,
+            [docker::PublishedPort::direct(
+                27015,
+                docker::PortProtocol::Tcp
+            )]
+        );
         assert_eq!(inputs.volumes, ["/home/steam/cs2-dedicated"]);
         assert_eq!(inputs.start_command, None);
 
@@ -1803,8 +1844,8 @@ mod tests {
         assert_eq!(
             inputs.ports,
             [
-                (27016, docker::PortProtocol::Tcp),
-                (27017, docker::PortProtocol::Tcp)
+                docker::PublishedPort::direct(27016, docker::PortProtocol::Tcp),
+                docker::PublishedPort::direct(27017, docker::PortProtocol::Tcp)
             ]
         );
         assert_eq!(inputs.start_command.as_deref(), Some("./cs2 -override"));
@@ -1813,6 +1854,80 @@ mod tests {
         let inputs = runtime_inputs(None, dir.path()).unwrap();
         assert!(inputs.env.is_empty() && inputs.ports.is_empty() && inputs.volumes.is_empty());
         assert_eq!(inputs.start_command.as_deref(), Some("./cs2 -override"));
+    }
+
+    #[test]
+    fn the_user_picks_the_host_port_and_the_package_the_container_one() {
+        use super::super::settings::SettingValues;
+        let settings: SettingsFile = serde_yaml::from_str(
+            "settings:\n  - { key: http_port, type: ports, default: [8080], container: 3000, env: PORT }\n  - { key: sip_port, type: ports, default: [5060], container: 5060, protocol: both }\n",
+        )
+        .unwrap();
+        settings.validate().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut values = SettingValues::load(dir.path()).unwrap();
+        values.set("http_port", serde_json::json!([9090]));
+        values.save(dir.path()).unwrap();
+
+        let inputs = runtime_inputs(Some(&settings), dir.path()).unwrap();
+        assert_eq!(
+            inputs.ports,
+            [
+                docker::PublishedPort {
+                    host: 9090,
+                    container: 3000,
+                    protocol: docker::PortProtocol::Tcp,
+                },
+                // A package may fix a container port equal to the default
+                // host one — the mapping is still explicit, and both
+                // transports share it.
+                docker::PublishedPort {
+                    host: 5060,
+                    container: 5060,
+                    protocol: docker::PortProtocol::Both,
+                },
+            ]
+        );
+        // The app is told where to listen inside the container.
+        assert_eq!(inputs.env, [("PORT".to_string(), "3000".to_string())]);
+    }
+
+    #[test]
+    fn ports_that_no_longer_pair_with_the_package_are_refused() {
+        use super::super::settings::SettingValues;
+        let settings: SettingsFile = serde_yaml::from_str(
+            "settings:\n  - { key: http_port, type: ports, default: [8080], container: 3000 }\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // A hand-edited settings.json (or an upgrade that changed the
+        // package) must not be guessed at: half a mapping publishes the app
+        // where nothing listens.
+        let mut values = SettingValues::load(dir.path()).unwrap();
+        values.set("http_port", serde_json::json!([9090, 9443]));
+        values.save(dir.path()).unwrap();
+        assert!(runtime_inputs(Some(&settings), dir.path()).is_err());
+    }
+
+    #[test]
+    fn one_container_port_cannot_be_published_twice() {
+        let settings: SettingsFile = serde_yaml::from_str(
+            "settings:\n  - { key: a, type: ports, default: [8080], container: 3000 }\n  - { key: b, type: ports, default: [8081], container: 3000 }\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Both bindings would land on the same Engine key and one publish
+        // would vanish without a word.
+        assert!(runtime_inputs(Some(&settings), dir.path()).is_err());
+
+        // The same number on different transports is a legitimate pair.
+        let split: SettingsFile = serde_yaml::from_str(
+            "settings:\n  - { key: a, type: ports, default: [8080], container: 3000, protocol: tcp }\n  - { key: b, type: ports, default: [8081], container: 3000, protocol: udp }\n",
+        )
+        .unwrap();
+        assert!(runtime_inputs(Some(&split), dir.path()).is_ok());
     }
 
     #[test]

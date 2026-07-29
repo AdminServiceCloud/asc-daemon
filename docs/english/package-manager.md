@@ -98,11 +98,18 @@ settings:
     default: true
 
   - key: game_port
-    type: ports                 # published container ports (a list)
+    type: ports                 # published ports (a list)
     default: [27015]
     limits: { min: 1024, max: 65535 }
     env: CS2_PORT               # exposed comma-joined; one port — as is
     protocol: both               # tcp (default) | udp | both
+
+  - key: http_port
+    type: ports                 # the value is the HOST side, user-chosen
+    default: [8080]
+    container: [3000]           # the CONTAINER side, fixed by the author
+    limits: { min: 1024, max: 65535 }
+    env: PORT                   # exposes 3000 — where the app must listen
 
   - key: game_data
     type: volumes               # app volumes (a list, forms below)
@@ -111,7 +118,10 @@ settings:
 
 - Setting values are saved in `/asc/apps/<id>/config/settings.json` (0600 — the file may hold secrets); at install time it is seeded with the defaults, an upgrade adds defaults for new keys without touching the user's choices.
 - **Env pass-through**: every setting that declares `env: VAR_NAME` lands in the application's environment (secrets included — that is what their `env:` is for). For Docker apps the variables go into the container env at creation. List values (`ports`, `volumes`) are exposed comma-joined.
-- **`type: ports`** — the published container ports (host port == container port). Declaring the same setting with `env:` keeps the app and Docker in sync: the server listens exactly where the port is forwarded. **`protocol`** picks the transport(s) to forward: `tcp` (default), `udp`, or `both` (the same host==container port on TCP and UDP).
+- **`type: ports`** — the ports the app publishes. The setting's value is the **host** side — the port the user picks and connects to. **`protocol`** picks the transport(s) to forward: `tcp` (default), `udp`, or `both` (the same port on TCP and UDP).
+- **`container:` (type: ports only, DMN-052)** — the **container** side, fixed by the package author: where the app listens *inside* the container, which is a property of the image, not a user choice. Written as one port (`container: 3000`) or a list (`container: [3000, 3443]`) paired **by index** with the setting's value, so the author also fixes how many ports the app publishes — the editor rejects a value with a different count. Without `container:` the publish stays host == container, which is what every package written before this field does, and nothing about them changes.
+  - **`env:` exposes the container side.** The variable tells the app where to listen, and the publish points at it: with `container: [3000]` and a user-chosen host port of 8080, `env: PORT` is `PORT=3000` and the Engine publishes `8080 → 3000`. When there is no `container:`, both sides are the same number anyway. An app that must advertise its *public* port has host == container by nature (game servers, SIP) — declare it without `container:`.
+  - Two settings may share a port number only on different transports (`3000/tcp` and `3000/udp`); pointing two settings at the same container port and transport is refused, because the Engine would keep just one of the two publishes.
 - **`type: volumes`** — the app's volumes; every entry takes one of three forms:
   - `/container/path` — private app data: the app's **data folder** (`/asc/apps/<id>/data`) is mounted at that container path. The folder is created world-writable (0777): images run under arbitrary non-root users and bind mounts keep host ownership; the app directory above it stays restrictive. When the image declares a numeric `USER uid:gid`, the folder is also chowned to it (DMN-038) — a non-root process may only chown a path it already owns, so an image that `chown`s its own data directory on first start (not just writes to it) needs this to avoid EPERM; a named (`steam`) or bare-uid `USER` is left as world-writable only, since its group is only known to the image's own `/etc/passwd`;
   - `/container/path:host` — same, but the host side after the colon is used **instead of `data`**: a plain folder name lands inside the app directory (`/asc/apps/<id>/<folder>`; `repository`, `config` and `meta.json` are reserved), an **absolute path** is a host machine path mounted verbatim (a pre-existing directory keeps its ownership and mode);
@@ -258,4 +268,4 @@ apps:
 
 ## 🔗 Related tasks
 
-DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, REG-001, REG-002, BE-002, BE-003 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).
+DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, REG-001, REG-002, BE-002, BE-003 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).

@@ -50,7 +50,7 @@ pub enum PortProtocol {
     #[default]
     Tcp,
     Udp,
-    /// Both TCP and UDP, forwarded on the same host==container port.
+    /// Both TCP and UDP, forwarded on the same port.
     Both,
 }
 
@@ -63,6 +63,54 @@ impl PortProtocol {
             PortProtocol::Both => &["tcp", "udp"],
         }
     }
+}
+
+/// One published port: the `host` port the user picked and the `container`
+/// port the package author fixed (the `container:` field of a `type: ports`
+/// setting, DMN-052). A package that declares no container port publishes
+/// host == container, which is what every package did before the field
+/// existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedPort {
+    pub host: u16,
+    pub container: u16,
+    #[serde(default)]
+    pub protocol: PortProtocol,
+}
+
+impl PublishedPort {
+    /// A port published straight through, host == container.
+    pub fn direct(port: u16, protocol: PortProtocol) -> Self {
+        Self {
+            host: port,
+            container: port,
+            protocol,
+        }
+    }
+
+    /// Whether the host and container sides differ — the case worth showing
+    /// to the user as a mapping instead of a bare port number.
+    pub fn is_remapped(self) -> bool {
+        self.host != self.container
+    }
+
+    /// The daemon's normalized binding keys, one per transport
+    /// (`"8080:3000/tcp"`). Both sides of the drift check ([`AppliedConfig`]
+    /// and `pkg::refresh`) build the same strings, so a changed host port —
+    /// invisible in the Engine's own `ExposedPorts` keys, which name only the
+    /// container side — still reads as drift and triggers a recreate.
+    pub fn binding_keys(self) -> impl Iterator<Item = String> {
+        let (host, container) = (self.host, self.container);
+        self.protocol
+            .transports()
+            .iter()
+            .map(move |transport| binding_key(host, container, transport))
+    }
+}
+
+/// `"<host>:<container>/<transport>"` — see [`PublishedPort::binding_keys`].
+fn binding_key(host: u16, container: u16, transport: &str) -> String {
+    format!("{host}:{container}/{transport}")
 }
 /// Client connect/request timeout, seconds.
 const CONNECT_TIMEOUT_SECS: u64 = 120;
@@ -189,7 +237,8 @@ pub struct AppliedConfig {
     pub env: Vec<String>,
     /// `HostConfig.Binds`, sorted.
     pub binds: Vec<String>,
-    /// Published port keys (`"27015/tcp"`), sorted.
+    /// Published ports as normalized binding keys (`"8080:3000/tcp"`),
+    /// sorted — see [`PublishedPort::binding_keys`].
     pub ports: Vec<String>,
     /// `HostConfig.NanoCpus`; 0 = unlimited.
     pub nano_cpus: i64,
@@ -210,7 +259,11 @@ pub fn container_applied(cfg: &DockerConfig, container: &str) -> Result<Option<A
                 let host = info.host_config.unwrap_or_default();
                 let mut ports: Vec<String> = host
                     .port_bindings
-                    .map(|map| map.into_keys().collect())
+                    .map(|map| {
+                        map.into_iter()
+                            .map(|(key, bindings)| applied_binding_key(&key, bindings.as_deref()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 ports.sort();
                 let mut binds = host.binds.unwrap_or_default();
@@ -228,6 +281,24 @@ pub fn container_applied(cfg: &DockerConfig, container: &str) -> Result<Option<A
             Err(e) => Err(friendly(cfg, e)),
         }
     })
+}
+
+/// Normalize one `HostConfig.PortBindings` entry — Engine key
+/// (`"3000/tcp"`, the **container** side) plus its host bindings — into the
+/// daemon's `"<host>:<container>/<transport>"` form.
+///
+/// A binding without an explicit host port (the Engine picks an ephemeral
+/// one) is not something the daemon ever creates: it reads back as `auto`,
+/// which matches no desired key and so recreates the container onto the
+/// ports the settings actually ask for.
+fn applied_binding_key(key: &str, bindings: Option<&[PortBinding]>) -> String {
+    let (container, transport) = key.split_once('/').unwrap_or((key, "tcp"));
+    let host = bindings
+        .and_then(|list| list.first())
+        .and_then(|binding| binding.host_port.as_deref())
+        .filter(|host| !host.is_empty())
+        .unwrap_or("auto");
+    format!("{host}:{container}/{transport}")
 }
 
 /// Force-remove the container. A missing container (404) is success.
@@ -439,8 +510,8 @@ pub struct CreateSpec<'a> {
     pub image: &'a str,
     /// Environment entries as `KEY=value`.
     pub env: Vec<String>,
-    /// Ports to publish (host==container), each with its transport(s).
-    pub ports: Vec<(u16, PortProtocol)>,
+    /// Ports to publish, each with its host and container side.
+    pub ports: Vec<PublishedPort>,
     /// Volume binds as `host_path:container_path`.
     pub binds: Vec<String>,
     /// CPU quota in units of 1e-9 cores (Engine `NanoCpus`); `None` = unlimited.
@@ -738,17 +809,20 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
 
+        // The Engine names a port by its **container** side; the host side
+        // lives in the binding. They are equal unless the package fixed a
+        // container port of its own (`container:`, DMN-052).
         let mut exposed_ports: Vec<String> = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-        for (port, protocol) in &spec.ports {
-            for transport in protocol.transports() {
-                let key = format!("{port}/{transport}");
+        for port in &spec.ports {
+            for transport in port.protocol.transports() {
+                let key = format!("{}/{transport}", port.container);
                 exposed_ports.push(key.clone());
                 port_bindings.insert(
                     key,
                     Some(vec![PortBinding {
                         host_ip: None,
-                        host_port: Some(port.to_string()),
+                        host_port: Some(port.host.to_string()),
                     }]),
                 );
             }

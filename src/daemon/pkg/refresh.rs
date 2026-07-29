@@ -82,7 +82,8 @@ struct Desired {
     quota: Option<Quota>,
     /// `KEY=value` pairs the container env must contain.
     env: Vec<String>,
-    /// Published port keys (`"27015/tcp"`), sorted.
+    /// Published ports as normalized binding keys (`"8080:3000/tcp"`),
+    /// sorted.
     ports: Vec<String>,
     /// Volume binds as the Engine sees them, sorted.
     binds: Vec<String>,
@@ -113,15 +114,13 @@ impl Desired {
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
             .collect();
+        // Both sides of the port comparison are the normalized
+        // `host:container/transport` keys, so re-picking only the host port
+        // of an already published container port still reads as drift.
         let mut ports: Vec<String> = inputs
             .ports
             .iter()
-            .flat_map(|(port, protocol)| {
-                protocol
-                    .transports()
-                    .iter()
-                    .map(move |transport| format!("{port}/{transport}"))
-            })
+            .flat_map(|port| port.binding_keys())
             .collect();
         ports.sort();
         ports.dedup();

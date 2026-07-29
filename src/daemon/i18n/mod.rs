@@ -203,6 +203,7 @@ pub enum Msg {
     HintEnumCustom,
     ErrSettingLength,
     ErrSettingPort,
+    ErrSettingPortCount,
     ErrSettingVolume,
     ErrQuotaSize,
     ErrQuotaCpu,
@@ -637,6 +638,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ErrSettingPort => (
             "enter port numbers 1–65535, separated by spaces or commas",
             "введите номера портов 1–65535 через пробел или запятую",
+        ),
+        Msg::ErrSettingPortCount => (
+            "this app publishes {} port(s) — enter exactly that many",
+            "приложение публикует портов: {} — введите ровно столько же",
         ),
         Msg::ErrSettingVolume => (
             "invalid volume '{}': expected /container/path[:host_folder|:/host/path] or name:/container/path[:ro]",

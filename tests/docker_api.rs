@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use asc_daemon::daemon::config::DockerConfig;
-use asc_daemon::daemon::docker::{self, CreateSpec, PortProtocol};
+use asc_daemon::daemon::docker::{self, CreateSpec, PortProtocol, PublishedPort};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -56,6 +56,21 @@ fn spawn_mock(socket: PathBuf) -> Hits {
                         .map(|(_, v)| v.trim().to_string())
                     {
                         hits.lock().unwrap().push(format!("AUTH {value}"));
+                    }
+                    // The JSON body of a request that has one (create), so
+                    // tests can assert on the spec the daemon sends.
+                    if let Some(len) = head
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split_once(':'))
+                        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                        .filter(|len| *len > 0)
+                    {
+                        let mut body = vec![0u8; len];
+                        if stream.read_exact(&mut body).await.is_ok() {
+                            let body = String::from_utf8_lossy(&body).to_string();
+                            hits.lock().unwrap().push(format!("BODY {body}"));
+                        }
                     }
 
                     let seen = hits.lock().unwrap().clone();
@@ -238,8 +253,12 @@ fn create_sends_container_spec() {
         CreateSpec {
             name: "asc-web",
             image: "nginx:1.27",
-            env: vec!["PORT=8080".into()],
-            ports: vec![(8080, PortProtocol::Tcp)],
+            env: vec!["PORT=3000".into()],
+            ports: vec![PublishedPort {
+                host: 8080,
+                container: 3000,
+                protocol: PortProtocol::Tcp,
+            }],
             binds: vec!["/asc/apps/web/data/data:/data".into()],
             nano_cpus: Some(1_500_000_000),
             memory_bytes: Some(512 << 20),
@@ -268,6 +287,21 @@ fn create_sends_container_spec() {
         2,
         "create must be retried after the pull, saw: {seen:?}"
     );
+    // The Engine names the port by its container side and carries the host
+    // side in the binding — the user's 8080 reaches the app's 3000.
+    let body = seen
+        .iter()
+        .find(|h| h.starts_with("BODY ") && h.contains("PortBindings"))
+        .unwrap_or_else(|| panic!("create must send a container spec, saw: {seen:?}"));
+    assert!(
+        body.contains(r#""3000/tcp":[{"HostPort":"8080"}]"#)
+            || body.contains(r#""3000/tcp":[{"HostIp":null,"HostPort":"8080"}]"#),
+        "host 8080 must publish onto container 3000, got: {body}"
+    );
+    assert!(
+        body.contains(r#""ExposedPorts""#) && body.contains(r#""3000/tcp""#),
+        "the exposed port is the container side, got: {body}"
+    );
 }
 
 #[test]
@@ -278,7 +312,9 @@ fn container_applied_reads_inspect_and_tolerates_missing() {
         .unwrap()
         .unwrap();
     assert_eq!(applied.env, ["PATH=/usr/bin", "CS2_STARTMAP=de_dust2"]);
-    assert_eq!(applied.ports, ["27015/tcp"]);
+    // Normalized as host:container/transport, so a host port changed under
+    // an unchanged container port still reads as drift.
+    assert_eq!(applied.ports, ["27015:27015/tcp"]);
     assert!(applied.binds.is_empty());
     assert_eq!((applied.nano_cpus, applied.memory), (0, 0));
     // A missing container (404) reads as None — the caller recreates it.
@@ -411,6 +447,39 @@ fn settings_drift_recreates_the_container() {
         Some(1 << 30),
         "meta.quota must reflect the applied override"
     );
+
+    // DMN-052: the package now fixes the container side, so only the *host*
+    // port moves. The Engine's own key ("27015/tcp") is identical before and
+    // after — the drift check must compare the host side too, or the app
+    // would keep answering on the port the user just left behind.
+    std::fs::write(
+        app_dir.join("repository/asc.settings.yaml"),
+        "settings:\n  - { key: map, type: enum, values: [de_dust2, de_mirage], \
+         default: de_dust2, env: CS2_STARTMAP }\n  - { key: game_port, type: ports, \
+         default: [27015], container: 27015 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("config/settings.json"),
+        r#"{"map":"de_dust2","game_port":[27016]}"#,
+    )
+    .unwrap();
+    assert!(refresh::apply_settings(&config, &mut meta, &app_dir).unwrap());
+    assert_eq!(
+        deletes(),
+        4,
+        "a changed host port must recreate the container"
+    );
+
+    // The same mapping as the mock reports (host 27015 → container 27015) is
+    // not drift.
+    std::fs::write(
+        app_dir.join("config/settings.json"),
+        r#"{"map":"de_dust2","game_port":[27015]}"#,
+    )
+    .unwrap();
+    assert!(!refresh::apply_settings(&config, &mut meta, &app_dir).unwrap());
+    assert_eq!(deletes(), 4, "an unchanged mapping must not recreate");
 }
 
 #[test]

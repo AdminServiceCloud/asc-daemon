@@ -36,8 +36,8 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 - No token. The daemon asks the kernel for the connecting process's uid (`SO_PEERCRED`) and builds the context from it — nothing inside the request can escalate privileges.
 - The socket file is world-connectable (0666) on purpose: reaching it grants nothing, authorization is the peer uid, per request. A regular user sees and manages **only their own** apps; a root peer sees everyone's.
 - `sudo asc ...` attribution: the CLI forwards `SUDO_UID`/`SUDO_USER` as the `X-Asc-Sudo-Uid`/`X-Asc-Sudo-User` headers; the daemon honors them **only when the peer itself is root**, mirroring the in-process behavior — new apps are attributed to the invoking user while sudo keeps full visibility.
-- CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`) go through the socket whenever it exists. No socket file — the CLI works in-process as before (DMN-041: root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
-- Known limits (DMN-043): docker containers still run with the daemon's (root) privileges — a malicious manifest can request dangerous mounts, so a container policy for non-root owners is the follow-up; private-repo installs through the daemon use the daemon's git credentials, not the caller's; `asc attach` still opens Docker directly and needs root.
+- CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`) plus `app attach` and `app settings` (DMN-043) go through the socket whenever it exists. No socket file — the CLI works in-process as before (DMN-041: root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
+- Known limits (DMN-043): docker containers still run with the daemon's (root) privileges — a malicious manifest can request dangerous mounts, so a container policy for non-root owners is the follow-up; private-repo installs through the daemon use the daemon's git credentials, not the caller's.
 
 ### 🎫 Temporary console tokens
 
@@ -56,6 +56,8 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Disk usage: image, repository, data, custom volumes |
 | `POST /v1/apps/{id}/start\|stop\|restart` | `AppService.Start/Stop/RestartApp` | Lifecycle |
 | `GET /v1/apps/{id}/logs?tail=N` | `AppService.GetAppLogs` | Log tail |
+| `GET /v1/apps/{id}/settings` | — (REST only for now) | The app's settings schema (`asc.settings.yaml`, `null` when the package defines none) and the values chosen so far, defaults merged in |
+| `PUT /v1/apps/{id}/settings {"values": {...}}` | — (REST only for now) | Replace the chosen values; keys the app's own schema does not define are rejected. A gRPC counterpart waits on modelling the settings schema in the proto contracts |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Removal including data |
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Temporary console token |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |

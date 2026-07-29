@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.3.10"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -51,6 +51,10 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util", "io-std"] }
+# WebSocket client for `asc app attach` over the daemon socket (DMN-043):
+# the daemon's console endpoint is a WebSocket, and this speaks it over the
+# same UnixStream the REST client uses. No TLS: the peer is a local socket.
+tokio-tungstenite = "0.30"
 toml = "1.1"
 tonic = "0.14"
 tracing = "0.1"

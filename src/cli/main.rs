@@ -575,7 +575,7 @@ fn run() -> anyhow::Result<()> {
             image_choice_flag(image, build),
             &config,
         ),
-        Command::Attach { id } => attach_cmd(&id, &config),
+        Command::Attach { id } => attach_anywhere(&id, &config),
         Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
         Command::Search { query } => search_cmd(&query, &config),
         Command::Update => {
@@ -1560,6 +1560,8 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             | AppAction::Restart { .. }
             | AppAction::Logs { .. }
             | AppAction::Remove { .. }
+            | AppAction::Attach { .. }
+            | AppAction::Settings { .. }
     );
     if routable && let Some(daemon) = daemon_backend(config)? {
         return app_cmd_daemon(&daemon, action, config);
@@ -1600,20 +1602,21 @@ fn app_cmd_daemon(
                 false => println!("{}", tf(Msg::AppStarted, &id)),
                 true => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
             }
-            // Auto-attach like the in-process path — the attach itself
-            // still opens Docker directly, so it only works where the
-            // caller can reach docker.sock (root); the console over the
-            // daemon socket is a follow-up (DMN-043).
+            // Auto-attach like the in-process path. The console now runs
+            // through the daemon (DMN-043), so this no longer needs the
+            // caller to reach docker.sock themselves.
             // SAFETY: isatty() has no preconditions.
             let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
-            if !detach
-                && interactive
-                && UserContext::current().is_root
-                && daemon.info(&id)?.kind == "docker"
-            {
-                attach_cmd(&id, config)?;
+            if !detach && interactive && daemon.info(&id)?.kind == "docker" {
+                eprintln!("{}", tf(Msg::AttachHint, &id));
+                daemon.attach(&id)?;
             }
         }
+        AppAction::Attach { id } => {
+            eprintln!("{}", tf(Msg::AttachHint, &id));
+            daemon.attach(&id)?;
+        }
+        AppAction::Settings { id } => app_settings_cmd_daemon(daemon, &id)?,
         AppAction::Stop { id } => match with_spinner(|| daemon.stop(&id))? {
             false => println!("{}", tf(Msg::AppStopped, &id)),
             true => println!("{}", tf(Msg::AppNotRunning, &id)),
@@ -2164,26 +2167,71 @@ fn clone_cmd(reference: &str, name: Option<String>, config: &Config) -> anyhow::
 /// `config/settings.json`; the runtime picks it up on the next restart.
 fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::manifest::Manifest;
-    use asc_daemon::daemon::pkg::settings::{
-        SettingCategory, SettingValues, SettingsFile, manifest_dir_of,
-    };
+    use asc_daemon::daemon::pkg::settings::{SettingValues, SettingsFile, manifest_dir_of};
 
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
     // The canonical id: `reference` may have been the app's custom name.
-    let id = &manager.get_authorized(&ctx, reference)?.id;
-    let app_dir = manager.store().app_dir(id)?;
+    let id = manager.get_authorized(&ctx, reference)?.id;
+    let app_dir = manager.store().app_dir(&id)?;
 
     let manifest_dir = manifest_dir_of(config, &app_dir)?;
     let manifest = Manifest::load(&manifest_dir)?;
-    let Some(file) = SettingsFile::load_for(&manifest_dir, &manifest)? else {
-        println!("{}", tf(Msg::SettingsNone, id));
-        return Ok(());
-    };
+    let file = SettingsFile::load_for(&manifest_dir, &manifest)?;
 
     let config_dir = app_dir.join("config");
     let mut values = SettingValues::load(&config_dir)?;
-    values.merge_defaults(&file.settings);
+    if let Some(file) = &file {
+        values.merge_defaults(&file.settings);
+    }
+    settings_editor(&id, file, values, &SettingsSink::Local(config_dir))
+}
+
+/// `asc app settings <id>` against the daemon (DMN-043): the schema and the
+/// values come from — and go back to — the daemon, so the editor works for a
+/// user whose app lives in the root-owned system tree they cannot read. The
+/// editing itself is the same code as in-process.
+fn app_settings_cmd_daemon(daemon: &client::Daemon, reference: &str) -> anyhow::Result<()> {
+    // The canonical id: `reference` may have been the app's custom name.
+    let id = daemon.info(reference)?.id;
+    let (file, values) = daemon.settings(&id)?;
+    settings_editor(&id, file, values, &SettingsSink::Daemon(daemon, id.clone()))
+}
+
+/// Where the editor persists what it changes: the app's own config directory
+/// when the CLI can write it, the daemon otherwise.
+enum SettingsSink<'a> {
+    Local(std::path::PathBuf),
+    Daemon(&'a client::Daemon, String),
+}
+
+impl SettingsSink<'_> {
+    fn save(
+        &self,
+        values: &asc_daemon::daemon::pkg::settings::SettingValues,
+    ) -> anyhow::Result<()> {
+        match self {
+            SettingsSink::Local(config_dir) => values.save(config_dir),
+            SettingsSink::Daemon(daemon, id) => daemon.save_settings(id, values),
+        }
+    }
+}
+
+/// The editor itself: pick a category, edit its settings, repeat. Shared by
+/// the in-process and the over-the-daemon entry points, which differ only in
+/// where the values come from and where they are written back.
+fn settings_editor(
+    id: &str,
+    file: Option<asc_daemon::daemon::pkg::settings::SettingsFile>,
+    mut values: asc_daemon::daemon::pkg::settings::SettingValues,
+    sink: &SettingsSink<'_>,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::settings::SettingCategory;
+
+    let Some(file) = file else {
+        println!("{}", tf(Msg::SettingsNone, id));
+        return Ok(());
+    };
 
     let mut changed = false;
     loop {
@@ -2218,18 +2266,18 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
             continue;
         };
         match category {
-            SettingCategory::Quota => edit_quota(&file, &mut values, &config_dir, &mut changed)?,
+            SettingCategory::Quota => edit_quota(&file, &mut values, sink, &mut changed)?,
             SettingCategory::StartCommand => {
-                edit_start_command(&file, &mut values, &config_dir, &mut changed)?
+                edit_start_command(&file, &mut values, sink, &mut changed)?
             }
-            SettingCategory::Backups => edit_backup_policy(&mut values, &config_dir, &mut changed)?,
+            SettingCategory::Backups => edit_backup_policy(&mut values, sink, &mut changed)?,
             _ => {
                 let defs: Vec<_> = file
                     .settings
                     .iter()
                     .filter(|d| d.kind.category() == *category)
                     .collect();
-                edit_setting_defs(&defs, &mut values, &config_dir, &mut changed)?;
+                edit_setting_defs(&defs, &mut values, sink, &mut changed)?;
             }
         }
     }
@@ -2244,7 +2292,7 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
 fn edit_setting_defs(
     defs: &[&asc_daemon::daemon::pkg::settings::SettingDef],
     values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
-    config_dir: &std::path::Path,
+    sink: &SettingsSink<'_>,
     changed: &mut bool,
 ) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::settings::SettingKind;
@@ -2317,7 +2365,7 @@ fn edit_setting_defs(
             Ok(value) => {
                 let shown = def.display_of(&value);
                 values.set(&def.key, value);
-                values.save(config_dir)?;
+                sink.save(values)?;
                 *changed = true;
                 println!("{}", tf2(Msg::SettingsSaved, &def.key, shown));
             }
@@ -2332,7 +2380,7 @@ fn edit_setting_defs(
 fn edit_quota(
     file: &asc_daemon::daemon::pkg::settings::SettingsFile,
     values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
-    config_dir: &std::path::Path,
+    sink: &SettingsSink<'_>,
     changed: &mut bool,
 ) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::settings::{QuotaSpec, SettingValues, parse_size};
@@ -2430,7 +2478,7 @@ fn edit_quota(
         } else {
             values.set(SettingValues::QUOTA_KEY, serde_json::Value::Object(object));
         }
-        values.save(config_dir)?;
+        sink.save(values)?;
         *changed = true;
         if raw == "-" {
             println!("{}", tf(Msg::SettingsReset, FIELDS[index]));
@@ -2446,7 +2494,7 @@ fn edit_quota(
 fn edit_start_command(
     file: &asc_daemon::daemon::pkg::settings::SettingsFile,
     values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
-    config_dir: &std::path::Path,
+    sink: &SettingsSink<'_>,
     changed: &mut bool,
 ) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::settings::SettingValues;
@@ -2464,13 +2512,13 @@ fn edit_start_command(
     }
     if raw == "-" {
         values.remove(SettingValues::START_COMMAND_KEY);
-        values.save(config_dir)?;
+        sink.save(values)?;
         *changed = true;
         println!("{}", tf(Msg::SettingsReset, "start_command"));
         return Ok(());
     }
     values.set(SettingValues::START_COMMAND_KEY, serde_json::json!(raw));
-    values.save(config_dir)?;
+    sink.save(values)?;
     *changed = true;
     println!("{}", tf2(Msg::SettingsSaved, "start_command", &raw));
     Ok(())
@@ -2484,7 +2532,7 @@ fn edit_start_command(
 /// all-default policy is removed rather than stored empty.
 fn edit_backup_policy(
     values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
-    config_dir: &std::path::Path,
+    sink: &SettingsSink<'_>,
     changed: &mut bool,
 ) -> anyhow::Result<()> {
     use asc_daemon::daemon::backup::storage::StorageList;
@@ -2593,15 +2641,26 @@ fn edit_backup_policy(
         } else {
             values.set(SettingValues::BACKUP_KEY, serde_json::to_value(&policy)?);
         }
-        values.save(config_dir)?;
+        sink.save(values)?;
         *changed = true;
     }
     Ok(())
 }
 
-/// `asc attach` — interactive app console in the terminal: the app's output
-/// goes to stdout, the terminal's stdin goes to the app. Talks straight to
-/// the Engine API (standalone, no running daemon needed); Docker fans the
+/// `asc attach` — through the daemon when one is running (DMN-043: no
+/// docker-group membership and no access to the system app tree needed),
+/// straight to the Engine otherwise (standalone install, DMN-041).
+fn attach_anywhere(id: &str, config: &Config) -> anyhow::Result<()> {
+    if let Some(daemon) = daemon_backend(config)? {
+        eprintln!("{}", tf(Msg::AttachHint, id));
+        return daemon.attach(id);
+    }
+    attach_cmd(id, config)
+}
+
+/// `asc attach` in-process — interactive app console in the terminal: the
+/// app's output goes to stdout, the terminal's stdin goes to the app. Talks
+/// straight to the Engine API (no running daemon needed); Docker fans the
 /// output out to every attached client, so the CLI and browser tabs coexist.
 fn attach_cmd(id: &str, config: &Config) -> anyhow::Result<()> {
     let manager = AppManager::new(config);

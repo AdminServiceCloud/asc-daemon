@@ -124,6 +124,116 @@ fn peer_uid_scopes_app_visibility_without_a_token() {
     }
 }
 
+/// DMN-043: the settings editor works for a caller who cannot touch the app
+/// tree itself — the daemon serves the schema and the current values, and
+/// takes the edited ones back, validating them against that same schema.
+#[test]
+fn settings_round_trip_over_the_socket() {
+    use asc_daemon::daemon::pkg::settings::SettingValues;
+
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    config.api.socket = ws.path().join("asc.sock");
+
+    // SAFETY: geteuid() has no preconditions and cannot fail.
+    let my_uid = unsafe { libc::geteuid() };
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    store.save(&meta("mine", my_uid)).unwrap();
+    let repo = store.app_dir("mine").unwrap().join("repository");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(
+        repo.join("asc.yaml"),
+        "name: mine\nversion: '1'\ntype: docker\nsettings: ./asc.settings.yaml\nruntime:\n  image: i\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("asc.settings.yaml"),
+        "settings:\n  - key: greeting\n    type: string\n    default: hello\n",
+    )
+    .unwrap();
+
+    let state = ApiState::new(config.clone(), "unused-token".into());
+    let _stop = spawn_uds(state);
+    wait_for_socket(&config.api.socket);
+    let daemon = Daemon::connect(&config)
+        .expect("daemon answers")
+        .expect("socket file exists");
+
+    // The schema arrives with the package defaults already merged in.
+    let (file, values) = daemon.settings("mine").unwrap();
+    let file = file.expect("the package declares settings");
+    assert_eq!(file.settings.len(), 1);
+    assert_eq!(file.settings[0].key, "greeting");
+    assert_eq!(values.get("greeting").unwrap(), "hello");
+
+    // An edit lands in the app's own settings.json...
+    let mut edited = SettingValues::from_map(values.as_map().clone());
+    edited.set("greeting", serde_json::json!("bonjour"));
+    daemon.save_settings("mine", &edited).unwrap();
+    let (_, reloaded) = daemon.settings("mine").unwrap();
+    assert_eq!(reloaded.get("greeting").unwrap(), "bonjour");
+    let on_disk = std::fs::read_to_string(
+        store
+            .app_dir("mine")
+            .unwrap()
+            .join("config")
+            .join(SettingValues::FILE),
+    )
+    .unwrap();
+    assert!(on_disk.contains("bonjour"), "got: {on_disk}");
+
+    // ...but only for keys the package actually defines: the API is a trust
+    // boundary, not a free-form key-value store.
+    let mut bogus = SettingValues::default();
+    bogus.set("not_a_setting", serde_json::json!(1));
+    let err = daemon.save_settings("mine", &bogus).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("unknown setting"),
+        "got: {err:#}"
+    );
+}
+
+/// DMN-043: `asc app attach` goes through the daemon's console, so the
+/// caller needs neither the docker group nor access to the app tree — what
+/// they do need is a console token, and the daemon issues one only for an
+/// app that is theirs.
+#[test]
+fn console_tokens_are_scoped_to_the_callers_apps() {
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    config.api.socket = ws.path().join("asc.sock");
+
+    // SAFETY: geteuid() has no preconditions and cannot fail.
+    let my_uid = unsafe { libc::geteuid() };
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    store.save(&meta("mine", my_uid)).unwrap();
+    store.save(&meta("foreign", my_uid + 1)).unwrap();
+
+    let state = ApiState::new(config.clone(), "unused-token".into());
+    let _stop = spawn_uds(state);
+    wait_for_socket(&config.api.socket);
+    let daemon = Daemon::connect(&config)
+        .expect("daemon answers")
+        .expect("socket file exists");
+
+    let token = daemon.console_token("mine", "attach").unwrap();
+    assert!(!token.is_empty());
+    // Each call mints its own single-use token.
+    assert_ne!(token, daemon.console_token("mine", "attach").unwrap());
+
+    if my_uid != 0 {
+        let err = daemon.console_token("foreign", "attach").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not found") || format!("{err:#}").contains("не найдено"),
+            "got: {err:#}"
+        );
+    }
+}
+
 #[test]
 fn missing_socket_means_no_daemon() {
     let ws = tempfile::tempdir().unwrap();

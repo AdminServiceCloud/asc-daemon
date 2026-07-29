@@ -26,7 +26,7 @@ use bollard::query_parameters::{
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, trace, warn};
 
 use crate::daemon::config::DockerConfig;
 use crate::daemon::i18n::{Msg, t, tf};
@@ -650,6 +650,21 @@ pub struct BuildSpec<'a> {
 pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
     let tar = tar_context(spec.context_dir)?;
     let session = build_session_id();
+    // The build's own header: everything needed to tell an empty log apart
+    // from a build that never started. `bars` says whether this process can
+    // render progress at all — it cannot when the build runs inside the
+    // daemon (stderr is the journal, not a terminal), which is the normal
+    // case for `asc install` and the reason these lines are info, not debug.
+    info!(
+        tag = spec.tag,
+        dockerfile = spec.dockerfile,
+        context = %spec.context_dir.display(),
+        context_bytes = tar.len(),
+        build_args = spec.args.len(),
+        session = %session,
+        bars = progress::interactive(),
+        "image build starting"
+    );
     block_on(async {
         let docker = connect(cfg)?;
         let mut builder = BuildImageOptionsBuilder::new()
@@ -674,6 +689,13 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         let body = bollard::body_full(bytes::Bytes::from(tar));
         let mut stream = docker.build_image(builder.build(), None, Some(body));
         let mut bars = progress::interactive().then(progress::BuildBars::new);
+        // Frame accounting: what the Engine actually sent, so a build with no
+        // visible progress can be told apart from a build with no progress at
+        // all. `traced` counting zero on a finished build means the BuildKit
+        // side-channel degraded (session, Engine version, builder version) —
+        // that is a defect, and it gets a warning of its own below.
+        let mut frames = 0usize;
+        let mut traced = 0usize;
         while let Some(step) = stream.next().await {
             let info = match step {
                 Ok(info) => info,
@@ -682,16 +704,46 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
                 // gets the build's own context rather than `friendly`'s
                 // connectivity wording.
                 Err(BollardError::DockerStreamError { error }) => {
+                    warn!(
+                        tag = spec.tag,
+                        frames, traced, "build stream reported an error"
+                    );
                     return Err(anyhow!("{}: {error}", tf(Msg::ErrImageBuild, spec.tag)));
                 }
-                Err(e) => return Err(friendly(cfg, e)),
+                Err(e) => {
+                    warn!(
+                        tag = spec.tag,
+                        frames,
+                        traced,
+                        error = %format!("{e:?}"),
+                        "build stream aborted"
+                    );
+                    return Err(friendly(cfg, e));
+                }
             };
+            frames += 1;
+            // The raw frame, for when the decoded view above is not enough
+            // (`RUST_LOG=asc_daemon=trace`): one line per frame, verbatim.
+            trace!(tag = spec.tag, frame = frames, "{info:?}");
             if let Some(detail) = &info.error_detail {
                 let msg = detail.message.as_deref().unwrap_or("image build failed");
+                warn!(
+                    tag = spec.tag,
+                    frames, traced, "build reported an error frame"
+                );
                 return Err(anyhow!("{}: {msg}", tf(Msg::ErrImageBuild, spec.tag)));
             }
-            if let Some(BuildInfoAux::BuildKit(trace)) = &info.aux {
-                build_trace(spec.tag, trace, bars.as_mut());
+            match &info.aux {
+                Some(BuildInfoAux::BuildKit(trace)) => {
+                    traced += 1;
+                    build_trace(spec.tag, trace, bars.as_mut());
+                }
+                // The classic builder's final "here is your image" frame; with
+                // BuildKit it is the only non-trace aux that ever shows up.
+                Some(BuildInfoAux::Default(image)) => {
+                    debug!(tag = spec.tag, image = ?image.id, "build produced an image id");
+                }
+                None => {}
             }
             // The legacy builder's text output. BuildKit sends none of it, but
             // it costs nothing to keep logging whatever does arrive.
@@ -703,9 +755,29 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
             {
                 debug!(tag = spec.tag, "{line}");
             }
+            // Layer-pull style frames (status/progressDetail) — the legacy
+            // shape again, kept for the same reason.
+            if let Some(status) = info.status.as_deref().filter(|s| !s.trim().is_empty()) {
+                debug!(tag = spec.tag, id = ?info.id, "{status}");
+            }
         }
         if let Some(bars) = bars {
             bars.finish();
+        }
+        if traced == 0 {
+            // Not fatal: the image may well have been built. But it means the
+            // build ran blind — no step ever reached the log or the bars —
+            // and that is exactly the state this instrumentation exists to
+            // name instead of leaving as a silent terminal.
+            warn!(
+                tag = spec.tag,
+                frames,
+                session = %session,
+                "no BuildKit progress frames arrived: the build reported no steps \
+                 (check the Engine's BuildKit support and the build session)"
+            );
+        } else {
+            info!(tag = spec.tag, frames, traced, "image build finished");
         }
         Ok(())
     })
@@ -713,9 +785,12 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
 
 /// Render one frame of BuildKit's build trace: the vertices (Dockerfile
 /// steps) that changed state, the byte progress reported inside them, and
-/// the command output they produced. Everything is logged at debug level —
-/// the only build progress a non-terminal caller (the daemon, a script) can
-/// get — and, on a terminal, mirrored into the step bars.
+/// the command output they produced. A step reaching a terminal state is
+/// logged at info level, so the build is visible in `journalctl -u asc`
+/// without turning debug logging on — that is the only progress a
+/// non-terminal caller (the daemon serving `asc install`, a script) gets. The
+/// noisier half (a step starting, byte counters, the step's own output) stays
+/// at debug, and on a terminal everything is mirrored into the step bars.
 fn build_trace(tag: &str, trace: &StatusResponse, mut bars: Option<&mut progress::BuildBars>) {
     for vertex in &trace.vertexes {
         // A vertex is announced before it runs; docker shows nothing for it
@@ -723,7 +798,10 @@ fn build_trace(tag: &str, trace: &StatusResponse, mut bars: Option<&mut progress
         let Some(state) = vertex_state(vertex) else {
             continue;
         };
-        debug!(tag, step = vertex.name, "{}", state.label());
+        match &state {
+            progress::StepState::Running => debug!(tag, step = vertex.name, "running"),
+            terminal => info!(tag, step = vertex.name, "{}", terminal.label()),
+        }
         if let Some(bars) = bars.as_mut() {
             bars.step(&vertex.digest, &vertex.name, state);
         }

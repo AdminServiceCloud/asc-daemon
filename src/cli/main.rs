@@ -802,15 +802,23 @@ fn install_daemon_loop(
     let mut license_ack = false;
     let mut image_choice = image_choice;
     loop {
-        match daemon.install(
-            &spec,
-            source.as_deref(),
-            name,
-            branch,
-            tag,
-            license_ack,
-            image_choice,
-        ) {
+        // The daemon answers this call once the whole install is over —
+        // clone, image pull or local image build, container create — with
+        // nothing on the wire in between (DMN-050 progress is rendered inside
+        // the daemon, where stderr is the journal). A spinner is what keeps
+        // the terminal from reading as hung; `journalctl -u asc -f` is where
+        // the steps themselves show up.
+        match with_spinner(|| {
+            daemon.install(
+                &spec,
+                source.as_deref(),
+                name,
+                branch,
+                tag,
+                license_ack,
+                image_choice,
+            )
+        }) {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 if let Some(chosen) = pick_version(&err)? {
@@ -3427,8 +3435,18 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
                 OnOff::On => "debug".to_string(),
                 OnOff::Off => "info".to_string(),
             };
+            let daemon_running = config.api.socket.exists();
             config.save()?;
             println!("{}", tf(Msg::ConfigDebugSet, state));
+            // The level just written is this caller's own (root writes
+            // /etc/asc/config.toml, a regular user ~/.asc/config.toml), and
+            // the daemon reads its copy once, at startup. Anything the daemon
+            // does on the CLI's behalf — installs and image builds above all —
+            // therefore keeps logging at the old level until it restarts,
+            // which is exactly the trap that makes `asc install` look silent.
+            if daemon_running {
+                println!("{}", tf(Msg::ConfigDebugDaemonHint, state));
+            }
         }
     }
     Ok(())

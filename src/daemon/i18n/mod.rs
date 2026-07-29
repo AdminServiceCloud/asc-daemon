@@ -77,6 +77,7 @@ pub enum Msg {
     ConfigLangSet,
     ConfigDebugCurrent,
     ConfigDebugSet,
+    ConfigDebugDaemonHint,
     AppNotFound,
     AppStarted,
     AppAlreadyRunning,
@@ -258,6 +259,15 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ConfigLangSet => ("Language set to {}", "Язык переключён на {}"),
         Msg::ConfigDebugCurrent => ("Debug logging: {}", "Отладочные логи: {}"),
         Msg::ConfigDebugSet => ("Debug logging set to {}", "Отладочные логи переключены: {}"),
+        // This setting is per-config-file, and the daemon has its own: work
+        // done through the daemon (installs, image builds, backups) logs at
+        // the level /etc/asc/config.toml had when the service started.
+        Msg::ConfigDebugDaemonHint => (
+            "This applies to the CLI. For the daemon's own logs: sudo asc config debug {}, \
+             sudo asc service restart — then watch journalctl -u asc -f",
+            "Это относится к CLI. Для логов самого демона: sudo asc config debug {}, \
+             sudo asc service restart — и смотрите journalctl -u asc -f",
+        ),
         Msg::AppNotFound => ("app '{}' not found", "приложение '{}' не найдено"),
         Msg::AppStarted => ("App '{}' started", "Приложение '{}' запущено"),
         Msg::AppAlreadyRunning => (

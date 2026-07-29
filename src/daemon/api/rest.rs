@@ -29,6 +29,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/apps/{id}/stop", post(stop_app))
         .route("/v1/apps/{id}/restart", post(restart_app))
         .route("/v1/apps/{id}/logs", get(app_logs))
+        .route(
+            "/v1/apps/{id}/settings",
+            get(app_settings).put(set_app_settings),
+        )
         .route("/v1/apps/{id}/console-token", post(console_token))
         .with_state(state)
 }
@@ -412,6 +416,40 @@ async fn remove_app(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     state.remove(ctx, id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// The app's settings schema (`asc.settings.yaml`, `null` when the package
+/// defines none) together with the values chosen so far — everything an
+/// out-of-process editor needs (DMN-043).
+async fn app_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (file, values) = state.app_settings(ctx, id).await?;
+    Ok(Json(serde_json::json!({
+        "settings": file,
+        "values": values.as_map(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct SettingsBody {
+    /// The complete value map, as the editor leaves it: what is absent here
+    /// is reset to the package default.
+    values: serde_json::Map<String, serde_json::Value>,
+}
+
+async fn set_app_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(body): Json<SettingsBody>,
+) -> Result<Response, ApiError> {
+    let values = crate::daemon::pkg::settings::SettingValues::from_map(body.values);
+    state.set_app_settings(ctx, id, values).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

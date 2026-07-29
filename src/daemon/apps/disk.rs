@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::daemon::config::Config;
@@ -16,6 +17,11 @@ use super::meta::{AppMeta, Runtime};
 use super::store::AppStore;
 
 /// One custom volume entry, resolved to where its bytes actually live.
+///
+/// Serializable: the same shape crosses the daemon API (`GET
+/// /v1/apps/{id}/disk`), so the CLI renders one report whether it computed it
+/// in-process or read it from the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeUsage {
     /// The raw `asc.settings.yaml` volume entry.
     pub entry: String,
@@ -34,6 +40,7 @@ pub struct VolumeUsage {
 }
 
 /// Disk usage of one installed app.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskUsage {
     /// Everything under the app's directory (repository + data + config +
     /// any private volume folders) — what the quota measures.

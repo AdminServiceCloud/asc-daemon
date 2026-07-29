@@ -168,6 +168,13 @@ impl SourceList {
             Some(name) => name.to_string(),
             None => derive_name(url),
         };
+        // `git` is reserved: an app records its origin as "<source>:<git url>"
+        // in meta.json, and "git:<url>" is what marks an app installed
+        // straight from a repository URL (DMN-040/DMN-053) — a source by that
+        // name would make the two indistinguishable at upgrade time.
+        if name == "git" {
+            bail!("'git' is a reserved source name; pass --name with another one");
+        }
         if self.list().iter().any(|(s, _)| s.name == name) {
             bail!("source '{name}' already exists");
         }
@@ -312,6 +319,12 @@ mod tests {
         l.add("file:///tmp/reg", Some("local")).unwrap();
         l.remove("local").unwrap();
         assert!(l.remove("local").is_err());
+        // "git" marks a direct repository install in meta.source (DMN-053).
+        let err = l
+            .add("https://registry.example.org", Some("git"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved"), "got: {err}");
     }
 
     #[test]

@@ -220,7 +220,7 @@ impl AppService for Grpc {
         request: Request<pb::GetAppDiskRequest>,
     ) -> Result<Response<pb::GetAppDiskResponse>, Status> {
         let ctx = ctx_of(&request);
-        let usage = self
+        let (_, usage) = self
             .0
             .app_disk(ctx, request.into_inner().id)
             .await

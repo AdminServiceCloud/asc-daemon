@@ -33,9 +33,18 @@ pub struct AppMeta {
     /// Installed version — a git tag of the package repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Package source (registry name or repository URL).
+    /// Package source: `"<registry>:<git url>"` for a registry install,
+    /// `"git:<git url>"` for a direct repository install (DMN-040) — which is
+    /// then the only origin the app has, and the one `asc app upgrade`
+    /// re-resolves it from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Branch a direct repository install tracks (`asc install <url>
+    /// --branch <name>`). Upgrades re-clone this branch instead of moving to
+    /// the repository's newest tag; `None` for tag-pinned and registry
+    /// installs, which upgrade by version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Registry install spec this app came from (`name` or `stack/app`);
     /// upgrades resolve the package through it. `None` = the app id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +223,7 @@ mod tests {
             },
             version: Some("v1.2.0".into()),
             source: Some("official".into()),
+            branch: None,
             package: None,
             desired_state: DesiredState::Running,
             quota: Some(Quota {

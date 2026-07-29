@@ -4,9 +4,20 @@
 //! only then the repository is swapped and the runtime re-provisioned — any
 //! failure before the swap leaves the installed app untouched, and a
 //! provisioning failure rolls back to the previous version.
+//!
+//! Where the new version is fetched from depends on how the app was
+//! installed (DMN-053): a registry app resolves its package through the
+//! registries again, while an app installed straight from a repository URL
+//! (`asc install <url>`, DMN-040) is re-resolved from that URL — it was never
+//! in any registry index, and `meta.source` (`"git:<url>"`) is the only
+//! origin it has. Such an app moves tag by tag like any other, unless it
+//! tracks a branch (`--branch`, recorded in `meta.branch`) or its repository
+//! is untagged — then the upgrade re-clones that moving ref and stops early
+//! when it still points at the commit already installed.
 
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
@@ -52,39 +63,73 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         bail!(tf2(Msg::PkgUpgradeStopFirst, &id, &id));
     }
 
-    // Stack apps record their origin as `stack/app` in meta.package;
-    // plain apps resolve by their own id.
-    let package_spec = meta.package.clone().unwrap_or_else(|| id.clone());
-    let (package, stack_app) = match package_spec.split_once('/') {
-        Some((package, app)) => (package, Some(app)),
-        None => (package_spec.as_str(), None),
-    };
-
-    // When several sources provide the package, prefer the one the app was
-    // installed from (meta.source = "name:git-url"); fall back to priority.
-    let installed_from = meta
+    // Where the new version comes from: the recorded repository URL for a
+    // direct install (DMN-040), the registries for everything else.
+    let direct_git = meta
         .source
         .as_deref()
-        .and_then(|s| s.split_once(':'))
-        .map(|(name, _)| name);
-    let resolved = RegistryClient::new(config)?.resolve_preferring(package, installed_from)?;
+        .and_then(|s| s.strip_prefix("git:"))
+        .map(str::to_string);
+    let (git_url, entry_path, stack_app) = match &direct_git {
+        Some(url) => (url.clone(), None, None),
+        None => {
+            // Stack apps record their origin as `stack/app` in meta.package;
+            // plain apps resolve by their own id.
+            let package_spec = meta.package.clone().unwrap_or_else(|| id.clone());
+            let (package, stack_app) = match package_spec.split_once('/') {
+                Some((package, app)) => (package.to_string(), Some(app.to_string())),
+                None => (package_spec.clone(), None),
+            };
+            // When several sources provide the package, prefer the one the app
+            // was installed from (meta.source = "name:git-url"); fall back to
+            // priority.
+            let installed_from = meta
+                .source
+                .as_deref()
+                .and_then(|s| s.split_once(':'))
+                .map(|(name, _)| name);
+            let resolved =
+                RegistryClient::new(config)?.resolve_preferring(&package, installed_from)?;
+            (
+                resolved.entry.source.git.clone(),
+                resolved.entry.source.path.clone(),
+                stack_app,
+            )
+        }
+    };
+    let entry_path = entry_path.as_deref();
+    let stack_app = stack_app.as_deref();
+
     // The version comes from the repository's tags (DMN-047): an explicit
-    // `@version` wins, otherwise upgrade to the newest tag.
-    let version = match requested_version {
-        VersionSpec::Exact(v) => v.to_string(),
-        VersionSpec::Latest | VersionSpec::Pick => {
-            match super::gitref::ls_remote(&resolved.entry.source.git)?.latest_tag() {
-                Some(tag) => tag.to_string(),
+    // `@version` wins, otherwise the newest tag. `None` means there is no tag
+    // to move to and the app follows a moving ref instead — its own branch,
+    // or the default branch of an untagged repository. Only a direct install
+    // can end up there; a registry package without tags is a broken package.
+    let checkout: Option<String> = match requested_version {
+        VersionSpec::Exact(v) => Some(v.to_string()),
+        VersionSpec::Latest | VersionSpec::Pick => match &meta.branch {
+            Some(branch) => Some(branch.clone()),
+            None => match super::gitref::ls_remote(&git_url)?.latest_tag() {
+                Some(tag) => Some(tag.to_string()),
+                None if direct_git.is_some() => None,
                 None => {
                     bail!("repository for '{id}' has no tags; run: asc app upgrade {id}@<version>")
                 }
-            }
-        }
+            },
+        },
     };
+    // A tracked branch and a default-branch checkout carry no version to
+    // compare — their commit is compared after the clone instead. An explicit
+    // `@version` always means a tag, even for a branch-tracking app: that is
+    // the user pinning it.
+    let tracks_branch =
+        meta.branch.is_some() && !matches!(requested_version, VersionSpec::Exact(_));
+    let moving_ref = checkout.is_none() || tracks_branch;
     // The installed version is the tag that was actually checked out
     // (`1.2.0` or `v1.2.0`), so compare against both spellings.
-    if let Some(current) = &meta.version
-        && (*current == version || *current == format!("v{version}"))
+    if let (Some(version), Some(current)) = (&checkout, &meta.version)
+        && !moving_ref
+        && (current == version || *current == format!("v{version}"))
     {
         return Ok(UpgradeOutcome::UpToDate {
             id,
@@ -105,9 +150,22 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         path: new_dir.clone(),
         armed: true,
     };
-    let cloned_tag = clone_repository(&resolved.entry.source.git, Some(&version), &new_dir)?
-        .expect("a version was requested, so a tag was checked out");
-    let entry_path = resolved.entry.source.path.as_deref();
+    let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir)?;
+    // A moving ref has no version to compare, so compare what was actually
+    // fetched: the same commit as the installed repository means there is
+    // nothing to upgrade to. The clone is dropped by `cleanup`.
+    if moving_ref
+        && let (Some(installed), Some(fetched)) = (head_commit(&repo_dir), head_commit(&new_dir))
+        && installed == fetched
+    {
+        return Ok(UpgradeOutcome::UpToDate {
+            id,
+            version: meta
+                .version
+                .clone()
+                .unwrap_or_else(|| fetched.chars().take(7).collect()),
+        });
+    }
     let (new_manifest_dir, _) = locate_manifest(&new_dir, entry_path, stack_app)?;
     let manifest = Manifest::load(&new_manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, &id)?;
@@ -176,20 +234,40 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     }
 
     let from = meta.version.clone();
+    // The tag that was checked out, or — for a moving ref, which has no tag —
+    // the version the new manifest declares, exactly as a direct install
+    // records it.
+    let to = cloned_ref.unwrap_or_else(|| manifest.version.clone());
     let mut meta = meta;
     // The package title may change between versions; the user's custom_name
     // is left untouched and keeps winning in display_name().
     meta.name = manifest.title.clone().unwrap_or_else(|| id.clone());
-    meta.version = Some(cloned_tag.clone());
+    meta.version = Some(to.clone());
     meta.quota = quota;
     meta.runtime = runtime;
     store.save(&meta)?;
-    info!(app = %id, from = %from.as_deref().unwrap_or("-"), to = %cloned_tag, "app upgraded");
-    Ok(UpgradeOutcome::Upgraded {
-        id,
-        from,
-        to: cloned_tag,
-    })
+    info!(app = %id, from = %from.as_deref().unwrap_or("-"), to = %to, "app upgraded");
+    Ok(UpgradeOutcome::Upgraded { id, from, to })
+}
+
+/// The commit the repository in `dir` is checked out at, `None` when it
+/// cannot be read (no git, not a repository — an upgrade must still run).
+/// Used to tell "the branch moved" from "nothing changed" for apps that
+/// follow a branch rather than a tag.
+fn head_commit(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// Remove the runtime objects the previous version created. Process apps

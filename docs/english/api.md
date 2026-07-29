@@ -36,7 +36,7 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 - No token. The daemon asks the kernel for the connecting process's uid (`SO_PEERCRED`) and builds the context from it — nothing inside the request can escalate privileges.
 - The socket file is world-connectable (0666) on purpose: reaching it grants nothing, authorization is the peer uid, per request. A regular user sees and manages **only their own** apps; a root peer sees everyone's.
 - `sudo asc ...` attribution: the CLI forwards `SUDO_UID`/`SUDO_USER` as the `X-Asc-Sudo-Uid`/`X-Asc-Sudo-User` headers; the daemon honors them **only when the peer itself is root**, mirroring the in-process behavior — new apps are attributed to the invoking user while sudo keeps full visibility.
-- CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`) plus `app attach` and `app settings` (DMN-043) go through the socket whenever it exists. No socket file — the CLI works in-process as before (DMN-041: root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
+- CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`), `app attach` and `app settings` (DMN-043), and the reporting and upgrade commands (`disk`/`ports`/`stats`/`stacks`/`upgrade`, DMN-053) go through the socket whenever it exists. No socket file — the CLI works in-process as before (DMN-041: root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
 - Known limits (DMN-043): docker containers still run with the daemon's (root) privileges — a malicious manifest can request dangerous mounts, so a container policy for non-root owners is the follow-up; private-repo installs through the daemon use the daemon's git credentials, not the caller's.
 
 ### 🎫 Temporary console tokens
@@ -54,6 +54,11 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 | `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Install from a registry or directly from a git URL (DMN-040); without `license_ack` a repository shipping a LICENSE fails with `409` + `license_required` payload, an ambiguous package with `409` + `ambiguous` (candidate list) — the CLI renders its consent prompt / source pick from these |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | A single application |
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Disk usage: image, repository, data, custom volumes |
+| `GET /v1/apps/{id}/ports` | — (REST only for now) | The ports the app publishes (DMN-049), resolved from its settings — a stopped app reports what it will bind next start |
+| `POST /v1/apps/{id}/upgrade {"version"?}` | — (REST only for now) | Upgrade the app (DMN-003); without `version` — to the repository's newest tag, or the branch it tracks for a direct repository install (DMN-053). The app must be stopped. Answers `{"id", "up_to_date", "from", "to"}` |
+| `GET /v1/disk` | — (REST only for now) | Every visible app's footprint, largest first, plus the capacity of the filesystem holding the app store (DMN-053) |
+| `GET /v1/ports` | — (REST only for now) | Every visible app and the ports it publishes |
+| `GET /v1/stats` | — (REST only for now) | Resource consumption per app (CPU %, memory, disk, network); costs the ~500 ms sampling interval per call |
 | `POST /v1/apps/{id}/start\|stop\|restart` | `AppService.Start/Stop/RestartApp` | Lifecycle |
 | `GET /v1/apps/{id}/logs?tail=N` | `AppService.GetAppLogs` | Log tail |
 | `GET /v1/apps/{id}/settings` | — (REST only for now) | The app's settings schema (`asc.settings.yaml`, `null` when the package defines none) and the values chosen so far, defaults merged in |
@@ -70,4 +75,4 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 
 ## 🔗 Related tasks
 
-DMN-005, DMN-007, DMN-042, DMN-043 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-005, DMN-007, DMN-042, DMN-043, DMN-053 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

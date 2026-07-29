@@ -3,6 +3,8 @@
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
+mod complete;
+
 use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
     AppManager, AppStats, AppStatus, ImageSource, Outcome, RuntimeState, UserContext,
@@ -137,6 +139,21 @@ enum Command {
     Autoupdate {
         /// enable | disable | status
         action: String,
+    },
+    /// Print the shell completion script for bash, zsh or fish (DMN-055);
+    /// `asc completion bash > /usr/share/bash-completion/completions/asc`
+    /// installs it system-wide, which the installer already does
+    Completion {
+        /// Shell to generate for
+        shell: complete::Shell,
+    },
+    /// Internal: candidates for the word being completed. Called by the
+    /// completion scripts on every Tab press, never by a user — it takes the
+    /// tokenized command line and prints one candidate per line.
+    #[command(name = "__complete", hide = true, disable_help_flag = true)]
+    Complete {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
     },
 }
 
@@ -421,7 +438,10 @@ enum ServiceAction {
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Show or set the CLI output language (en|ru)
-    Lang { lang: Option<Lang> },
+    Lang {
+        #[arg(value_enum)]
+        lang: Option<Lang>,
+    },
     /// Show or set debug logging (on|off); persists to config.toml [log] level
     Debug { state: Option<OnOff> },
 }
@@ -528,12 +548,6 @@ fn run() -> anyhow::Result<()> {
     let Some(command) = cli.command else {
         return banner_cmd();
     };
-    let config = config_result?;
-    // Every command gets tracing, not just `serve`: `asc install` and
-    // friends run package/docker logic in-process, so `asc config debug on`
-    // is only useful if the CLI itself emits the debug! calls it enables.
-    logging::init(&config.log.level);
-
     // CLI commands die quietly on a closed pipe (`asc status | head`), like
     // any Unix tool. The daemon keeps Rust's default (SIGPIPE ignored):
     // getting killed by a log-pipe hiccup is not acceptable for a service.
@@ -541,6 +555,28 @@ fn run() -> anyhow::Result<()> {
         // SAFETY: resetting a signal disposition has no preconditions.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
+
+    // Completion answers before the config is required and without a tracing
+    // subscriber (DMN-055): it runs on every Tab press inside the user's
+    // shell, so an unreadable config.toml must cost a few candidates, not a
+    // broken Tab key or a log line pasted into the prompt.
+    match &command {
+        Command::Completion { shell } => {
+            print!("{}", complete::script(*shell));
+            return Ok(());
+        }
+        Command::Complete { words } => {
+            complete::run(words, &config_result.unwrap_or_default());
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let config = config_result?;
+    // Every command gets tracing, not just `serve`: `asc install` and
+    // friends run package/docker logic in-process, so `asc config debug on`
+    // is only useful if the CLI itself emits the debug! calls it enables.
+    logging::init(&config.log.level);
 
     match command {
         Command::Serve => tokio::runtime::Builder::new_multi_thread()
@@ -594,6 +630,8 @@ fn run() -> anyhow::Result<()> {
         Command::Backup { action } => backup_cmd(action, &config),
         Command::Config { action } => config_cmd(action, config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
+        // Both were handled above, before the config was loaded.
+        Command::Completion { .. } | Command::Complete { .. } => Ok(()),
     }
 }
 

@@ -21,6 +21,7 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | 📁 SFTP-сервер по приложению | [sftp](sftp.md) |
 | 🖥️ WebSocket- и SSH-консоли | [console](console.md) |
 | ⏰ Планировщик задач | [scheduler](scheduler.md) |
+| ⌨️ Автодополнение в шелле (Tab) для bash, zsh и fish | [completion](completion.md) |
 | 🔄 Утилита обновлений asc-updater | [updater](updater.md) |
 
 Community-файлы: [🛡️ SECURITY.md](SECURITY.md) — политика безопасности и приватные репорты уязвимостей; [🤝 CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — кодекс поведения (Contributor Covenant 2.1); [version.txt](../../version.txt) — текущая версия (синхронизируется с `Cargo.toml`); [CODEOWNERS](../../.github/CODEOWNERS) — авто-ревью PR от [@statebyte](https://github.com/statebyte).

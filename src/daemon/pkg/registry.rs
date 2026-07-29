@@ -188,6 +188,51 @@ impl RegistryClient {
         Ok(found)
     }
 
+    /// Every package known to the on-disk index cache — cache only, never a
+    /// network fetch and never an error (DMN-055). Shell completion runs this
+    /// on every Tab: a cold or half-written cache must yield fewer candidates
+    /// rather than a stalled terminal, and staleness is irrelevant when the
+    /// answer is only a suggestion. `asc update` / `asc search` remain the
+    /// paths that talk to the registry.
+    pub fn cached_packages(&self) -> Vec<PackageEntry> {
+        let mut packages = Vec::new();
+        for (source, _) in self.sources.list() {
+            let Some(index) = self
+                .cached(source, "registry.json")
+                .and_then(|raw| serde_json::from_str::<RegistryIndex>(&raw).ok())
+            else {
+                continue;
+            };
+            let mut queue: Vec<String> = index.categories.into_iter().map(|c| c.index).collect();
+            // Same defensive bound as `packages_of`: a miswired registry must
+            // not loop us forever, least of all inside a Tab press.
+            let mut budget = 1000;
+            while let Some(rel) = queue.pop() {
+                budget -= 1;
+                if budget == 0 {
+                    break;
+                }
+                let Some(category) = self
+                    .cached(source, &rel)
+                    .and_then(|raw| serde_json::from_str::<CategoryFile>(&raw).ok())
+                else {
+                    continue;
+                };
+                packages.extend(category.packages);
+                queue.extend(category.children.into_iter().map(|c| c.index));
+            }
+        }
+        packages
+    }
+
+    /// The cached copy of one registry file, whatever its age, or `None` when
+    /// it was never fetched. Unlike [`fetch`](Self::fetch) this never falls
+    /// back to the network.
+    fn cached(&self, source: &Source, rel: &str) -> Option<String> {
+        let file = source_cache_dir(&self.cache_dir, source).join(rel.replace('/', "__"));
+        fs::read_to_string(file).ok()
+    }
+
     /// Force-refresh all indexes of all sources (`asc update`).
     /// Returns per-source stats so the CLI can report what was indexed.
     /// On a terminal, each index file gets its own progress line — the

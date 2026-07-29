@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use asc_daemon::daemon::config::Config;
 use asc_daemon::daemon::i18n::{Msg, t, tf, tf2};
@@ -130,6 +130,7 @@ pub fn install(config: &Config) -> Result<()> {
     let binary = fetch_daemon_binary(&release)?;
     write_binary(&installed_asc(config), &binary)?;
     config.save()?;
+    install_completions(config);
     setup_daemon_service(config);
     if config.updater.enabled
         && let Err(err) = setup_timer(config)
@@ -162,6 +163,7 @@ pub fn update(config: &Config, _force: bool) -> Result<()> {
         fs::copy(&current, &previous).context("cannot save previous version for rollback")?;
     }
     write_binary(&current, &binary)?;
+    install_completions(config);
     restart_daemon();
     println!("{}", tf(Msg::UpdUpdated, &release.tag_name));
     Ok(())
@@ -185,6 +187,80 @@ pub fn rollback(config: &Config) -> Result<()> {
     restart_daemon();
     println!("{}", t(Msg::UpdRolledBack));
     Ok(())
+}
+
+/// Where each shell looks for a system-wide completion script, in preference
+/// order (DMN-055). Only directories that already exist are written to: the
+/// presence of the directory is what says the shell (and, for bash, the
+/// bash-completion package) is installed on this host. Debian/Ubuntu ship the
+/// first entry of each list; the others cover distributions and manual
+/// installs that place them elsewhere.
+const COMPLETION_TARGETS: &[(&str, &str, &[&str])] = &[
+    (
+        "bash",
+        "asc",
+        &[
+            "/usr/share/bash-completion/completions",
+            "/etc/bash_completion.d",
+        ],
+    ),
+    (
+        "zsh",
+        "_asc",
+        &[
+            "/usr/share/zsh/vendor-completions",
+            "/usr/share/zsh/site-functions",
+            "/usr/local/share/zsh/site-functions",
+        ],
+    ),
+    (
+        "fish",
+        "asc.fish",
+        &[
+            "/usr/share/fish/vendor_completions.d",
+            "/usr/local/share/fish/vendor_completions.d",
+        ],
+    ),
+];
+
+/// Drop the shell completion scripts next to the freshly installed binary
+/// (DMN-055). The scripts come from that binary (`asc completion <shell>`),
+/// not from the updater's own copy, so an updated `asc` always ships the
+/// script version it expects.
+///
+/// Best-effort throughout: a host without zsh, a read-only `/usr`, an `asc`
+/// too old to know the command — none of that is a reason to fail an install
+/// or an update. Tab completion is a convenience, the binary is the product.
+fn install_completions(config: &Config) {
+    let asc = installed_asc(config);
+    for (shell, file_name, dirs) in COMPLETION_TARGETS {
+        let Some(dir) = dirs.iter().map(Path::new).find(|dir| dir.is_dir()) else {
+            continue;
+        };
+        let script = match Command::new(&asc).args(["completion", shell]).output() {
+            Ok(out) if out.status.success() => out.stdout,
+            Ok(out) => {
+                debug!(
+                    shell,
+                    status = ?out.status.code(),
+                    "asc completion failed; skipping this shell"
+                );
+                continue;
+            }
+            Err(err) => {
+                warn!(error = %err, "cannot run asc to generate completions");
+                return;
+            }
+        };
+        let path = dir.join(file_name);
+        // Completion scripts are world-readable data, not executables: the
+        // shell sources them, and 0644 is what every distro ships.
+        if let Err(err) = fs::write(&path, &script) {
+            warn!(file = %path.display(), error = %err, "cannot write completion script");
+            continue;
+        }
+        debug!(shell, file = %path.display(), "completion script installed");
+    }
 }
 
 /// Register the daemon as a service and start it (Linux; skipped elsewhere).

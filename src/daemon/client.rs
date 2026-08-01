@@ -228,6 +228,10 @@ impl Daemon {
             id,
             from: json["from"].as_str().map(str::to_string),
             to: json["to"].as_str().unwrap_or_default().to_string(),
+            // Absent from an older daemon's answer (DMN-056): the CLI then
+            // prints the versions alone, as it did before.
+            from_commit: json["from_commit"].as_str().map(str::to_string),
+            to_commit: json["to_commit"].as_str().map(str::to_string),
         })
     }
 

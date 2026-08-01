@@ -20,4 +20,4 @@ pub use install::{
 pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};
 pub use registry::RegistryClient;
 pub use sources::SourceList;
-pub use upgrade::{UpgradeOutcome, upgrade};
+pub use upgrade::{UpgradeOutcome, short_commit, upgrade};

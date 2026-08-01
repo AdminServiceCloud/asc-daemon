@@ -221,7 +221,7 @@ fn install_from_file_registry() {
 
     // Explicitly pinned version: no registry index refresh required.
     match pkg::upgrade(&config, &ctx, "demo@2.0.0").unwrap() {
-        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+        pkg::UpgradeOutcome::Upgraded { id, from, to, .. } => {
             assert_eq!(id, "demo");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
             assert_eq!(to, "v2.0.0");
@@ -244,7 +244,7 @@ fn install_from_file_registry() {
     // A suffixed instance resolves upgrades through its recorded package:
     // 'demo-2' is not a registry name, meta.package points it at 'demo'.
     match pkg::upgrade(&config, &ctx, "demo-2@2.0.0").unwrap() {
-        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+        pkg::UpgradeOutcome::Upgraded { id, from, to, .. } => {
             assert_eq!(id, "demo-2");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
             assert_eq!(to, "v2.0.0");

@@ -1544,11 +1544,31 @@ fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
 
 fn print_upgrade_outcome(outcome: &pkg::UpgradeOutcome) {
     match outcome {
-        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+        pkg::UpgradeOutcome::Upgraded {
+            id,
+            from,
+            to,
+            from_commit,
+            to_commit,
+        } => {
             println!(
                 "{}",
                 tf3(Msg::PkgUpgraded, id, from.as_deref().unwrap_or("-"), to)
             );
+            // The repository commits behind those versions (DMN-056), shortened
+            // the way git does. Printed whenever at least one of them could be
+            // read — a version says which tag, the commit says which code.
+            if from_commit.is_some() || to_commit.is_some() {
+                let short = |sha: &Option<String>| {
+                    sha.as_deref()
+                        .map(pkg::short_commit)
+                        .unwrap_or_else(|| "-".into())
+                };
+                println!(
+                    "{}",
+                    tf2(Msg::PkgUpgradedCommit, short(from_commit), short(to_commit))
+                );
+            }
         }
         pkg::UpgradeOutcome::UpToDate { id, version } => {
             println!("{}", tf2(Msg::PkgUpToDate, id, version));

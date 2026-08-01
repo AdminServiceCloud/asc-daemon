@@ -238,7 +238,7 @@ apps:
     git(&repo, &["tag", "v2.0.0"]);
 
     match pkg::upgrade(&config, &ctx, "demo-server@2.0.0").unwrap() {
-        pkg::UpgradeOutcome::Upgraded { id, from, to } => {
+        pkg::UpgradeOutcome::Upgraded { id, from, to, .. } => {
             assert_eq!(id, "demo-server");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
             assert_eq!(to, "v2.0.0");

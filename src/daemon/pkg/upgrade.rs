@@ -14,6 +14,11 @@
 //! tracks a branch (`--branch`, recorded in `meta.branch`) or its repository
 //! is untagged — then the upgrade re-clones that moving ref and stops early
 //! when it still points at the commit already installed.
+//!
+//! Whatever the version moves from and to, the outcome also carries the two
+//! repository commits — the one that was installed and the one that now is
+//! (DMN-056) — so a branch-tracking upgrade, where both versions read `dev`,
+//! still says exactly what changed.
 
 use std::fs;
 use std::path::Path;
@@ -41,6 +46,13 @@ pub enum UpgradeOutcome {
         id: String,
         from: Option<String>,
         to: String,
+        /// Full commit sha the repository was checked out at before and after
+        /// the upgrade (DMN-056) — the version alone does not identify what
+        /// was actually installed for an app that follows a branch, and a
+        /// re-tagged release moves a tag onto another commit. `None` when the
+        /// commit cannot be read (the directory is not a git repository).
+        from_commit: Option<String>,
+        to_commit: Option<String>,
     },
     UpToDate {
         id: String,
@@ -151,11 +163,16 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         armed: true,
     };
     let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir)?;
+    // Both commits are read before the swap, while `repo_dir` still holds the
+    // installed version: they are reported to the caller (DMN-056) and decide
+    // whether a moving ref has moved at all.
+    let from_commit = head_commit(&repo_dir);
+    let to_commit = head_commit(&new_dir);
     // A moving ref has no version to compare, so compare what was actually
     // fetched: the same commit as the installed repository means there is
     // nothing to upgrade to. The clone is dropped by `cleanup`.
     if moving_ref
-        && let (Some(installed), Some(fetched)) = (head_commit(&repo_dir), head_commit(&new_dir))
+        && let (Some(installed), Some(fetched)) = (&from_commit, &to_commit)
         && installed == fetched
     {
         return Ok(UpgradeOutcome::UpToDate {
@@ -163,7 +180,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
             version: meta
                 .version
                 .clone()
-                .unwrap_or_else(|| fetched.chars().take(7).collect()),
+                .unwrap_or_else(|| short_commit(fetched)),
         });
     }
     let (new_manifest_dir, _) = locate_manifest(&new_dir, entry_path, stack_app)?;
@@ -246,8 +263,27 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
     meta.quota = quota;
     meta.runtime = runtime;
     store.save(&meta)?;
-    info!(app = %id, from = %from.as_deref().unwrap_or("-"), to = %to, "app upgraded");
-    Ok(UpgradeOutcome::Upgraded { id, from, to })
+    info!(
+        app = %id,
+        from = %from.as_deref().unwrap_or("-"),
+        to = %to,
+        from_commit = %from_commit.as_deref().unwrap_or("-"),
+        to_commit = %to_commit.as_deref().unwrap_or("-"),
+        "app upgraded"
+    );
+    Ok(UpgradeOutcome::Upgraded {
+        id,
+        from,
+        to,
+        from_commit,
+        to_commit,
+    })
+}
+
+/// The first 7 characters of a commit sha — what git itself abbreviates to,
+/// and what the CLI and the docs show.
+pub fn short_commit(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 /// The commit the repository in `dir` is checked out at, `None` when it

@@ -25,6 +25,18 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+/// The commit `dir` is checked out at — what an upgrade reports as the old
+/// and the new commit (DMN-056).
+fn head(dir: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .expect("git must be installed to run this test");
+    assert!(out.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn manifest(version: &str) -> String {
     format!("name: demo\nversion: {version}\ntype: native\nruntime:\n  start: ./run.sh\n")
 }
@@ -90,14 +102,25 @@ fn upgrade_follows_the_recorded_repository_url() {
     }
 
     // A new release: the upgrade finds it through meta.source alone.
+    let old_commit = head(&repo);
     fs::write(repo.join("asc.yaml"), manifest("1.1.0")).unwrap();
     git(&repo, &["commit", "-q", "-am", "1.1.0"]);
     git(&repo, &["tag", "v1.1.0"]);
+    let new_commit = head(&repo);
     match pkg::upgrade(&config, &ctx, "demo").unwrap() {
-        UpgradeOutcome::Upgraded { id, from, to } => {
+        UpgradeOutcome::Upgraded {
+            id,
+            from,
+            to,
+            from_commit,
+            to_commit,
+        } => {
             assert_eq!(id, "demo");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
             assert_eq!(to, "v1.1.0");
+            // DMN-056: the tags map onto the repository's actual commits.
+            assert_eq!(from_commit.as_deref(), Some(old_commit.as_str()));
+            assert_eq!(to_commit.as_deref(), Some(new_commit.as_str()));
         }
         other => panic!("expected an upgrade, got: {other:?}"),
     }
@@ -168,12 +191,25 @@ fn branch_installs_follow_their_branch() {
     }
 
     // A new commit on the branch is what an upgrade picks up.
+    let old_commit = head(&repo);
     fs::write(repo.join("asc.yaml"), manifest("1.2.0-dev")).unwrap();
     git(&repo, &["commit", "-q", "-am", "more dev"]);
+    let new_commit = head(&repo);
     match pkg::upgrade(&config, &ctx, "demo").unwrap() {
-        UpgradeOutcome::Upgraded { from, to, .. } => {
+        UpgradeOutcome::Upgraded {
+            from,
+            to,
+            from_commit,
+            to_commit,
+            ..
+        } => {
             assert_eq!(from.as_deref(), Some("dev"));
             assert_eq!(to, "dev", "still on the branch, not on a tag");
+            // Both versions read 'dev' — the commits are the only thing that
+            // says what actually changed (DMN-056).
+            assert_eq!(from_commit.as_deref(), Some(old_commit.as_str()));
+            assert_eq!(to_commit.as_deref(), Some(new_commit.as_str()));
+            assert_ne!(from_commit, to_commit);
         }
         other => panic!("expected an upgrade, got: {other:?}"),
     }

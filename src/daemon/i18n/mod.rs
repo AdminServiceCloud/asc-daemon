@@ -110,6 +110,7 @@ pub enum Msg {
     PkgNameTaken,
     PkgPolicyDockerOnly,
     PkgUpgraded,
+    PkgUpgradedCommit,
     PkgUpToDate,
     PkgUpgradeStopFirst,
     PkgAuthRequired,
@@ -365,6 +366,7 @@ pub fn t(msg: Msg) -> &'static str {
             "App '{}' upgraded: {} → {}",
             "Приложение '{}' обновлено: {} → {}",
         ),
+        Msg::PkgUpgradedCommit => ("  commit: {} → {}", "  коммит: {} → {}"),
         Msg::PkgUpToDate => (
             "App '{}' is already up to date ({})",
             "Приложение '{}' уже актуально ({})",

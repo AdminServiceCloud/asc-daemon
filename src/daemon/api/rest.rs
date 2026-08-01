@@ -410,11 +410,21 @@ async fn upgrade_app(
         None => id,
     };
     let json = match state.upgrade(ctx, spec).await? {
-        crate::daemon::pkg::UpgradeOutcome::Upgraded { id, from, to } => serde_json::json!({
+        // The commits are full shas (DMN-056); abbreviating them is the
+        // caller's choice.
+        crate::daemon::pkg::UpgradeOutcome::Upgraded {
+            id,
+            from,
+            to,
+            from_commit,
+            to_commit,
+        } => serde_json::json!({
             "id": id,
             "up_to_date": false,
             "from": from,
             "to": to,
+            "from_commit": from_commit,
+            "to_commit": to_commit,
         }),
         crate::daemon::pkg::UpgradeOutcome::UpToDate { id, version } => serde_json::json!({
             "id": id,

@@ -15,6 +15,9 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | 📡 API: gRPC (ConnectRPC) + REST, токены | [api](api.md) |
 | 📱 Управление приложениями (Docker + нативные) и CLI | [app-management](app-management.md) |
 | 📦 Пакетный менеджер (`asc.yaml`, реестры, `asc install`) | [package-manager](package-manager.md) |
+| 🚀 Установка ASC на сервер | [getting-started](getting-started.md) |
+| 📦 Поддержка ASC в репозитории | [repository-support](repository-support.md) |
+| 🗂️ Создание своего registry | [custom-registry](custom-registry.md) |
 | 🤖 MCP-сервер для AI | [mcp-server](mcp-server.md) |
 | 📊 Мониторинг системы и приложений | [monitoring](monitoring.md) |
 | 💾 Бекапы приложений | [backups](backups.md) |

@@ -15,6 +15,9 @@ Open source CLI utility and daemon written in Rust, installed on the user's serv
 | 📡 API: gRPC (ConnectRPC) + REST, tokens | [api](api.md) |
 | 📱 Application management (Docker + native) and CLI | [app-management](app-management.md) |
 | 📦 Package manager (`asc.yaml`, registries, `asc install`) | [package-manager](package-manager.md) |
+| 🚀 Install ASC on a server | [getting-started](getting-started.md) |
+| 📦 Add ASC support to a repository | [repository-support](repository-support.md) |
+| 🗂️ Create a custom registry | [custom-registry](custom-registry.md) |
 | 🤖 MCP server for AI | [mcp-server](mcp-server.md) |
 | 📊 System and application monitoring | [monitoring](monitoring.md) |
 | 💾 Application backups | [backups](backups.md) |

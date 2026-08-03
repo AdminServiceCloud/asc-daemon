@@ -470,13 +470,13 @@ fn main() {
 
 /// Base URL of the public docs site; update here if it ever moves (e.g. a
 /// custom domain) — every `--help` footer link is derived from it.
-const DOCS_BASE_URL: &str = "https://adminservicecloud.github.io/asc-documentaion";
+const DOCS_BASE_URL: &str = "https://docs.adminservice.cloud";
 
 /// Docs-site URL for a command tree node, given its path from the root
 /// (`path[0]` is always `"asc"`). Top-level commands get their own page
 /// (`commands/app`); anything deeper is an anchor on its top-level command's
 /// page (`commands/backup#storage-add`) — see `docs/commands/` in
-/// asc-documentaion for the page/heading convention this must match.
+/// asc-documentation for the page/heading convention this must match.
 fn docs_url(path: &[String]) -> String {
     let tail = match path.len() {
         0 | 1 => "commands/asc".to_string(),
@@ -3474,7 +3474,7 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{port_label, resource_shortages};
+    use super::{Lang, docs_url, i18n, port_label, resource_shortages};
     use asc_daemon::daemon::docker::{PortProtocol, PublishedPort};
     use asc_daemon::daemon::monitor::system::{
         CpuMetrics, DiskMetrics, MemoryMetrics, SystemMetrics,
@@ -3487,6 +3487,21 @@ mod tests {
         assert_eq!(direct(PortProtocol::Udp), "27015/udp");
         // `both` shares the same port across transports.
         assert_eq!(direct(PortProtocol::Both), "27015/tcp+udp");
+    }
+
+    #[test]
+    fn help_urls_use_the_canonical_docs_domain_for_both_languages() {
+        i18n::set_lang(Lang::En);
+        assert_eq!(
+            docs_url(&["asc".into(), "install".into()]),
+            "https://docs.adminservice.cloud/commands/install"
+        );
+
+        i18n::set_lang(Lang::Ru);
+        assert_eq!(
+            docs_url(&["asc".into(), "backup".into(), "storage".into(), "add".into()]),
+            "https://docs.adminservice.cloud/ru/commands/backup#storage-add"
+        );
     }
 
     #[test]

@@ -86,6 +86,7 @@ fn sudo_hint(headers: &HeaderMap) -> (Option<u32>, Option<String>) {
 /// REST + gRPC + WebSocket console behind peer-credential auth.
 fn router(state: Arc<ApiState>) -> Router {
     rest::router(Arc::clone(&state))
+        .merge(super::local::router(Arc::clone(&state)))
         .merge(super::grpc::routes(Arc::clone(&state)))
         .layer(middleware::from_fn(peer_auth))
         .merge(ws::router(state))

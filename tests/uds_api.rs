@@ -299,3 +299,36 @@ fn missing_socket_means_no_daemon() {
     config.api.socket = ws.path().join("absent.sock");
     assert!(Daemon::connect(&config).unwrap().is_none());
 }
+
+/// DMN-013: backup routes used by the stdio MCP server live only on the UDS
+/// listener and must apply the exact same ownership rule as app routes.
+#[test]
+fn local_backup_routes_are_peer_scoped() {
+    let ws = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    config.api.socket = ws.path().join("asc.sock");
+
+    // SAFETY: geteuid() has no preconditions and cannot fail.
+    let my_uid = unsafe { libc::geteuid() };
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    store.save(&meta("mine", my_uid)).unwrap();
+    store.save(&meta("foreign", my_uid + 1)).unwrap();
+    let state = ApiState::new(config.clone(), "unused-token".into());
+    let _stop = spawn_uds(state);
+    wait_for_socket(&config.api.socket);
+    let daemon = Daemon::connect(&config)
+        .expect("daemon answers")
+        .expect("socket file exists");
+
+    assert!(daemon.backup_list("mine").unwrap().is_empty());
+    if my_uid != 0 {
+        let error = daemon.backup_list("foreign").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not found")
+                || format!("{error:#}").contains("не найдено"),
+            "foreign backup requests must not disclose ownership: {error:#}"
+        );
+    }
+}

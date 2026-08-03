@@ -3499,7 +3499,12 @@ mod tests {
 
         i18n::set_lang(Lang::Ru);
         assert_eq!(
-            docs_url(&["asc".into(), "backup".into(), "storage".into(), "add".into()]),
+            docs_url(&[
+                "asc".into(),
+                "backup".into(),
+                "storage".into(),
+                "add".into()
+            ]),
             "https://docs.adminservice.cloud/ru/commands/backup#storage-add"
         );
     }

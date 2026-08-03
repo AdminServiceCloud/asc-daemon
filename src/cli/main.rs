@@ -13,6 +13,7 @@ use asc_daemon::daemon::client::{self, RemoteApp};
 use asc_daemon::daemon::config::Config;
 use asc_daemon::daemon::docker;
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2, tf3};
+use asc_daemon::daemon::mcp;
 use asc_daemon::daemon::monitor;
 use asc_daemon::daemon::pkg::{self, RegistryClient, SourceList};
 use asc_daemon::daemon::progress;
@@ -34,6 +35,11 @@ struct Cli {
 enum Command {
     /// Run the daemon in the foreground (used by the systemd service)
     Serve,
+    /// Expose the local daemon as a stdio Model Context Protocol server
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
     /// Manage the daemon system service (systemd)
     Service {
         #[command(subcommand)]
@@ -161,6 +167,12 @@ enum Command {
 enum StatsSort {
     Cpu,
     Mem,
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// Serve MCP over stdin/stdout; access follows the process UID
+    Serve,
 }
 
 /// Views of the app list reachable as `asc ls <view>` — the same apps seen
@@ -583,6 +595,12 @@ fn run() -> anyhow::Result<()> {
             .enable_all()
             .build()?
             .block_on(server::run(config)),
+        Command::Mcp {
+            action: McpAction::Serve,
+        } => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(mcp::serve(config)),
         Command::Service { action } => service_cmd(action),
         Command::Status => status_cmd(&config),
         Command::Stats { sort, live } => stats_cmd(sort, live, &config),

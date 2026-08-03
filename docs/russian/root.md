@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.8.1-blue)](../../version.txt)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue)](../../version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -23,7 +23,7 @@
 - 💾 **Бекапы** — `asc backup create|restore|list|prune`, локальное хранилище из коробки, S3/FTP/SFTP настраиваются (перенос данных для них ещё не подключён), исключения через `asc.backup.yaml`, ротация
 - 📊 **Мониторинг** — метрики системы и приложений, healthcheck'и
 - 📁 **SFTP-сервер** — файловый доступ с изоляцией по конкретному приложению
-- 🖥️ **Консоли** — WebSocket-терминал приложений и SSH-консоль для UI
+- 🖥️ **Консоль** — WebSocket-терминал приложений и live-логи
 - ⏰ **Scheduler** — задачи по расписанию (cron), очередь с приоритетами
 - ⌨️ **Автодополнение по Tab** — bash, zsh и fish: команды, флаги и живые значения (id приложений, пакеты, хранилища); ставится автоматически, вручную — `asc completion <shell>`
 - 🔄 **asc-updater** — отдельная утилита обновлений: автообновления (отключаемые), каналы stable/beta, откат; при установке — выбор настроек по умолчанию или своих
@@ -146,7 +146,7 @@ cp -r skills/* .claude/skills/
 | [📊 monitoring](monitoring.md) | Метрики системы и приложений |
 | [💾 backups](backups.md) | Бекапы приложений |
 | [📁 sftp](sftp.md) | SFTP с изоляцией по приложению |
-| [🖥️ console](console.md) | WebSocket- и SSH-консоли |
+| [🖥️ console](console.md) | WebSocket-консоль приложений |
 | [⏰ scheduler](scheduler.md) | Планировщик задач |
 | [⌨️ completion](completion.md) | Автодополнение по Tab для bash, zsh и fish — команды, флаги и живые значения |
 | [🔄 updater](updater.md) | Утилита asc-updater: автообновления, каналы, откат |

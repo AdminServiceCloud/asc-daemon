@@ -11,6 +11,7 @@ pub mod docker;
 pub mod http;
 pub mod i18n;
 pub mod logging;
+pub mod mcp;
 pub mod monitor;
 pub mod pkg;
 pub mod progress;

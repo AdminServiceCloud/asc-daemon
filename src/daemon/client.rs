@@ -119,6 +119,14 @@ pub struct RemoteStats {
     pub net_tx_rate: Option<f64>,
 }
 
+/// Result of creating an app backup through the local daemon API.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteBackup {
+    pub name: String,
+    pub storage: String,
+    pub bytes: u64,
+}
+
 /// Blocking client of the daemon's unix-socket API.
 pub struct Daemon {
     socket: PathBuf,
@@ -206,6 +214,12 @@ impl Daemon {
         serde_json::from_value(json["apps"].clone()).context("malformed stats from the daemon")
     }
 
+    /// Latest daemon system sample. Kept as JSON because the MCP tool returns
+    /// the API's complete, forward-compatible metric document.
+    pub fn metrics(&self) -> Result<Value> {
+        self.request(Method::GET, "/v1/metrics", None)
+    }
+
     /// Upgrade an app (DMN-053): `reference` is its id or custom name,
     /// `version` an explicit tag (`None` — the newest one, or the tracked
     /// branch of a direct repository install). The daemon clones with its own
@@ -264,6 +278,37 @@ impl Daemon {
     pub fn remove(&self, id: &str) -> Result<()> {
         self.request(Method::DELETE, &format!("/v1/apps/{id}"), None)?;
         Ok(())
+    }
+
+    /// Local-only, UDS peer-authorized backup operations used by `asc mcp`.
+    pub fn backup_list(&self, id: &str) -> Result<Vec<String>> {
+        let json = self.request(Method::GET, &format!("/v1/local/apps/{id}/backups"), None)?;
+        serde_json::from_value(json["backups"].clone())
+            .context("malformed backup list from the daemon")
+    }
+
+    pub fn backup_create(&self, id: &str) -> Result<RemoteBackup> {
+        let json = self.request(Method::POST, &format!("/v1/local/apps/{id}/backups"), None)?;
+        serde_json::from_value(json).context("malformed backup response from the daemon")
+    }
+
+    pub fn backup_restore(&self, id: &str, name: &str) -> Result<()> {
+        self.request(
+            Method::POST,
+            &format!("/v1/local/apps/{id}/backups/{name}"),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub fn backup_prune(&self, id: &str, keep: u32) -> Result<Vec<String>> {
+        let json = self.request(
+            Method::DELETE,
+            &format!("/v1/local/apps/{id}/backups"),
+            Some(serde_json::json!({ "keep": keep })),
+        )?;
+        serde_json::from_value(json["removed"].clone())
+            .context("malformed backup prune response from the daemon")
     }
 
     #[allow(clippy::too_many_arguments)]

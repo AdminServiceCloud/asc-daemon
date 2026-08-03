@@ -7,6 +7,7 @@
 
 pub mod console;
 mod grpc;
+mod local;
 pub mod proto;
 mod rest;
 pub mod uds;
@@ -314,6 +315,93 @@ impl ApiState {
 
     pub async fn remove(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<()> {
         self.blocking(move |s| s.manager.remove(&ctx, &id)).await
+    }
+
+    /// Create a backup through the daemon's local, peer-authenticated API.
+    /// The local MCP transport deliberately uses only the built-in storage:
+    /// user-specific storage credentials belong to the caller's home and are
+    /// not available to a system daemon without weakening that boundary.
+    pub async fn create_backup(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+    ) -> Result<crate::daemon::backup::BackupInfo> {
+        self.blocking(move |s| {
+            use crate::daemon::backup::{self, storage};
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let storages =
+                storage::StorageList::load_with(crate::daemon::pkg::sources::Scope::System)?;
+            backup::create_backup(
+                &s.config,
+                s.manager.store(),
+                &meta,
+                &storages,
+                storage::LOCAL_NAME,
+                None,
+            )
+        })
+        .await
+    }
+
+    pub async fn list_backups(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+    ) -> Result<Vec<String>> {
+        self.blocking(move |s| {
+            use crate::daemon::backup::{self, storage};
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let storages =
+                storage::StorageList::load_with(crate::daemon::pkg::sources::Scope::System)?;
+            backup::list_backups(&s.config, &storages, storage::LOCAL_NAME, &meta.id)
+        })
+        .await
+    }
+
+    pub async fn restore_backup(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        backup_name: String,
+    ) -> Result<()> {
+        self.blocking(move |s| {
+            use crate::daemon::backup::{self, storage};
+            let status = s.manager.status(&ctx, &id)?;
+            if status.state == crate::daemon::apps::RuntimeState::Running {
+                anyhow::bail!(
+                    "app '{}' must be stopped before restoring a backup",
+                    status.meta.id
+                );
+            }
+            let storages =
+                storage::StorageList::load_with(crate::daemon::pkg::sources::Scope::System)?;
+            backup::restore_backup(
+                &s.config,
+                s.manager.store(),
+                &status.meta,
+                &storages,
+                storage::LOCAL_NAME,
+                &backup_name,
+            )
+        })
+        .await
+    }
+
+    pub async fn prune_backups(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        keep: u32,
+    ) -> Result<Vec<String>> {
+        self.blocking(move |s| {
+            use crate::daemon::backup::{self, storage};
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let storages =
+                storage::StorageList::load_with(crate::daemon::pkg::sources::Scope::System)?;
+            let store = backup::resolve_storage(&s.config, &storages, storage::LOCAL_NAME)?;
+            backup::prune(store.as_ref(), &meta.id, keep)
+        })
+        .await
     }
 
     /// An app's settings schema and the values chosen so far (DMN-043): what

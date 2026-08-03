@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.8.1-blue)](version.txt)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue)](version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -27,7 +27,7 @@
 - 💾 **Backups** — `asc backup create|restore|list|prune`, a local storage out of the box, S3/FTP/SFTP storages configurable (upload not wired up yet), exclusions via `asc.backup.yaml`, rotation
 - 📊 **Monitoring** — system and application metrics, health checks
 - 📁 **SFTP server** — file access isolated to a specific application
-- 🖥️ **Consoles** — WebSocket application terminal and SSH console for the UI
+- 🖥️ **Console** — WebSocket application terminal and live logs
 - ⏰ **Scheduler** — scheduled (cron) tasks, a priority queue
 - ⌨️ **Tab completion** — bash, zsh and fish: commands, flags and live values (app ids, packages, storages); installed automatically, or `asc completion <shell>`
 - 🔄 **asc-updater** — a separate updater utility: auto-updates (can be disabled), stable/beta channels, rollback; at install time — pick default settings or your own
@@ -160,7 +160,7 @@ Documentation for the daemon's modules lives in the [docs/english/](docs/english
 | [📊 monitoring](docs/english/monitoring.md) | System and application metrics |
 | [💾 backups](docs/english/backups.md) | Application backups |
 | [📁 sftp](docs/english/sftp.md) | SFTP isolated per application |
-| [🖥️ console](docs/english/console.md) | WebSocket and SSH consoles |
+| [🖥️ console](docs/english/console.md) | WebSocket application console |
 | [⏰ scheduler](docs/english/scheduler.md) | Task scheduler |
 | [⌨️ completion](docs/english/completion.md) | Tab completion for bash, zsh and fish — commands, flags and live values |
 | [🔄 updater](docs/english/updater.md) | The asc-updater utility: auto-updates, channels, rollback |

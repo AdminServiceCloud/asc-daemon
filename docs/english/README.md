@@ -26,6 +26,7 @@ Open source CLI utility and daemon written in Rust, installed on the user's serv
 | ⏰ Task scheduler | [scheduler](scheduler.md) |
 | ⌨️ Shell completion (Tab) for bash, zsh and fish | [completion](completion.md) |
 | 🔄 The asc-updater update utility | [updater](updater.md) |
+| 🔗 Connecting the node to the platform | [platform](platform.md) |
 
 Community files: [🛡️ SECURITY.md](../../SECURITY.md) — security policy and private vulnerability reports; [🤝 CODE_OF_CONDUCT.md](../../CODE_OF_CONDUCT.md) — code of conduct (Contributor Covenant 2.1); [version.txt](../../version.txt) — current version (kept in sync with `Cargo.toml`); [CODEOWNERS](../../.github/CODEOWNERS) — automatic PR review by [@statebyte](https://github.com/statebyte).
 

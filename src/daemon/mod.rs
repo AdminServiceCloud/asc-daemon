@@ -14,6 +14,7 @@ pub mod logging;
 pub mod mcp;
 pub mod monitor;
 pub mod pkg;
+pub mod platform;
 pub mod progress;
 pub mod scheduler;
 pub mod server;

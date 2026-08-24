@@ -58,6 +58,26 @@ pub struct Config {
     pub monitor: MonitorConfig,
     pub policy: PolicyConfig,
     pub updater: UpdaterConfig,
+    pub platform: PlatformConfig,
+}
+
+/// `[platform]` — binding to AdminService.Cloud (DMN-058).
+///
+/// Non-secret values only: the registration token lives in `platform.token`
+/// next to this file, root-readable at 0600, because config.toml is
+/// world-readable by design.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformConfig {
+    /// Base URL of the platform this node reports to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Node id assigned by the platform on registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// When registration succeeded, RFC 3339.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<String>,
 }
 
 /// `[policy]` — root-managed rules for regular (non-root) users.

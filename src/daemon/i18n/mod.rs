@@ -172,6 +172,12 @@ pub enum Msg {
     UpdSettingDir,
     UpdConfirmDefaults,
     UpdAborted,
+    PlatformRegistered,
+    PlatformRegisterFailed,
+    PlatformRetryHint,
+    PlatformNotConnected,
+    PlatformStatus,
+    PlatformInsecureUrl,
     UpdPromptLanguage,
     UpdPromptAuto,
     UpdPromptChannel,
@@ -555,6 +561,27 @@ pub fn t(msg: Msg) -> &'static str {
             "Установить с этими настройками? [Y/n/c — изменить]",
         ),
         Msg::UpdAborted => ("installation aborted", "установка прервана"),
+        Msg::PlatformRegistered => (
+            "Node registered with {} (id {})",
+            "Нода зарегистрирована в {} (id {})",
+        ),
+        Msg::PlatformRegisterFailed => (
+            "could not register with the platform: {}",
+            "не удалось зарегистрироваться в платформе: {}",
+        ),
+        Msg::PlatformRetryHint => (
+            "The daemon is installed and works locally. Retry with: asc connect <token>",
+            "Демон установлен и работает локально. Повторить: asc connect <токен>",
+        ),
+        Msg::PlatformNotConnected => (
+            "This node is not connected to a platform. Connect it with: asc connect <token>",
+            "Нода не подключена к платформе. Подключить: asc connect <токен>",
+        ),
+        Msg::PlatformStatus => ("Platform: {} (node {})", "Платформа: {} (нода {})"),
+        Msg::PlatformInsecureUrl => (
+            "warning: the platform URL uses plain HTTP; the registration token is sent unencrypted",
+            "внимание: URL платформы использует обычный HTTP, токен регистрации уйдёт незашифрованным",
+        ),
         Msg::UpdPromptLanguage => ("Language (en/ru)", "Язык (en/ru)"),
         Msg::UpdPromptAuto => ("Auto-updates (on/off)", "Автообновления (on/off)"),
         Msg::UpdPromptChannel => (

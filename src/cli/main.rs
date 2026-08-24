@@ -16,6 +16,7 @@ use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2, tf3};
 use asc_daemon::daemon::mcp;
 use asc_daemon::daemon::monitor;
 use asc_daemon::daemon::pkg::{self, RegistryClient, SourceList};
+use asc_daemon::daemon::platform;
 use asc_daemon::daemon::progress;
 use asc_daemon::daemon::service::{self, ServiceState};
 use asc_daemon::daemon::{logging, server};
@@ -47,6 +48,15 @@ enum Command {
     },
     /// Show daemon version, service state and apps summary
     Status,
+    /// Connect this node to an AdminService.Cloud platform using a one-time
+    /// registration token issued in the panel
+    Connect {
+        /// One-time registration token from the platform
+        token: String,
+        /// Platform base URL (default https://adminservice.cloud)
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
     /// Show CPU, memory and disk usage per app, like `docker stats
     /// --no-stream` (your own apps; run under sudo to see everyone's,
     /// grouped by owner)
@@ -603,6 +613,7 @@ fn run() -> anyhow::Result<()> {
             .block_on(mcp::serve(config)),
         Command::Service { action } => service_cmd(action),
         Command::Status => status_cmd(&config),
+        Command::Connect { token, url } => connect_cmd(config.clone(), &token, url.as_deref()),
         Command::Stats { sort, live } => stats_cmd(sort, live, &config),
         Command::App { action } => app_cmd(action, &config),
         Command::Ls { action } => match action {
@@ -3358,6 +3369,26 @@ fn service_cmd(action: ServiceAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Bind this node to a platform. Writing the token and the platform URL
+/// touches root-owned files, so the command requires root just like
+/// `asc service install`.
+fn connect_cmd(mut config: Config, token: &str, url: Option<&str>) -> anyhow::Result<()> {
+    service::require_root()?;
+    if url.is_some_and(|value| value.starts_with("http://")) {
+        eprintln!("{}", t(Msg::PlatformInsecureUrl));
+    }
+    let registration = platform::register(&mut config, token, url)?;
+    println!(
+        "{}",
+        tf2(
+            Msg::PlatformRegistered,
+            &registration.platform_url,
+            &registration.node_id
+        )
+    );
+    Ok(())
+}
+
 fn status_cmd(config: &Config) -> anyhow::Result<()> {
     // The banner is for humans: piped output (grep, scripts) stays clean.
     // SAFETY: isatty() has no preconditions.
@@ -3367,6 +3398,10 @@ fn status_cmd(config: &Config) -> anyhow::Result<()> {
     }
     println!("asc {}", asc_daemon::VERSION);
     print_service_state()?;
+    match (&config.platform.url, &config.platform.node_id) {
+        (Some(url), Some(node_id)) => println!("{}", tf2(Msg::PlatformStatus, url, node_id)),
+        _ => println!("{}", t(Msg::PlatformNotConnected)),
+    }
     // Through the daemon when it answers (the counts then reflect what the
     // caller may see per SO_PEERCRED); silently in-process otherwise —
     // status is diagnostics and must work with a broken daemon too.

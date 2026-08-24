@@ -6,7 +6,8 @@
 //! distribution. The daemon API server (DMN-005) brings a real HTTP stack
 //! (hyper/rustls) when it lands — this helper is for outbound fetches only.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -78,4 +79,63 @@ pub fn get_bytes_with_timeout(url: &str, max_time_secs: &str) -> Result<Vec<u8>>
 pub fn get_string_with_timeout(url: &str, max_time_secs: &str) -> Result<String> {
     String::from_utf8(get_bytes_with_timeout(url, max_time_secs)?)
         .with_context(|| format!("{url}: response is not UTF-8"))
+}
+
+/// POST a JSON body and return the response body as UTF-8 text.
+///
+/// The body goes in on stdin rather than as an argument: registration tokens
+/// pass through here, and process arguments are readable by every user on the
+/// machine via `ps`.
+///
+/// Unlike the GET helpers this one also permits `http://` — a platform under
+/// local development is reachable that way and refusing it would make the
+/// bootstrap path untestable. Plain HTTP is warned about by the caller.
+pub fn post_json(url: &str, body: &str) -> Result<String> {
+    let mut child = match Command::new("curl")
+        .args([
+            "--proto",
+            "=https,http",
+            "--tlsv1.2",
+            "--fail-with-body",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            "60",
+            "--max-filesize",
+            MAX_FILESIZE,
+            "--header",
+            "Content-Type: application/json",
+            "--data-binary",
+            "@-",
+            "--user-agent",
+            concat!("asc-daemon/", env!("CARGO_PKG_VERSION")),
+            url,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(t(Msg::ErrCurlNotFound)),
+        Err(e) => return Err(e).context("cannot run curl"),
+    };
+    child
+        .stdin
+        .take()
+        .context("cannot open curl stdin")?
+        .write_all(body.as_bytes())
+        .context("cannot send the request body")?;
+    let out = child.wait_with_output().context("cannot run curl")?;
+    let response = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        let detail = if response.is_empty() {
+            String::from_utf8_lossy(&out.stderr).trim().to_string()
+        } else {
+            response
+        };
+        bail!("cannot POST {url}: {detail}");
+    }
+    Ok(response)
 }

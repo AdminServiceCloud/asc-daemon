@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 
 use asc_daemon::daemon::config::{Channel, Config};
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2};
-use asc_daemon::daemon::{logging, service};
+use asc_daemon::daemon::{logging, platform, service};
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +35,13 @@ enum Command {
         /// No questions: install everything with default settings
         #[arg(long)]
         silent: bool,
+        /// One-time registration token from the platform: binds this node to
+        /// the organization that issued it
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+        /// Platform base URL (default https://adminservice.cloud)
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
     },
     /// Update the daemon to the channel's latest release
     Update {
@@ -87,12 +94,19 @@ fn run() -> Result<()> {
     }
 
     match cli.command {
-        Command::Install { silent } => {
+        Command::Install { silent, token, url } => {
             if !silent && !confirm_settings(&mut config)? {
                 bail!(t(Msg::UpdAborted));
             }
             i18n::set_lang(config.language);
-            installer::install(&config)
+            installer::install(&config)?;
+            // Registration is deliberately last and never fatal: the daemon is
+            // installed and useful locally even when the platform is
+            // unreachable, and `asc connect` retries.
+            if let Some(token) = token {
+                connect(&mut config, &token, url.as_deref());
+            }
+            Ok(())
         }
         Command::Update { force } => installer::update(&config, force),
         Command::Auto { action } => auto_cmd(action, config),
@@ -104,6 +118,25 @@ fn run() -> Result<()> {
         }
         Command::Rollback => installer::rollback(&config),
         Command::Status => status_cmd(&config),
+    }
+}
+
+/// Bind the freshly installed node to a platform, reporting but swallowing
+/// failures.
+fn connect(config: &mut Config, token: &str, url: Option<&str>) {
+    match platform::register(config, token, url) {
+        Ok(registration) => println!(
+            "{}",
+            tf2(
+                Msg::PlatformRegistered,
+                &registration.platform_url,
+                &registration.node_id
+            )
+        ),
+        Err(err) => {
+            eprintln!("{}", tf(Msg::PlatformRegisterFailed, format!("{err:#}")));
+            eprintln!("{}", t(Msg::PlatformRetryHint));
+        }
     }
 }
 

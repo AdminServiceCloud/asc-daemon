@@ -202,31 +202,46 @@ impl AppManager {
     /// Load an app the user is allowed to manage. `reference` is the app id
     /// or its custom name (DMN-024) — every command accepts both.
     ///
+    /// Both are matched case-insensitively: ids are canonically lowercase
+    /// (`HOMEBAR` installs as `homebar`), and typing the name back the way
+    /// the repository spells it must reach the same app.
+    ///
     /// A foreign app reports "not found" — same as a missing one — so users
     /// cannot probe which app ids exist on the server.
     pub fn get_authorized(&self, ctx: &UserContext, reference: &str) -> Result<AppMeta> {
         // The id first: ids are unique, custom names may not be. A reference
-        // that is not even a valid id (spaces, uppercase) skips straight to
+        // that is not even a valid id (spaces, punctuation) skips straight to
         // the name lookup.
-        if meta::validate_id(reference).is_ok()
-            && let Some(meta) = self.store.get(reference)?
+        let id = reference.to_ascii_lowercase();
+        if meta::validate_id(&id).is_ok()
+            && let Some(meta) = self.store.get(&id)?
             && (ctx.is_root || meta.owner.uid == ctx.uid)
         {
             return Ok(meta);
         }
         // Custom names are matched among visible apps only, so a name equal
-        // to a foreign user's id still resolves to the caller's own app.
-        let mut matches = self
+        // to a foreign user's id still resolves to the caller's own app. An
+        // exact spelling wins over a case-insensitive one, so two names that
+        // differ only in case stay addressable.
+        let visible: Vec<AppMeta> = self
             .store
             .list()?
             .into_iter()
             .filter(|m| ctx.is_root || m.owner.uid == ctx.uid)
-            .filter(|m| m.custom_name.as_deref() == Some(reference));
-        match (matches.next(), matches.next()) {
-            (Some(meta), None) => Ok(meta),
-            (Some(_), Some(_)) => bail!(tf(Msg::AppNameAmbiguous, reference)),
-            _ => bail!(tf(Msg::AppNotFound, reference)),
+            .collect();
+        for exact in [true, false] {
+            let mut matches = visible.iter().filter(|m| match &m.custom_name {
+                Some(name) if exact => name == reference,
+                Some(name) => name.eq_ignore_ascii_case(reference),
+                None => false,
+            });
+            match (matches.next(), matches.next()) {
+                (Some(meta), None) => return Ok(meta.clone()),
+                (Some(_), Some(_)) => bail!(tf(Msg::AppNameAmbiguous, reference)),
+                _ => {}
+            }
         }
+        bail!(tf(Msg::AppNotFound, reference))
     }
 
     /// Observed state; errors (docker missing etc.) degrade to Stopped with a warning.

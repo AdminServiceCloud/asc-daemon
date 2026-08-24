@@ -16,7 +16,7 @@ use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
 use super::settings::{SettingKind, SettingValues, SettingsFile};
 use crate::daemon::apps::meta::{
-    AppMeta, DesiredState, ImageSource, Owner, Quota, Runtime, new_uuid,
+    AppMeta, DesiredState, ImageSource, Owner, Quota, Runtime, canonical_id, new_uuid,
 };
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
@@ -243,7 +243,10 @@ pub fn install(
         bail!(tf2(Msg::PkgNotAStack, package, package));
     }
     let store = AppStore::new(config.daemon.apps_dir.clone());
-    let id = instance_id(&store, package)?;
+    // The registry's spelling of the name, not the caller's: package names
+    // resolve case-insensitively, so `asc install HOMEBAR` must still install
+    // the app under the canonical id.
+    let id = instance_id(&store, &canonical_id(&resolved.entry.name)?)?;
     install_one(config, ctx, &resolved, &id, None, opts).map(InstallOutcome::App)
 }
 
@@ -335,12 +338,13 @@ fn install_stack(
     let stack = StackManifest::load(&stack_root)?;
 
     let wanted: Vec<&str> = match stack_app {
-        Some(app) => {
-            if stack.app(app).is_none() {
-                bail!(tf2(Msg::PkgStackNoApp, package, app));
-            }
-            vec![app]
-        }
+        // The stack's own spelling of the name, not the caller's: `app()`
+        // matches case-insensitively, everything downstream compares names
+        // literally.
+        Some(app) => match stack.app(app) {
+            Some(found) => vec![found.name.as_str()],
+            None => bail!(tf2(Msg::PkgStackNoApp, package, app)),
+        },
         None => stack
             .apps
             .iter()
@@ -538,13 +542,16 @@ pub fn is_git_url(spec: &str) -> bool {
 /// The repository's own name from its URL — the default app id for a direct
 /// git install: `https://github.com/foo/bar.git` and `git@github.com:foo/bar`
 /// both give `bar`.
+///
+/// The name is folded into a canonical id ([`canonical_id`]), so a repository
+/// named `HOMEBAR` installs as `homebar` instead of being refused: app ids
+/// are lowercase because they become directories, container names and
+/// systemd units, but nobody should have to rename their repository for that.
 pub fn repo_name(url: &str) -> Result<String> {
     let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
     let name = trimmed.rsplit(['/', ':']).next().unwrap_or_default();
-    if name.is_empty() {
-        bail!("cannot derive an app name from '{url}' — pass --name explicitly");
-    }
-    Ok(name.to_string())
+    canonical_id(name)
+        .with_context(|| format!("cannot derive an app name from '{url}' — pass --name explicitly"))
 }
 
 /// Install directly from a git repository URL, bypassing the registry: for
@@ -964,14 +971,6 @@ pub(super) fn clone_repository(
 /// capture), so `--progress` forces it back on and [`read_progress_lines`]
 /// parses the `\r`-delimited status line as it streams in.
 fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
-    let mut args: Vec<&str> = vec!["clone", "--depth", "1", "--progress"];
-    if let Some(tag) = tag {
-        args.extend(["--branch", tag]);
-    }
-    args.push(git_url);
-    let dest_str = dest.to_string_lossy();
-    args.push(&dest_str);
-
     // Credentials for private repositories (DMN-003). An unreadable auth
     // file must not block installs from public repositories.
     let auth = match super::auth::GitAuth::load() {
@@ -982,6 +981,21 @@ fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
         }
     };
     let credential = auth.as_ref().and_then(|a| a.lookup(git_url));
+    // An SSH key cannot authorize an https clone (nor a token an ssh one):
+    // the URL follows the credential's transport.
+    let clone_url = super::auth::transport_url(git_url, credential.map(|c| &c.method));
+    if clone_url != git_url {
+        debug!(from = %git_url, to = %clone_url, "clone URL rewritten for the configured credential");
+    }
+
+    let mut args: Vec<&str> = vec!["clone", "--depth", "1", "--progress"];
+    if let Some(tag) = tag {
+        args.extend(["--branch", tag]);
+    }
+    args.push(&clone_url);
+    let dest_str = dest.to_string_lossy();
+    args.push(&dest_str);
+
     let mut cmd = Command::new("git");
     cmd.args(&args);
     cmd.stdout(Stdio::null());
@@ -1013,6 +1027,9 @@ fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
             return Err(anyhow::Error::new(super::auth::AuthRequired {
                 url: git_url.to_string(),
             }));
+        }
+        if let Some(hint) = super::auth::host_key_hint(&captured, &clone_url) {
+            bail!("git clone failed: {} — {hint}", captured.trim());
         }
         bail!("git clone failed: {}", captured.trim());
     }
@@ -1680,6 +1697,24 @@ mod tests {
             "name: web\nversion: '1'\ntype: docker\nruntime:\n  image-build:\n    tag: my/web:v1\n",
         );
         assert_eq!(built_image_tag(&tagged, "web"), "my/web:v1");
+    }
+
+    #[test]
+    fn repo_name_folds_the_repository_name_into_an_id() {
+        // `asc install https://github.com/mireblood/HOMEBAR` installs as
+        // `homebar` instead of failing on an id it cannot use.
+        assert_eq!(
+            repo_name("https://github.com/mireblood/HOMEBAR").unwrap(),
+            "homebar"
+        );
+        assert_eq!(
+            repo_name("git@github.com:MireBlood/Home.Bar.git").unwrap(),
+            "home-bar"
+        );
+        assert_eq!(repo_name("https://github.com/org/repo/").unwrap(), "repo");
+        // Nothing to derive a name from — the caller is told to pass --name.
+        let err = repo_name("https://github.com/org/---.git").unwrap_err();
+        assert!(format!("{err:#}").contains("--name"), "got: {err:#}");
     }
 
     #[test]

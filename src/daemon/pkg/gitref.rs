@@ -42,9 +42,12 @@ pub fn ls_remote(git_url: &str) -> Result<RemoteRefs> {
     // and an unreadable auth file must not block the query.
     let auth = GitAuth::load().ok();
     let credential = auth.as_ref().and_then(|a| a.lookup(git_url));
+    // Same transport rule as the clone: the URL follows the credential, so
+    // an SSH key is not silently ignored on an https URL.
+    let url = auth::transport_url(git_url, credential.map(|c| &c.method));
 
     let mut cmd = Command::new("git");
-    cmd.args(["ls-remote", "--tags", "--heads", git_url]);
+    cmd.args(["ls-remote", "--tags", "--heads", &url]);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let _askpass = auth::configure_git(&mut cmd, credential.map(|c| &c.method))?;
@@ -60,6 +63,9 @@ pub fn ls_remote(git_url: &str) -> Result<RemoteRefs> {
             return Err(anyhow::Error::new(auth::AuthRequired {
                 url: git_url.to_string(),
             }));
+        }
+        if let Some(hint) = auth::host_key_hint(&stderr, &url) {
+            bail!("git ls-remote failed: {} — {hint}", stderr.trim());
         }
         bail!("git ls-remote failed: {}", stderr.trim());
     }

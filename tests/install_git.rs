@@ -141,6 +141,59 @@ fn install_direct_from_git_url() {
     assert!(!store.app_dir("demo-4").unwrap().exists());
 }
 
+/// The uppercase case end to end: a repository named `HOMEBAR` whose
+/// manifest also spells the name in uppercase installs as `homebar` — app
+/// ids are lowercase, but nobody has to rename their repository for that —
+/// and every command still finds it under the name the user typed.
+#[test]
+fn install_direct_from_an_uppercase_repository() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not available");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let repo = ws.path().join("HOMEBAR");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(
+        repo.join("asc.yaml"),
+        "name: HOMEBAR
+version: 1.0.0
+type: native
+runtime:
+  start: ./run.sh
+",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let url = repo.display().to_string().replace('\\', "/");
+
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    let ctx = UserContext {
+        uid: 1000,
+        name: "tester".into(),
+        is_root: false,
+    };
+
+    let report = pkg::install_from_git(&config, &ctx, &url, None, None, true, None).unwrap();
+    assert_eq!(report.id, "homebar");
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    assert!(store.get("homebar").unwrap().is_some());
+
+    // The reference the user typed reaches the app it just installed.
+    let apps = asc_daemon::daemon::apps::AppManager::new(&config);
+    for reference in ["HOMEBAR", "HomeBar", "homebar"] {
+        assert_eq!(
+            apps.get_authorized(&ctx, reference).unwrap().id,
+            "homebar",
+            "reference '{reference}' must resolve"
+        );
+    }
+}
+
 #[test]
 fn install_direct_from_git_requires_license_acceptance() {
     if Command::new("git").arg("--version").output().is_err() {

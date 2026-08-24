@@ -190,6 +190,41 @@ pub fn new_uuid() -> Result<String> {
     ))
 }
 
+/// Fold a free-form name (git repository name, registry package name, the
+/// `name` of a manifest) into a valid app id.
+///
+/// Ids are case-insensitive and canonically lowercase: `HOMEBAR` and
+/// `HomeBar` both install as `homebar`. The same folding is what Docker does
+/// to image names, and for the same reasons the id has to satisfy
+/// [`validate_id`] — it becomes a directory, a container name and a systemd
+/// unit name. Characters outside `[a-z0-9_-]` (dots in `asc.daemon`, spaces)
+/// become `-`, runs of `-` collapse and leading/trailing ones are trimmed.
+///
+/// Fails when nothing usable is left (`"..."`, `""`) — the caller then asks
+/// for an explicit name instead of inventing one.
+pub fn canonical_id(raw: &str) -> Result<String> {
+    let mut id = String::with_capacity(raw.len());
+    for c in raw.trim().chars() {
+        let c = c.to_ascii_lowercase();
+        let keep = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+        if keep {
+            id.push(c);
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    // The id must start with a letter or digit (`_lead` is rejected too).
+    let id = id
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .trim_end_matches('-');
+    // 64 is the validator's limit; cutting on a char boundary is trivial
+    // here because everything left is ASCII.
+    let id = &id[..id.len().min(64)];
+    let id = id.trim_end_matches('-');
+    validate_id(id)?;
+    Ok(id.to_string())
+}
+
 /// Validate an app id before using it as a directory name.
 ///
 /// Strict on purpose: the id ends up in filesystem paths, container names and
@@ -322,5 +357,21 @@ mod tests {
         assert!(validate_id("../etc").is_err());
         assert!(validate_id("a b").is_err());
         assert!(validate_id(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn canonical_id_folds_case_and_separators() {
+        // The case fold is the point: `asc install .../HOMEBAR` installs as
+        // `homebar` instead of being refused as an invalid id.
+        assert_eq!(canonical_id("HOMEBAR").unwrap(), "homebar");
+        assert_eq!(canonical_id("HomeBar").unwrap(), "homebar");
+        assert_eq!(canonical_id("asc.daemon").unwrap(), "asc-daemon");
+        assert_eq!(canonical_id("  My App  ").unwrap(), "my-app");
+        assert_eq!(canonical_id("-lead-").unwrap(), "lead");
+        assert_eq!(canonical_id("app-2_test").unwrap(), "app-2_test");
+        assert_eq!(canonical_id(&"X".repeat(80)).unwrap(), "x".repeat(64));
+        // Nothing usable left — the caller must ask for a name.
+        assert!(canonical_id("...").is_err());
+        assert!(canonical_id("").is_err());
     }
 }

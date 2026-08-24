@@ -1022,6 +1022,13 @@ fn prompt_git_app_name(
 /// allocated), against the local store otherwise. Best-effort either way —
 /// the install itself allocates the id authoritatively.
 fn instance_default(base: &str, config: &Config, daemon: Option<&client::Daemon>) -> String {
+    // App ids are canonically lowercase, so the prompt must offer the id the
+    // install will really allocate — `HOMEBAR` becomes `homebar`. A stack
+    // spec ('stack/app') is not an id at all and is shown as typed.
+    let folded = (!base.contains('/'))
+        .then(|| asc_daemon::daemon::apps::meta::canonical_id(base).ok())
+        .flatten();
+    let base = folded.as_deref().unwrap_or(base);
     let Some(daemon) = daemon else {
         // Stack specs ('stack/app') are not valid ids; fall back to the spec.
         let store = asc_daemon::daemon::apps::AppStore::new(config.daemon.apps_dir.clone());
@@ -1321,10 +1328,7 @@ fn storage_action_cmd(action: StorageAction) -> anyhow::Result<()> {
 /// Interactive SSH key selection from `~/.ssh` — the choice is saved by the
 /// caller, so next time no prompt is needed.
 fn pick_ssh_key(target: &str) -> anyhow::Result<std::path::PathBuf> {
-    use anyhow::Context;
-    use asc_daemon::daemon::pkg::auth;
-    let home = std::env::var_os("HOME").context("cannot determine home directory ($HOME)")?;
-    let keys = auth::list_ssh_keys(&std::path::PathBuf::from(home).join(".ssh"));
+    let keys = ssh_keys();
     if keys.is_empty() {
         anyhow::bail!(t(Msg::AuthNoKeys));
     }
@@ -1339,6 +1343,16 @@ fn pick_ssh_key(target: &str) -> anyhow::Result<std::path::PathBuf> {
         .filter(|n| (1..=keys.len()).contains(n))
         .ok_or_else(|| anyhow::anyhow!(t(Msg::AuthInvalidChoice)))?;
     Ok(keys[index - 1].clone())
+}
+
+/// Private SSH keys of the calling user, `~/.ssh` scanned by
+/// [`auth::list_ssh_keys`]; empty when there is no home directory to look in.
+fn ssh_keys() -> Vec<std::path::PathBuf> {
+    use asc_daemon::daemon::pkg::auth;
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    auth::list_ssh_keys(&std::path::PathBuf::from(home).join(".ssh"))
 }
 
 fn read_line(prompt: &str) -> anyhow::Result<String> {
@@ -1510,7 +1524,18 @@ fn offer_auth_setup(err: &anyhow::Error) -> bool {
         if !matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
             return Ok(false);
         }
-        let method = if auth::is_ssh_url(url) {
+        // An https URL takes a token by default, but an SSH key works just
+        // as well — the clone then goes over the ssh transport — so the
+        // choice is offered whenever the user has a key to offer.
+        let by_key = auth::is_ssh_url(url)
+            || (!ssh_keys().is_empty()
+                && matches!(
+                    read_line(&tf(Msg::AuthPromptMethod, &host))?
+                        .to_lowercase()
+                        .as_str(),
+                    "k" | "key" | "ssh" | "к" | "ключ"
+                ));
+        let method = if by_key {
             Method::SshKey {
                 key: pick_ssh_key(&host)?,
             }

@@ -10,6 +10,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::daemon::apps::meta::canonical_id;
+
 /// Root of `asc.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,8 +172,18 @@ impl StackManifest {
         let path = dir.join(Self::FILE);
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("cannot read stack manifest {}", path.display()))?;
-        let stack: StackManifest = serde_yaml::from_str(&raw)
+        let mut stack: StackManifest = serde_yaml::from_str(&raw)
             .with_context(|| format!("invalid stack manifest {}", path.display()))?;
+        // Case-folded like an app manifest's `name` — and `depends_on` with
+        // them, or a dependency spelled in another case would dangle.
+        for app in &mut stack.apps {
+            app.name = canonical_id(&app.name)
+                .with_context(|| format!("invalid app name '{}' in stack", app.name))?;
+            for dep in &mut app.depends_on {
+                *dep = canonical_id(dep)
+                    .with_context(|| format!("invalid dependency '{dep}' in stack"))?;
+            }
+        }
         stack.validate()?;
         Ok(stack)
     }
@@ -199,8 +211,10 @@ impl StackManifest {
         Ok(())
     }
 
+    /// The stack's app by name, case-insensitively — `asc install
+    /// mystack/MyApp` addresses the same app as `mystack/myapp`.
     pub fn app(&self, name: &str) -> Option<&StackApp> {
-        self.apps.iter().find(|a| a.name == name)
+        self.apps.iter().find(|a| a.name.eq_ignore_ascii_case(name))
     }
 
     /// Dependency-first install order for `wanted` apps plus everything they
@@ -251,8 +265,13 @@ impl Manifest {
         let path = dir.join(Self::FILE);
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("cannot read manifest {}", path.display()))?;
-        let manifest: Manifest = serde_yaml::from_str(&raw)
+        let mut manifest: Manifest = serde_yaml::from_str(&raw)
             .with_context(|| format!("invalid manifest {}", path.display()))?;
+        // App names are case-insensitive and canonically lowercase: a package
+        // declaring `name: HOMEBAR` installs as `homebar` rather than being
+        // rejected for the case of a name its author never thought of as an id.
+        manifest.name = canonical_id(&manifest.name)
+            .with_context(|| format!("invalid app name '{}' in manifest", manifest.name))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -302,6 +321,56 @@ runtime:
         assert_eq!(m.app_type, AppType::Docker);
         assert_eq!(m.runtime.image.as_deref(), Some("nginx:1.27"));
         assert!(m.runtime.stdin && m.runtime.tty);
+    }
+
+    #[test]
+    fn manifest_name_is_folded_to_a_canonical_id() {
+        // A package author writing the name the way the repository spells it
+        // must not have to know that ids are lowercase.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(Manifest::FILE),
+            "name: HOMEBAR
+version: '1.0.0'
+type: docker
+runtime:
+  image: homebar:1
+",
+        )
+        .unwrap();
+        assert_eq!(Manifest::load(dir.path()).unwrap().name, "homebar");
+    }
+
+    #[test]
+    fn stack_app_names_and_dependencies_are_folded_together() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(StackManifest::FILE),
+            "name: Bar
+version: '1.0.0'
+apps:
+  - name: DB
+    path: db
+  - name: Web
+    path: web
+    depends_on: [db]
+",
+        )
+        .unwrap();
+        let stack = StackManifest::load(dir.path()).unwrap();
+        assert_eq!(
+            stack
+                .apps
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db", "web"]
+        );
+        // A dependency spelled in another case still resolves — `validate`
+        // would have rejected the stack otherwise.
+        assert_eq!(stack.apps[1].depends_on, vec!["db".to_string()]);
+        // ...and the app is addressable however the user spells it.
+        assert_eq!(stack.app("WEB").map(|a| a.name.as_str()), Some("web"));
     }
 
     #[test]

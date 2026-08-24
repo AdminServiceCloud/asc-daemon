@@ -121,12 +121,19 @@ impl RegistryClient {
     /// Every source that provides the package (app or stack), in source
     /// priority order; never empty. Callers dispatch on `entry.package_type`
     /// and decide what to do when several sources compete.
+    ///
+    /// The name matches case-insensitively — `asc install HOMEBAR` and `asc
+    /// install homebar` resolve to the same registry entry, whose own
+    /// spelling is what the caller then works with.
     pub fn resolve_all(&self, name: &str) -> Result<Vec<ResolvedPackage>> {
         let mut found = Vec::new();
         for (source, _) in self.sources.list() {
             match self.packages_of(source, false, None) {
                 Ok(packages) => {
-                    if let Some(entry) = packages.into_iter().find(|p| p.name == name) {
+                    if let Some(entry) = packages
+                        .into_iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(name))
+                    {
                         found.push(ResolvedPackage {
                             source_name: source.name.clone(),
                             entry,

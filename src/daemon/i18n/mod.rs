@@ -121,8 +121,10 @@ pub enum Msg {
     AppLowResources,
     AppStartRiskPrompt,
     AppStartDeclined,
+    PkgSshHostKey,
     AuthPromptConfigure,
     AuthPromptToken,
+    AuthPromptMethod,
     AuthPromptKey,
     AuthNoKeys,
     AuthSaved,
@@ -407,6 +409,10 @@ pub fn t(msg: Msg) -> &'static str {
             "Всё равно запустить на свой страх и риск? [y/N] ",
         ),
         Msg::AppStartDeclined => ("start of '{}' cancelled", "запуск '{}' отменён"),
+        Msg::PkgSshHostKey => (
+            "the ssh host key of {} is not known to the user running asc — add it once: ssh-keyscan {} >> ~/.ssh/known_hosts",
+            "ssh-ключ хоста {} неизвестен пользователю, от имени которого работает asc — добавьте его один раз: ssh-keyscan {} >> ~/.ssh/known_hosts",
+        ),
         Msg::AuthPromptConfigure => (
             "Repository {} looks private. Configure authorization for '{}' now? [y/N] ",
             "Репозиторий {} похож на приватный. Настроить авторизацию для '{}' сейчас? [y/N] ",
@@ -414,6 +420,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::AuthPromptToken => (
             "Access token for '{}' (stored in {}): ",
             "Токен доступа для '{}' (будет сохранён в {}): ",
+        ),
+        Msg::AuthPromptMethod => (
+            "Authorize '{}' with an access [t]oken or an SSH [k]ey? [T/k] ",
+            "Авторизоваться в '{}' токеном доступа ([t]) или SSH-ключом ([k])? [T/k] ",
         ),
         Msg::AuthPromptKey => ("Select an SSH key for '{}':", "Выберите SSH-ключ для '{}':"),
         Msg::AuthNoKeys => (

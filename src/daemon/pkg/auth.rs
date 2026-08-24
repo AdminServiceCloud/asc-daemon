@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::sources::Scope;
-use crate::daemon::i18n::{Msg, tf};
+use crate::daemon::i18n::{Msg, tf, tf2};
 
 const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/auth.json";
 /// Pre-DMN-045 TOML store, read-only (migrated on the next write).
@@ -338,7 +338,10 @@ impl GitAuth {
             }
             match &cred.app {
                 // Bound to a different app (or to an app while we have none).
-                Some(bound) if app != Some(bound.as_str()) => continue,
+                // Compared case-insensitively like everything else about a
+                // credential key: app ids are lowercase and uuid hex reads
+                // the same in either case.
+                Some(bound) if !app.is_some_and(|a| a.eq_ignore_ascii_case(bound)) => continue,
                 _ => {}
             }
             let better = match best {
@@ -428,10 +431,12 @@ pub fn normalize_image(image: &str) -> String {
     }
 }
 
-/// Normalize a git URL (or a bare host/prefix) to `host/path` form:
-/// `https://github.com/org/repo.git`, `git@github.com:org/repo.git` and
-/// `ssh://git@github.com/org/repo` all become `github.com/org/repo`.
-pub fn normalize(url: &str) -> String {
+/// Strip a git URL down to `host/path`, keeping the original case:
+/// `https://github.com/Org/Repo.git`, `git@github.com:Org/Repo.git` and
+/// `ssh://git@github.com/Org/Repo` all become `github.com/Org/Repo`.
+/// [`normalize`] is this plus the case fold; the case-preserving form is
+/// what [`transport_url`] rebuilds a clone URL from.
+fn host_path(url: &str) -> String {
     let mut rest = url.trim();
     for scheme in ["https://", "http://", "ssh://", "file://"] {
         rest = rest.strip_prefix(scheme).unwrap_or(rest);
@@ -446,12 +451,66 @@ pub fn normalize(url: &str) -> String {
         .to_string()
 }
 
+/// Normalize a git URL (or a bare host/prefix) to a lowercase `host/path`
+/// form: `https://github.com/MyOrg/Repo.git`, `git@github.com:myorg/repo.git`
+/// and `ssh://git@github.com/MyOrg/repo` all become `github.com/myorg/repo`.
+///
+/// Case is folded because the credential key is not a path on disk: host
+/// names are case-insensitive by definition, and the forges we authorize
+/// against (GitHub, GitLab, Gitea) treat owner and repository names the same
+/// way — `asc auth add github.com/MyOrg` must authorize a clone of
+/// `github.com/myorg/app`, and the other way round.
+pub fn normalize(url: &str) -> String {
+    host_path(url).to_ascii_lowercase()
+}
+
 /// `pattern` matches `url` at a path boundary: `github.com/org` matches
-/// `github.com/org/repo` but not `github.com/organization`.
+/// `github.com/org/repo` but not `github.com/organization`. Case-insensitive
+/// like [`normalize`], so credentials stored before the fold (and hand-edited
+/// `auth.json` entries) keep matching.
 fn prefix_matches(pattern: &str, url: &str) -> bool {
-    match url.strip_prefix(pattern) {
-        Some(rest) => rest.is_empty() || rest.starts_with('/'),
-        None => false,
+    // `split_at_checked`, not `split_at`: a non-ASCII URL (an IDN host, a
+    // unicode repository name) must not panic on a pattern length that lands
+    // mid-character — it simply does not match.
+    let Some((head, rest)) = url.split_at_checked(pattern.len()) else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(pattern) && (rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The URL to hand `git` for `url` once `method` is known.
+///
+/// A credential only authorizes the transport it belongs to: an SSH key says
+/// nothing to an https endpoint, and a token says nothing to sshd. Rather
+/// than silently ignoring the configured credential — which shows up as a
+/// bare "Authentication failed" on a repository the user just set up — the
+/// URL is rewritten to the transport the credential can actually serve:
+/// `https://github.com/org/repo` with an SSH key becomes
+/// `git@github.com:org/repo.git`, and `git@github.com:org/repo` with a token
+/// becomes `https://github.com/org/repo.git`.
+///
+/// Only `host/path` URLs are rewritten; anything else (a `file://` path, a
+/// URL with no host) is handed to git untouched.
+pub fn transport_url(url: &str, method: Option<&Method>) -> String {
+    let wants_ssh = match method {
+        Some(Method::SshKey { .. }) => true,
+        Some(Method::Token { .. }) => false,
+        None => return url.to_string(),
+    };
+    if wants_ssh == is_ssh_url(url) || url.trim_start().starts_with("file://") {
+        return url.to_string();
+    }
+    let target = host_path(url);
+    let Some((host, path)) = target.split_once('/') else {
+        return url.to_string();
+    };
+    if host.is_empty() || path.is_empty() {
+        return url.to_string();
+    }
+    if wants_ssh {
+        format!("git@{host}:{path}.git")
+    } else {
+        format!("https://{host}/{path}.git")
     }
 }
 
@@ -545,6 +604,23 @@ pub fn is_auth_failure(stderr: &str) -> bool {
     MARKERS.iter().any(|m| stderr.contains(m))
 }
 
+/// A hint for the one ssh failure that has nothing to do with the key: the
+/// host is simply not in `known_hosts`. Git runs with `BatchMode=yes`, which
+/// turns the usual "continue connecting?" prompt into a hard failure — and
+/// the daemon runs as root, whose `known_hosts` is not the one the user
+/// filled in from their own shell. `None` when the error is something else.
+pub fn host_key_hint(stderr: &str, url: &str) -> Option<String> {
+    if !stderr.contains("Host key verification failed") {
+        return None;
+    }
+    let host = normalize(url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    (!host.is_empty()).then(|| tf2(Msg::PkgSshHostKey, &host, &host))
+}
+
 /// Typed error: the repository looks private and no working credential is
 /// configured. The CLI catches it to offer interactive setup; everyone else
 /// sees the message with the `asc auth add` hint.
@@ -611,6 +687,12 @@ mod tests {
         );
         assert_eq!(normalize("github.com/org/"), "github.com/org");
         assert_eq!(normalize("github.com"), "github.com");
+        // The stored key is lowercase: the host is case-insensitive by
+        // definition, the forges treat owner/repo the same way.
+        assert_eq!(
+            normalize("https://GitHub.com/MireBlood/HOMEBAR.git"),
+            "github.com/mireblood/homebar"
+        );
     }
 
     /// A repo credential with no app binding — the common case.
@@ -650,6 +732,72 @@ mod tests {
         };
         let hit = auth.lookup("https://github.com/org/repo").unwrap();
         assert!(matches!(&hit.method, Method::Token { token } if token == "usr"));
+    }
+
+    #[test]
+    fn credentials_match_regardless_of_case() {
+        // Hosts are case-insensitive, and so are owner/repository names on
+        // the forges — a key added for `github.com/MireBlood` must authorize
+        // a clone of `github.com/mireblood/HOMEBAR`.
+        let mut auth = GitAuth {
+            system: Vec::new(),
+            user: vec![repo("github.com/MireBlood", "tok")],
+            scope: Scope::User,
+        };
+        let hit = auth
+            .lookup("https://github.com/mireblood/HOMEBAR")
+            .expect("credential matches case-insensitively");
+        assert!(matches!(&hit.method, Method::Token { token } if token == "tok"));
+        // ...and the other way round, with the pattern stored lowercase.
+        auth.user = vec![repo("github.com/mireblood", "tok")];
+        assert!(
+            auth.lookup("git@github.com:MireBlood/HOMEBAR.git")
+                .is_some()
+        );
+        // The boundary rule survives the fold.
+        assert!(
+            auth.lookup("https://github.com/MireBloodOther/app")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_credential_pulls_the_url_onto_its_own_transport() {
+        let key = Method::SshKey {
+            key: PathBuf::from("/home/u/.ssh/id_ed25519"),
+        };
+        let token = Method::Token {
+            token: "t".to_string(),
+        };
+        // An SSH key says nothing to an https endpoint: clone over ssh.
+        assert_eq!(
+            transport_url("https://github.com/mireblood/HOMEBAR", Some(&key)),
+            "git@github.com:mireblood/HOMEBAR.git"
+        );
+        // ...and a token says nothing to sshd: clone over https.
+        assert_eq!(
+            transport_url("git@github.com:org/repo.git", Some(&token)),
+            "https://github.com/org/repo.git"
+        );
+        // Matching transports and unauthenticated clones are left alone.
+        assert_eq!(
+            transport_url("https://github.com/org/repo", Some(&token)),
+            "https://github.com/org/repo"
+        );
+        assert_eq!(
+            transport_url("ssh://git@github.com/org/repo", Some(&key)),
+            "ssh://git@github.com/org/repo"
+        );
+        assert_eq!(
+            transport_url("https://github.com/org/repo", None),
+            "https://github.com/org/repo"
+        );
+        // Nothing to rebuild a URL from — hand it to git untouched.
+        assert_eq!(
+            transport_url("file:///srv/repo.git", Some(&key)),
+            "file:///srv/repo.git"
+        );
+        assert_eq!(transport_url("repo", Some(&key)), "repo");
     }
 
     #[test]

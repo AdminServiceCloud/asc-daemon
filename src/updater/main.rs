@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use asc_daemon::daemon::config::{Channel, Config};
+use asc_daemon::daemon::config::{Channel, Config, TlsMode};
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2};
 use asc_daemon::daemon::{logging, platform, service};
 
@@ -42,6 +42,10 @@ enum Command {
         /// Platform base URL (default https://adminservice.cloud)
         #[arg(long, value_name = "URL")]
         url: Option<String>,
+        /// Expose the daemon API to the network over TLS instead of keeping
+        /// it on loopback behind the platform's SSH tunnel
+        #[arg(long)]
+        direct: bool,
     },
     /// Update the daemon to the channel's latest release
     Update {
@@ -94,11 +98,19 @@ fn run() -> Result<()> {
     }
 
     match cli.command {
-        Command::Install { silent, token, url } => {
+        Command::Install {
+            silent,
+            token,
+            url,
+            direct,
+        } => {
             if !silent && !confirm_settings(&mut config)? {
                 bail!(t(Msg::UpdAborted));
             }
             i18n::set_lang(config.language);
+            if direct {
+                enable_direct_api(&mut config)?;
+            }
             installer::install(&config)?;
             // Registration is deliberately last and never fatal: the daemon is
             // installed and useful locally even when the platform is
@@ -119,6 +131,24 @@ fn run() -> Result<()> {
         Command::Rollback => installer::rollback(&config),
         Command::Status => status_cmd(&config),
     }
+}
+
+/// Switches the API from loopback to the network, with TLS. Without TLS the
+/// bearer token — which grants full control of the machine — would cross the
+/// network in the clear, so the two are turned on together and never apart.
+fn enable_direct_api(config: &mut Config) -> Result<()> {
+    let port = config
+        .api
+        .listen
+        .rsplit(':')
+        .next()
+        .unwrap_or("8420")
+        .to_string();
+    config.api.listen = format!("0.0.0.0:{port}");
+    config.api.tls = TlsMode::SelfSigned;
+    config.save().context("cannot save config.toml")?;
+    println!("{}", t(Msg::PlatformDirectEnabled));
+    Ok(())
 }
 
 /// Bind the freshly installed node to a platform, reporting but swallowing

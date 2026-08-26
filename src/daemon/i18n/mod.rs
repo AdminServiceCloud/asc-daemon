@@ -180,6 +180,7 @@ pub enum Msg {
     PlatformNotConnected,
     PlatformStatus,
     PlatformInsecureUrl,
+    PlatformDirectEnabled,
     UpdPromptLanguage,
     UpdPromptAuto,
     UpdPromptChannel,
@@ -588,6 +589,10 @@ pub fn t(msg: Msg) -> &'static str {
             "Нода не подключена к платформе. Подключить: asc connect <токен>",
         ),
         Msg::PlatformStatus => ("Platform: {} (node {})", "Платформа: {} (нода {})"),
+        Msg::PlatformDirectEnabled => (
+            "API exposed to the network over TLS; the platform will reach it directly",
+            "API открыт в сеть по TLS; платформа будет обращаться к нему напрямую",
+        ),
         Msg::PlatformInsecureUrl => (
             "warning: the platform URL uses plain HTTP; the registration token is sent unencrypted",
             "внимание: URL платформы использует обычный HTTP, токен регистрации уйдёт незашифрованным",

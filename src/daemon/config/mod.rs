@@ -154,6 +154,33 @@ pub struct ApiConfig {
     /// a value found here is moved out on the next daemon start.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// TLS for the API listener (DMN-061). Off is correct while the port is
+    /// on loopback; a node reached directly must encrypt, because the bearer
+    /// token grants full control of the machine.
+    pub tls: TlsMode,
+    /// Certificate and key for `tls = "files"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_key: Option<PathBuf>,
+    /// Extra names baked into the self-signed certificate — typically the
+    /// node's public IP, so the platform can dial it by address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tls_sans: Vec<String>,
+}
+
+/// How the API listener terminates TLS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// Plain HTTP. Only safe while the listener stays on loopback.
+    #[default]
+    Off,
+    /// A certificate the daemon issues itself; the platform pins its
+    /// fingerprint at registration, like an SSH host key.
+    SelfSigned,
+    /// Operator-supplied certificate and key, e.g. from Let's Encrypt.
+    Files,
 }
 
 /// Default path of the daemon's local API socket (see `ApiConfig::socket`).
@@ -165,6 +192,10 @@ impl Default for ApiConfig {
             listen: "127.0.0.1:8420".into(),
             socket: PathBuf::from(DEFAULT_API_SOCKET),
             token: None,
+            tls: TlsMode::Off,
+            tls_cert: None,
+            tls_key: None,
+            tls_sans: Vec::new(),
         }
     }
 }

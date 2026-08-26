@@ -80,6 +80,18 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
     config.platform.url = Some(platform_url.clone());
     config.save().context("cannot save config.toml")?;
 
+    // The platform needs to know how to reach this node back: over its own
+    // SSH connection, or straight to the API when it is exposed with TLS.
+    let (api_endpoint, tls_fingerprint) = direct_endpoint(config);
+    // Handed over only in direct mode: with SSH the platform reads the token
+    // off the machine itself, and there is no reason to send it twice.
+    let api_token = if api_endpoint.is_empty() {
+        String::new()
+    } else {
+        std::fs::read_to_string(crate::daemon::api::api_token_path())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
+    };
     let body = serde_json::json!({
         "token": token,
         "hostname": hostname(),
@@ -87,6 +99,9 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
         "os": os_description(),
         "arch": std::env::consts::ARCH,
         "daemonVersion": crate::VERSION,
+        "apiEndpoint": api_endpoint,
+        "tlsFingerprint": tls_fingerprint,
+        "apiToken": api_token,
     })
     .to_string();
 
@@ -107,6 +122,32 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
         organization_id: parsed.organization_id,
         platform_url,
     })
+}
+
+/// Where the platform can dial this daemon directly, if anywhere. An API bound
+/// to loopback is not reachable from outside, and one served without TLS must
+/// not be advertised: the bearer token would cross the network in the clear.
+fn direct_endpoint(config: &Config) -> (String, String) {
+    use crate::daemon::api::tls;
+    use crate::daemon::config::TlsMode;
+
+    if config.api.tls == TlsMode::Off {
+        return (String::new(), String::new());
+    }
+    let listen = config.api.listen.clone();
+    if listen.starts_with("127.") || listen.starts_with("localhost") {
+        return (String::new(), String::new());
+    }
+    let port = listen.rsplit(':').next().unwrap_or("8420").to_string();
+    let host = primary_ip().unwrap_or_default();
+    if host.is_empty() {
+        return (String::new(), String::new());
+    }
+    let fingerprint = tls::current_fingerprint().unwrap_or_default();
+    if fingerprint.is_empty() {
+        return (String::new(), String::new());
+    }
+    (format!("{host}:{port}"), fingerprint)
 }
 
 /// Result of a successful registration.

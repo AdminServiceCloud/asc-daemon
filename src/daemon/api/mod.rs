@@ -10,6 +10,7 @@ mod grpc;
 mod local;
 pub mod proto;
 mod rest;
+pub mod tls;
 pub mod uds;
 mod ws;
 
@@ -22,7 +23,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::daemon::apps::meta::AppMeta;
 use crate::daemon::apps::{AppManager, AppStatus, Outcome, UserContext};
@@ -556,14 +557,72 @@ pub async fn serve(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let listen = state.config.api.listen.clone();
+    let materials = tls::prepare(&state.config)?;
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .with_context(|| format!("cannot bind API listener on {listen}"))?;
-    info!(addr = %listen, "API listening (gRPC + REST)");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("API server failed")
+
+    let Some(materials) = materials else {
+        if !listen.starts_with("127.") && !listen.starts_with("localhost") {
+            warn!(
+                addr = %listen,
+                "the API listens beyond loopback without TLS; the bearer token                  travels unencrypted. Set [api] tls = \"self_signed\""
+            );
+        }
+        info!(addr = %listen, "API listening (gRPC + REST)");
+        return axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown)
+            .await
+            .context("API server failed");
+    };
+
+    info!(
+        addr = %listen,
+        fingerprint = %materials.fingerprint,
+        "API listening over TLS (gRPC + REST)"
+    );
+    serve_tls(listener, router(state), materials, shutdown).await
+}
+
+/// TLS accept loop. axum::serve has no TLS support, and the API has to keep
+/// speaking both protocols: h2 for gRPC, HTTP/1.1 for REST and the console
+/// WebSocket. hyper's auto builder picks per connection from the ALPN result.
+async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    materials: tls::Materials,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let acceptor = tokio_rustls::TlsAcceptor::from(materials.config);
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => accepted.context("cannot accept a connection")?,
+            () = &mut shutdown => return Ok(()),
+        };
+        let acceptor = acceptor.clone();
+        let service = hyper_util::service::TowerToHyperService::new(app.clone());
+        tokio::spawn(async move {
+            let stream = match acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                // A failed handshake is routine on a public port: scanners,
+                // health checks and clients that reject the certificate.
+                Err(err) => {
+                    debug!(%peer, error = %err, "TLS handshake failed");
+                    return;
+                }
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            if let Err(err) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection_with_upgrades(io, service)
+                    .await
+            {
+                debug!(%peer, error = %err, "connection ended");
+            }
+        });
+    }
 }
 
 /// Bearer-token check for both transports. gRPC callers get a proper

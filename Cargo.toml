@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -48,7 +48,14 @@ axum = { version = "0.8", features = ["ws"] }
 # CLI → daemon client over the local unix socket (DMN-042): a minimal
 # HTTP/1 JSON client — one connection per request, no TLS, no pooling.
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2", "service"] }
+# TLS for the daemon API when a node is reached directly instead of through
+# the platform's SSH tunnel (DMN-061). rustls with the ring provider: release
+# builds go through `cross`, whose images carry the C toolchains ring needs for
+# aarch64/armv7. rcgen issues the self-signed certificate on first start.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util", "io-std"] }
 # WebSocket client for `asc app attach` over the daemon socket (DMN-043):

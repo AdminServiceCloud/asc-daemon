@@ -7,6 +7,10 @@ syntax = "proto3";
 
 package asc.daemon.v1;
 
+// Go import path for the platform, which generates its client straight from
+// these files. Ignored by prost/tonic, and it carries no wire meaning.
+option go_package = "github.com/AdminServiceCloud/asc-platform/gen/go/asc/daemon/v1;daemonv1";
+
 // Daemon-level information.
 service DaemonService {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);

@@ -34,7 +34,9 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 
 | Option | Meaning |
 |---|---|
-| `--silent` | Accept the defaults and ask nothing — the mode the platform uses |
+| `--silent` | Accept the defaults and ask nothing — the mode the platform uses. Docker is installed too: a node that cannot run container apps is not a working node |
+| `--no-docker` | Never install Docker, not even with `--silent` |
+| `--direct` | Expose the API to the network over TLS so the platform reaches it without an SSH tunnel |
 | `--token <TOKEN>` | One-time registration token; binds the node to the organization that issued it |
 | `--url <URL>` | Platform base URL, `https://adminservice.cloud` by default |
 
@@ -97,6 +99,40 @@ crosses the network unencrypted.
 Registration never fails the installation. If the platform is unreachable, the
 installer prints a warning and exits successfully: the daemon is installed and
 usable locally, and `asc connect` retries whenever convenient.
+
+### Liveness
+
+The platform asks the daemon for status by calling
+`asc.daemon.v1.DaemonService/GetStatus`. A node whose daemon answers is shown
+as online; one that does not answer is offline. There are two ways the call can
+reach the daemon.
+
+**Through SSH (default).** The API stays on loopback and the platform forwards
+to it over the SSH connection it already holds. Nothing is exposed to the
+network; the platform reads `/etc/asc/api.token` during installation.
+
+**Directly (`--direct`).** The API moves to `0.0.0.0` and serves TLS. The two
+are switched on together and never apart: the bearer token grants full control
+of the machine, so the port must not be open without encryption. The
+certificate is self-signed — nodes have no domain of their own — and the
+platform pins its SHA-256 fingerprint at registration, exactly as it pins an
+SSH host key. The daemon hands its API token to the platform inside the
+registration call, because without SSH there is no other way to deliver it.
+
+A node installed with the plain command and no `--direct` cannot report its
+status at all: the platform has neither SSH access nor an endpoint to dial.
+
+```toml
+[api]
+listen = "0.0.0.0:8420"
+tls = "self_signed"   # off | self_signed | files
+# tls = "files" uses an operator-supplied certificate instead:
+# tls_cert = "/etc/asc/fullchain.pem"
+# tls_key  = "/etc/asc/privkey.pem"
+```
+
+The certificate and key live next to config.toml as `api.crt` (0644) and
+`api.key` (0600).
 
 ### What is not implemented yet
 

@@ -32,9 +32,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::sources::Scope;
+use crate::daemon::apps::UserContext;
 use crate::daemon::i18n::{Msg, tf, tf2};
 
 const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/auth.json";
@@ -130,6 +131,10 @@ pub struct GitAuth {
     system: Vec<Credential>,
     user: Vec<Credential>,
     scope: Scope,
+    /// Where the user list came from, when it is *not* this process's own
+    /// `~/.asc/auth.json` — the daemon reading a caller's store (DMN-062).
+    /// [`Self::save`] writes here instead of resolving `$HOME`.
+    user_file: Option<PathBuf>,
 }
 
 impl GitAuth {
@@ -160,6 +165,93 @@ impl GitAuth {
 
     pub fn load() -> Result<Self> {
         Self::load_with(Scope::current())
+    }
+
+    /// Credentials to use **on behalf of** `ctx` (DMN-062).
+    ///
+    /// The daemon runs as root, so `Scope::current()` would only ever see
+    /// `/etc/asc/auth.json` — a regular user's own `~/.asc/auth.json`, the
+    /// only store `asc auth add` can write without sudo, would be invisible
+    /// and every private-repository install through the daemon would fail no
+    /// matter what the user configured. When the process identity is not the
+    /// caller's, the caller's home comes from the user database instead of
+    /// `$HOME`, and their store is read as an additional (higher priority)
+    /// list on top of the system one.
+    ///
+    /// A store read this way is *vetted*: see [`Self::drop_foreign_keys`].
+    pub fn load_for(ctx: &UserContext) -> Result<Self> {
+        // SAFETY: geteuid() has no preconditions and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        // Same identity as the caller (the in-process CLI path): `$HOME` is
+        // already the right home and the kernel already vouches for what the
+        // process can open.
+        if euid == ctx.uid {
+            return Self::load_with(Scope::current());
+        }
+        let scope = if ctx.is_root {
+            Scope::System
+        } else {
+            Scope::User
+        };
+        // An explicit path override opts out of the legacy fallback, exactly
+        // as in `load_with`.
+        let legacy_system = std::env::var_os("ASC_GIT_AUTH")
+            .is_none()
+            .then(Self::legacy_system_path);
+        let home = crate::daemon::apps::home_for_uid(ctx.uid);
+        let (user_file, legacy_user) = match std::env::var_os("ASC_USER_GIT_AUTH") {
+            Some(path) => (Some(PathBuf::from(path)), None),
+            None => (
+                home.as_ref().map(|h| h.join(".asc/auth.json")),
+                home.as_ref().map(|h| h.join(".config/asc/git-auth.toml")),
+            ),
+        };
+        if user_file.is_none() {
+            debug!(
+                uid = ctx.uid,
+                "no home directory for the caller, using the system store only"
+            );
+        }
+        let mut auth = Self::load_paths(
+            &Self::system_path(),
+            legacy_system.as_deref(),
+            user_file.as_deref(),
+            legacy_user.as_deref(),
+            scope,
+        )?;
+        auth.drop_foreign_keys(ctx.uid);
+        auth.user_file = user_file;
+        Ok(auth)
+    }
+
+    /// Drop SSH-key credentials from the caller's store whose key file is not
+    /// theirs. The daemon opens that file as root, so an entry pointing at
+    /// `/root/.ssh/id_ed25519` would otherwise let any local user clone with
+    /// root's key by hand-editing their own `~/.asc/auth.json`. A key the
+    /// caller does not own is simply not a key they may ask us to use.
+    fn drop_foreign_keys(&mut self, uid: u32) {
+        use std::os::unix::fs::MetadataExt;
+        self.user.retain(|cred| {
+            let Method::SshKey { key } = &cred.method else {
+                return true;
+            };
+            match fs::metadata(key) {
+                Ok(meta) if meta.uid() == uid => true,
+                Ok(meta) => {
+                    warn!(
+                        key = %key.display(), owner = meta.uid(), caller = uid,
+                        "ignoring an ssh-key credential: the key belongs to another user"
+                    );
+                    false
+                }
+                // Unreadable/missing keys are dropped too: nothing can be
+                // authorized with them, and git would only fail later.
+                Err(e) => {
+                    debug!(key = %key.display(), error = %e, "ignoring an unreadable ssh-key credential");
+                    false
+                }
+            }
+        });
     }
 
     pub fn load_with(scope: Scope) -> Result<Self> {
@@ -220,6 +312,7 @@ impl GitAuth {
             system,
             user,
             scope,
+            user_file: None,
         })
     }
 
@@ -227,7 +320,10 @@ impl GitAuth {
     pub fn save(&self) -> Result<()> {
         let (path, credentials) = match self.scope {
             Scope::System => (Self::system_path(), &self.system),
-            Scope::User => (Self::user_path()?, &self.user),
+            Scope::User => match &self.user_file {
+                Some(path) => (path.clone(), &self.user),
+                None => (Self::user_path()?, &self.user),
+            },
         };
         if let Some(dir) = path.parent()
             && !dir.as_os_str().is_empty()
@@ -714,6 +810,7 @@ mod tests {
             system: vec![repo("github.com", "sys")],
             user: vec![repo("github.com/org", "usr")],
             scope: Scope::User,
+            user_file: None,
         };
         let hit = auth.lookup("https://github.com/org/repo.git").unwrap();
         assert_eq!(hit.pattern, "github.com/org");
@@ -729,6 +826,7 @@ mod tests {
             system: vec![repo("github.com", "sys")],
             user: vec![repo("github.com", "usr")],
             scope: Scope::User,
+            user_file: None,
         };
         let hit = auth.lookup("https://github.com/org/repo").unwrap();
         assert!(matches!(&hit.method, Method::Token { token } if token == "usr"));
@@ -743,6 +841,7 @@ mod tests {
             system: Vec::new(),
             user: vec![repo("github.com/MireBlood", "tok")],
             scope: Scope::User,
+            user_file: None,
         };
         let hit = auth
             .lookup("https://github.com/mireblood/HOMEBAR")
@@ -883,6 +982,67 @@ mod tests {
     }
 
     #[test]
+    fn foreign_and_unreadable_ssh_keys_are_dropped_from_a_caller_store() {
+        // SAFETY: geteuid() has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("id_ed25519");
+        fs::write(
+            &mine,
+            "-----BEGIN OPENSSH PRIVATE KEY-----
+",
+        )
+        .unwrap();
+        let key = |path: &Path| Credential {
+            method: Method::SshKey {
+                key: path.to_path_buf(),
+            },
+            ..repo("github.com", "unused")
+        };
+        let mut auth = GitAuth {
+            system: vec![key(&dir.path().join("gone"))],
+            user: vec![
+                repo("github.com/org", "token"),
+                key(&mine),
+                key(&dir.path().join("gone")),
+            ],
+            scope: Scope::User,
+            user_file: None,
+        };
+        auth.drop_foreign_keys(me);
+        // The caller's own key and the token stay; the key that does not
+        // exist (nor, on a real host, one owned by somebody else) goes.
+        assert_eq!(auth.user.len(), 2);
+        assert!(matches!(&auth.user[1].method, Method::SshKey { key } if key == &mine));
+        // The system store is root-owned and vetted by its permissions, not
+        // by this filter.
+        assert_eq!(auth.system.len(), 1);
+    }
+
+    #[test]
+    fn a_caller_store_is_saved_back_to_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("home/.asc/auth.json");
+        let mut auth = GitAuth {
+            system: Vec::new(),
+            user: Vec::new(),
+            scope: Scope::User,
+            user_file: Some(path.clone()),
+        };
+        auth.add(
+            Kind::Repo,
+            "github.com",
+            Method::Token { token: "t".into() },
+            None,
+            None,
+        )
+        .unwrap();
+        auth.save().unwrap();
+        // Not $HOME/.asc/auth.json: the store knows where it came from.
+        assert!(path.is_file());
+    }
+
+    #[test]
     fn image_reference_normalization() {
         assert_eq!(normalize_image("ghcr.io/org/app:1.0"), "ghcr.io/org/app");
         assert_eq!(normalize_image("nginx:1.28"), "docker.io/nginx");
@@ -905,6 +1065,7 @@ mod tests {
             system: Vec::new(),
             user: vec![repo("github.com/org", "general"), bound],
             scope: Scope::User,
+            user_file: None,
         };
         // The bound entry wins for its own app...
         let hit = auth

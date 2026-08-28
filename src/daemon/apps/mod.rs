@@ -76,6 +76,21 @@ impl UserContext {
 /// Login name for a uid from the user database, `None` when the uid has no
 /// passwd entry (deleted user, container without the host's /etc/passwd).
 fn username_for_uid(uid: u32) -> Option<String> {
+    passwd_for_uid(uid).map(|(name, _home)| name)
+}
+
+/// Home directory of a uid from the user database (DMN-062): the daemon runs
+/// as root but acts on behalf of the calling user, so it has to find that
+/// user's `~/.asc` tree without their `$HOME` in its own environment.
+/// `None` when the uid has no passwd entry or an empty `pw_dir`.
+pub fn home_for_uid(uid: u32) -> Option<std::path::PathBuf> {
+    passwd_for_uid(uid)
+        .map(|(_name, home)| home)
+        .filter(|home| !home.as_os_str().is_empty())
+}
+
+/// The `(pw_name, pw_dir)` pair of a uid, `None` when it has no passwd entry.
+fn passwd_for_uid(uid: u32) -> Option<(String, std::path::PathBuf)> {
     // _SC_GETPW_R_SIZE_MAX is a hint and may be -1; 4 KiB covers any sane
     // passwd line and getpwuid_r reports ERANGE if it somehow does not.
     let mut buf = vec![0i8; 4096];
@@ -95,9 +110,14 @@ fn username_for_uid(uid: u32) -> Option<String> {
     if rc != 0 || result.is_null() {
         return None;
     }
-    // SAFETY: on success pw_name points at a NUL-terminated string in buf.
-    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
-    Some(name.to_string_lossy().into_owned())
+    // SAFETY: on success pw_name/pw_dir point at NUL-terminated strings in buf.
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    let home = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    use std::os::unix::ffi::OsStrExt;
+    let home = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes()));
+    Some((name, home))
 }
 
 /// Outcome of start/stop, so the CLI can report idempotent calls honestly.

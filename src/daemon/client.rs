@@ -7,10 +7,11 @@
 //! Under `sudo` the CLI forwards `SUDO_UID`/`SUDO_USER` as attribution-hint
 //! headers, which the daemon honors only for a root peer.
 //!
-//! The typed install errors ([`pkg::LicenseRequired`], [`pkg::AmbiguousPackage`])
-//! are reconstructed from the structured REST payloads, so the CLI's
-//! interactive recoveries (license consent, source pick) work identically
-//! whether the install runs in-process or through the daemon.
+//! The typed install errors ([`pkg::LicenseRequired`], [`pkg::AmbiguousPackage`],
+//! [`pkg::auth::AuthRequired`]) are reconstructed from the structured REST
+//! payloads, so the CLI's interactive recoveries (license consent, source
+//! pick, auth setup for a private repository) work identically whether the
+//! install runs in-process or through the daemon.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -520,6 +521,11 @@ impl Daemon {
 /// the same error types as the in-process path. Everything else surfaces
 /// as a plain error carrying the daemon's message.
 fn typed_error(json: &Value) -> anyhow::Error {
+    if let Some(required) = json.get("auth_required") {
+        return anyhow::Error::new(pkg::auth::AuthRequired {
+            url: required["url"].as_str().unwrap_or_default().to_string(),
+        });
+    }
     if let Some(license) = json.get("license_required") {
         return anyhow::Error::new(pkg::LicenseRequired {
             package: license["package"].as_str().unwrap_or_default().to_string(),
@@ -617,6 +623,16 @@ mod tests {
         assert_eq!(choice.source.as_deref(), Some("official"));
         assert_eq!(choice.tags, vec!["v1.28.0", "v1.27.0"]);
         assert_eq!(choice.branches, vec!["main"]);
+
+        // DMN-062: a private repository reported by the daemon must arrive
+        // as the same typed error the in-process clone raises, so the CLI's
+        // interactive auth setup runs on both paths.
+        let err = typed_error(&serde_json::json!({
+            "error": "authorization required",
+            "auth_required": { "url": "https://github.com/org/private" },
+        }));
+        let required = err.downcast_ref::<pkg::auth::AuthRequired>().unwrap();
+        assert_eq!(required.url, "https://github.com/org/private");
 
         let err = typed_error(&serde_json::json!({ "error": "boom" }));
         assert_eq!(err.to_string(), "boom");

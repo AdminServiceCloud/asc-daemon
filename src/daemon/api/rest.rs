@@ -129,6 +129,26 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
+        // The repository is private and nothing the caller configured opens
+        // it (DMN-062). The URL travels structured so the CLI can offer the
+        // token / ssh-key setup right there and retry, instead of leaving the
+        // user to read an `asc auth add` hint out of a message.
+        if let Some(required) = self
+            .0
+            .downcast_ref::<crate::daemon::pkg::auth::AuthRequired>()
+        {
+            // 409, not 401: on the TCP listener a 401 is what a bad bearer
+            // token answers with, and the platform must not read "this
+            // repository is private" as "my API token expired".
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "auth_required": { "url": required.url },
+                })),
+            )
+                .into_response();
+        }
         let code = if msg.contains("not found") || msg.contains("не найдено") {
             StatusCode::NOT_FOUND
         } else {
@@ -621,4 +641,31 @@ async fn console_token(
     };
     let (token, expires_at) = state.issue_console_token(ctx, id, session).await?;
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    /// The producing side of the DMN-062 contract the client reconstructs in
+    /// `daemon::client::typed_error`: a private repository must reach the
+    /// caller as a structured `auth_required`, not as a message to parse.
+    #[tokio::test]
+    async fn private_repository_is_reported_structurally() {
+        let err = ApiError(anyhow::Error::new(crate::daemon::pkg::auth::AuthRequired {
+            url: "https://github.com/org/private".into(),
+        }));
+        let response = err.into_response();
+        // Not 401: on the TCP listener that status belongs to the bearer
+        // token, and this is about the repository, not about the API.
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["auth_required"]["url"],
+            "https://github.com/org/private"
+        );
+        assert!(json["error"].as_str().is_some_and(|m| !m.is_empty()));
+    }
 }

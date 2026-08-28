@@ -121,7 +121,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         VersionSpec::Exact(v) => Some(v.to_string()),
         VersionSpec::Latest | VersionSpec::Pick => match &meta.branch {
             Some(branch) => Some(branch.clone()),
-            None => match super::gitref::ls_remote(&git_url)?.latest_tag() {
+            None => match super::gitref::ls_remote(&git_url, ctx)?.latest_tag() {
                 Some(tag) => Some(tag.to_string()),
                 None if direct_git.is_some() => None,
                 None => {
@@ -162,7 +162,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         path: new_dir.clone(),
         armed: true,
     };
-    let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir)?;
+    let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir, ctx)?;
     // Both commits are read before the swap, while `repo_dir` still holds the
     // installed version: they are reported to the caller (DMN-056) and decide
     // whether a moving ref has moved at all.

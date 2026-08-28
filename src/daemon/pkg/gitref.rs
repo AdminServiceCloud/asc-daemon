@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use super::auth::{self, GitAuth};
+use crate::daemon::apps::UserContext;
 use crate::daemon::i18n::{Msg, t};
 
 /// Tags and branches a remote repository advertises.
@@ -35,12 +36,13 @@ impl RemoteRefs {
 }
 
 /// List a repository's tags and branches with `git ls-remote` — no clone, one
-/// cheap round-trip. Uses the configured credential for private repositories
-/// and, like the clone path, never hangs on an interactive prompt.
-pub fn ls_remote(git_url: &str) -> Result<RemoteRefs> {
+/// cheap round-trip. Uses the credential `ctx` configured for private
+/// repositories and, like the clone path, never hangs on an interactive
+/// prompt.
+pub fn ls_remote(git_url: &str, ctx: &UserContext) -> Result<RemoteRefs> {
     // Credentials are optional: a public repository lists fine without them,
     // and an unreadable auth file must not block the query.
-    let auth = GitAuth::load().ok();
+    let auth = GitAuth::load_for(ctx).ok();
     let credential = auth.as_ref().and_then(|a| a.lookup(git_url));
     // Same transport rule as the clone: the URL follows the credential, so
     // an SSH key is not silently ignored on an https URL.

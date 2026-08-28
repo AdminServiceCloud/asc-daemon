@@ -812,10 +812,10 @@ fn image_choice_flag(image: bool, build: bool) -> Option<ImageSource> {
 
 /// Install through the daemon, with the same interactive recoveries as the
 /// in-process path — the client reconstructs the typed errors from the
-/// structured REST payloads, so `pick_source`/`accept_license` work
-/// unchanged. Auth setup for private repositories is not offered here: the
-/// daemon clones with its own credentials, per-user git auth over the
-/// daemon is DMN-043.
+/// structured REST payloads, so `offer_auth_setup`/`pick_source`/
+/// `accept_license` work unchanged. Auth setup included (DMN-062): the
+/// daemon looks credentials up in the *calling* user's store, so what the
+/// prompt saves here is exactly what its retry then finds.
 #[allow(clippy::too_many_arguments)]
 fn install_daemon_loop(
     daemon: &client::Daemon,
@@ -849,6 +849,7 @@ fn install_daemon_loop(
             )
         }) {
             Ok(outcome) => return Ok(outcome),
+            Err(err) if offer_auth_setup(&err) => continue,
             Err(err) => {
                 if let Some(chosen) = pick_version(&err)? {
                     spec = chosen.spec;
@@ -1347,12 +1348,20 @@ fn pick_ssh_key(target: &str) -> anyhow::Result<std::path::PathBuf> {
 
 /// Private SSH keys of the calling user, `~/.ssh` scanned by
 /// [`auth::list_ssh_keys`]; empty when there is no home directory to look in.
+///
+/// Under `sudo` the keys worth offering are the *invoking* user's, not
+/// root's: distributions differ on whether sudo rewrites `$HOME`, so the
+/// home comes from the user database for the attributed uid and `$HOME` is
+/// only the fallback.
 fn ssh_keys() -> Vec<std::path::PathBuf> {
+    use asc_daemon::daemon::apps::{UserContext, home_for_uid};
     use asc_daemon::daemon::pkg::auth;
-    let Some(home) = std::env::var_os("HOME") else {
+    let ctx = UserContext::current();
+    let home = home_for_uid(ctx.uid).or_else(|| std::env::var_os("HOME").map(Into::into));
+    let Some(home) = home else {
         return Vec::new();
     };
-    auth::list_ssh_keys(&std::path::PathBuf::from(home).join(".ssh"))
+    auth::list_ssh_keys(&home.join(".ssh"))
 }
 
 fn read_line(prompt: &str) -> anyhow::Result<String> {
@@ -1570,17 +1579,23 @@ fn offer_auth_setup(err: &anyhow::Error) -> bool {
 }
 
 /// `asc upgrade <spec>` / `asc app upgrade <spec>` (DMN-003): through the
-/// daemon when its socket is there (DMN-053) — it owns the app tree and the
-/// git credentials, so an app installed into the system tree is upgradable
-/// without sudo. Auth setup is not offered on that path, like the daemon
-/// install path: the daemon clones with its own credentials.
+/// daemon when its socket is there (DMN-053) — it owns the app tree, so an
+/// app installed into the system tree is upgradable without sudo. Auth setup for a private repository is offered on that path
+/// too (DMN-062): the daemon resolves credentials against the calling user's
+/// store, so the prompt's answer applies to its retry.
 fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
     if let Some(daemon) = daemon_backend(config)? {
         let (reference, version) = match spec.split_once('@') {
             Some((reference, version)) => (reference, Some(version)),
             None => (spec, None),
         };
-        let outcome = with_spinner(|| daemon.upgrade(reference, version))?;
+        let outcome = loop {
+            match with_spinner(|| daemon.upgrade(reference, version)) {
+                Ok(outcome) => break outcome,
+                Err(err) if offer_auth_setup(&err) => continue,
+                Err(err) => return Err(err),
+            }
+        };
         print_upgrade_outcome(&outcome);
         return Ok(());
     }

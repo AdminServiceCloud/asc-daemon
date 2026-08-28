@@ -228,6 +228,7 @@ pub fn install(
         package_spec,
         source,
         &resolved.entry.source.git,
+        ctx,
     )?;
 
     let opts = InstallOpts {
@@ -331,7 +332,7 @@ fn install_stack(
         path: probe_dir.clone(),
         armed: true,
     };
-    clone_repository(&resolved.entry.source.git, opts.version, &probe_dir)?;
+    clone_repository(&resolved.entry.source.git, opts.version, &probe_dir, ctx)?;
     let stack_root = manifest_dir(&probe_dir, resolved.entry.source.path.as_deref())?;
     // One repository = one license: consent is asked once for the stack.
     require_license_ack(resolved, package, &stack_root, &probe_dir, opts.license_ack)?;
@@ -420,7 +421,7 @@ fn install_one(
     };
 
     let repo_dir = app_dir.join("repository");
-    let cloned_tag = clone_repository(&resolved.entry.source.git, opts.version, &repo_dir)?;
+    let cloned_tag = clone_repository(&resolved.entry.source.git, opts.version, &repo_dir, ctx)?;
 
     let (manifest_dir, _) =
         locate_manifest(&repo_dir, resolved.entry.source.path.as_deref(), stack_app)?;
@@ -591,7 +592,7 @@ pub fn install_from_git(
         Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(r),
         None => None,
     };
-    git_clone(url, checkout, &repo_dir)?;
+    git_clone(url, checkout, &repo_dir, ctx)?;
 
     // No monorepo `path` for a direct install: the manifest is the
     // repository root.
@@ -908,14 +909,15 @@ fn resolve_version(
     package: &str,
     source: Option<&str>,
     git_url: &str,
+    ctx: &UserContext,
 ) -> Result<Option<String>> {
     match spec {
         VersionSpec::Exact(version) => Ok(Some(version.to_string())),
-        VersionSpec::Latest => Ok(super::gitref::ls_remote(git_url)?
+        VersionSpec::Latest => Ok(super::gitref::ls_remote(git_url, ctx)?
             .latest_tag()
             .map(str::to_string)),
         VersionSpec::Pick => {
-            let refs = super::gitref::ls_remote(git_url)?;
+            let refs = super::gitref::ls_remote(git_url, ctx)?;
             if refs.is_empty() {
                 bail!(tf(Msg::PkgNoRefs, git_url));
             }
@@ -936,13 +938,14 @@ pub(super) fn clone_repository(
     git_url: &str,
     version: Option<&str>,
     dest: &Path,
+    ctx: &UserContext,
 ) -> Result<Option<String>> {
     match version {
         Some(tag) => {
             let candidates = [tag.to_string(), format!("v{tag}")];
             let mut last_err = String::new();
             for candidate in &candidates {
-                match git_clone(git_url, Some(candidate), dest) {
+                match git_clone(git_url, Some(candidate), dest, ctx) {
                     Ok(()) => return Ok(Some(candidate.clone())),
                     Err(err) => {
                         // A failed clone may leave a partial directory behind.
@@ -959,7 +962,7 @@ pub(super) fn clone_repository(
             bail!("cannot clone {git_url} at tag '{tag}' (also tried 'v{tag}'): {last_err}")
         }
         None => {
-            git_clone(git_url, None, dest)?;
+            git_clone(git_url, None, dest, ctx)?;
             Ok(None)
         }
     }
@@ -970,10 +973,12 @@ pub(super) fn clone_repository(
 /// output once stderr isn't a tty (which it never is here, piped for
 /// capture), so `--progress` forces it back on and [`read_progress_lines`]
 /// parses the `\r`-delimited status line as it streams in.
-fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path) -> Result<()> {
-    // Credentials for private repositories (DMN-003). An unreadable auth
-    // file must not block installs from public repositories.
-    let auth = match super::auth::GitAuth::load() {
+fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path, ctx: &UserContext) -> Result<()> {
+    // Credentials for private repositories (DMN-003), looked up in the
+    // stores the *calling* user can reach (DMN-062) — the daemon runs as
+    // root, so its own store is not where `asc auth add` put them. An
+    // unreadable auth file must not block installs from public repositories.
+    let auth = match super::auth::GitAuth::load_for(ctx) {
         Ok(auth) => Some(auth),
         Err(err) => {
             warn!(error = %format!("{err:#}"), "cannot read git credentials, cloning without auth");

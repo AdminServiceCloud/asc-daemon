@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.14.0-blue)](../../version.txt)
+[![Version](https://img.shields.io/badge/version-0.16.0-blue)](../../version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -140,6 +140,7 @@ cp -r skills/* .claude/skills/
 |---|---|
 | [🦀 Обзор демона](README.md) | Архитектура, API, установка |
 | [📡 api](api.md) | gRPC (ConnectRPC) + REST на одном порту, токены |
+| [🔐 security-tokens](security-tokens.md) | Основной и временные токены, ротация, отзыв |
 | [📱 app-management](app-management.md) | Docker и нативные приложения, CLI |
 | [📦 package-manager](package-manager.md) | asc.yaml, реестры, `asc install` |
 | [🤖 mcp-server](mcp-server.md) | MCP-сервер для AI |

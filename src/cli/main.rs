@@ -1,6 +1,8 @@
 //! `asc` — CLI and daemon entry point (`asc serve` runs the daemon itself,
 //! everything else is management commands).
 
+use std::path::PathBuf;
+
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod complete;
@@ -10,7 +12,7 @@ use asc_daemon::daemon::apps::{
     AppManager, AppStats, AppStatus, ImageSource, Outcome, RuntimeState, UserContext,
 };
 use asc_daemon::daemon::client::{self, RemoteApp};
-use asc_daemon::daemon::config::Config;
+use asc_daemon::daemon::config::{Config, TlsMode};
 use asc_daemon::daemon::docker;
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2, tf3};
 use asc_daemon::daemon::mcp;
@@ -45,6 +47,11 @@ enum Command {
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+    /// Inspect the daemon API and manage its bearer tokens
+    Api {
+        #[command(subcommand)]
+        action: ApiAction,
     },
     /// Show daemon version, service state and apps summary
     Status,
@@ -457,6 +464,80 @@ enum ServiceAction {
     Status,
 }
 
+/// `asc api …` — the daemon's own API surface (DMN-065, DMN-066, DMN-067).
+#[derive(Subcommand)]
+enum ApiAction {
+    /// Show the listener, TLS state and API token state
+    Status,
+    /// Manage the API bearer tokens
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+    /// Choose how the API listener terminates TLS
+    Tls {
+        #[arg(value_enum)]
+        mode: TlsModeArg,
+        /// The DNS name the platform and operators reach this node by
+        #[arg(long, value_name = "HOST")]
+        domain: Option<String>,
+        /// Certificate for `files` mode
+        #[arg(long, value_name = "PATH")]
+        cert: Option<PathBuf>,
+        /// Private key for `files` mode
+        #[arg(long, value_name = "PATH")]
+        key: Option<PathBuf>,
+    },
+    /// Set the address the API listens on (e.g. 0.0.0.0:8420)
+    Listen { address: String },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TlsModeArg {
+    /// Plain HTTP — only safe while the listener stays on loopback
+    Off,
+    /// A certificate the daemon issues itself, pinned by the platform
+    SelfSigned,
+    /// A certificate the daemon obtains itself (not available yet)
+    Acme,
+    /// A certificate and key you install on the node
+    Files,
+}
+
+impl From<TlsModeArg> for TlsMode {
+    fn from(value: TlsModeArg) -> Self {
+        match value {
+            TlsModeArg::Off => TlsMode::Off,
+            TlsModeArg::SelfSigned => TlsMode::SelfSigned,
+            TlsModeArg::Acme => TlsMode::Acme,
+            TlsModeArg::Files => TlsMode::Files,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Print the primary token — the value the platform stores (root only)
+    Show,
+    /// Mint a short-lived access token that cannot manage tokens itself
+    Issue {
+        /// Lifetime in seconds; the daemon clamps it (default 600, max 3600)
+        #[arg(long, value_name = "SECONDS")]
+        ttl: Option<u64>,
+        /// Note about who asked for it, kept in the daemon's memory
+        #[arg(long, value_name = "TEXT")]
+        label: Option<String>,
+    },
+    /// Kill every live access token at once
+    Revoke,
+    /// Replace the primary token; every access token is revoked with it
+    Rotate {
+        /// How long the previous token keeps working, 0 to switch at once
+        #[arg(long, value_name = "SECONDS")]
+        grace: Option<u64>,
+    },
+}
+
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Show or set the CLI output language (en|ru)
@@ -612,6 +693,7 @@ fn run() -> anyhow::Result<()> {
             .build()?
             .block_on(mcp::serve(config)),
         Command::Service { action } => service_cmd(action),
+        Command::Api { action } => api_cmd(action, config.clone()),
         Command::Status => status_cmd(&config),
         Command::Connect { token, url } => connect_cmd(config.clone(), &token, url.as_deref()),
         Command::Stats { sort, live } => stats_cmd(sort, live, &config),
@@ -3426,6 +3508,153 @@ fn connect_cmd(mut config: Config, token: &str, url: Option<&str>) -> anyhow::Re
             &registration.node_id
         )
     );
+    Ok(())
+}
+
+/// `asc api …` — the daemon's API surface and its bearer tokens (DMN-065,
+/// DMN-066). Everything here goes through the unix socket, where the peer
+/// uid is the authorization: the daemon itself decides whether this caller
+/// may manage tokens, so the CLI does not second-guess it with its own root
+/// check. What the CLI does insist on is a running daemon — the token store
+/// lives in its memory, and an in-process fallback would answer about a
+/// state nobody is serving.
+fn api_cmd(action: ApiAction, config: Config) -> anyhow::Result<()> {
+    // Writing config.toml touches a root-owned file and needs no daemon;
+    // everything else reads live state out of the running one.
+    match action {
+        ApiAction::Tls {
+            mode,
+            domain,
+            cert,
+            key,
+        } => return api_tls_cmd(config, mode.into(), domain, cert, key),
+        ApiAction::Listen { address } => return api_listen_cmd(config, address),
+        _ => {}
+    }
+
+    let daemon = client::Daemon::connect(&config)?
+        .ok_or_else(|| anyhow::anyhow!(t(Msg::TokenNeedsDaemon)))?;
+    match action {
+        ApiAction::Status => api_status_cmd(&daemon, &config),
+        ApiAction::Token { action } => match action {
+            TokenAction::Show => {
+                println!("{}", daemon.primary_token()?);
+                Ok(())
+            }
+            TokenAction::Issue { ttl, label } => {
+                let (token, expires_at) =
+                    daemon.issue_access_token(ttl, label.as_deref().unwrap_or("asc cli"))?;
+                println!("{}", t(Msg::TokenIssued));
+                println!("{token}");
+                println!("{}", tf(Msg::TokenIssuedExpiry, expires_at));
+                Ok(())
+            }
+            TokenAction::Revoke => {
+                println!("{}", tf(Msg::TokenRevoked, daemon.revoke_access_tokens()?));
+                Ok(())
+            }
+            TokenAction::Rotate { grace } => {
+                let (token, grace_until) = daemon.rotate_primary_token(grace)?;
+                println!("{}", t(Msg::TokenRotated));
+                println!("{token}");
+                if let Some(until) = grace_until.filter(|value| *value > 0) {
+                    println!("{}", tf(Msg::TokenRotatedGrace, until));
+                }
+                // Rotating from the machine leaves the platform holding a
+                // token that is about to stop working. Saying so here is the
+                // only warning the operator gets on this path.
+                if config.platform.node_id.is_some() {
+                    eprintln!("{}", t(Msg::TokenRotatedWarning));
+                }
+                Ok(())
+            }
+        },
+        // Handled above, before the daemon connection.
+        ApiAction::Tls { .. } | ApiAction::Listen { .. } => unreachable!(),
+    }
+}
+
+/// Choose how the listener terminates TLS, validating before writing: a
+/// config that cannot work should be refused where it is entered, not at the
+/// next daemon start.
+fn api_tls_cmd(
+    mut config: Config,
+    mode: TlsMode,
+    domain: Option<String>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    service::require_root()?;
+    config.api.tls = mode;
+    if let Some(domain) = domain {
+        config.api.domain = (!domain.is_empty()).then_some(domain);
+    }
+    if cert.is_some() {
+        config.api.tls_cert = cert;
+    }
+    if key.is_some() {
+        config.api.tls_key = key;
+    }
+    config.api.validate()?;
+
+    // A self-signed certificate is issued for a fixed set of names, so a new
+    // domain means the old certificate no longer covers it.
+    if mode == TlsMode::SelfSigned {
+        let _ = std::fs::remove_file(asc_daemon::daemon::api::tls::cert_path());
+        let _ = std::fs::remove_file(asc_daemon::daemon::api::tls::key_path());
+    }
+    config.save()?;
+    println!("{}", tf(Msg::ApiTlsSet, mode));
+    println!("{}", t(Msg::ApiRestartHint));
+    Ok(())
+}
+
+/// Set the listen address. Leaving loopback exposes the bearer token to the
+/// network, so it is worth saying so out loud.
+fn api_listen_cmd(mut config: Config, address: String) -> anyhow::Result<()> {
+    service::require_root()?;
+    config.api.listen = address;
+    config.api.validate()?;
+    if !config.api.is_loopback() && config.api.tls == TlsMode::Off {
+        eprintln!("{}", t(Msg::ApiListenInsecure));
+    }
+    let listen = config.api.listen.clone();
+    config.save()?;
+    println!("{}", tf(Msg::ApiListenSet, listen));
+    println!("{}", t(Msg::ApiRestartHint));
+    Ok(())
+}
+
+fn api_status_cmd(daemon: &client::Daemon, config: &Config) -> anyhow::Result<()> {
+    let status = daemon.token_status()?;
+    println!("listen: {}", config.api.listen);
+    println!("socket: {}", config.api.socket.display());
+    println!("tls: {}", config.api.tls);
+    if let Some(fingerprint) = asc_daemon::daemon::api::tls::current_fingerprint() {
+        println!("fingerprint: {fingerprint}");
+    }
+    println!(
+        "{}",
+        tf(
+            Msg::TokenPrimaryLabel,
+            status["primary_digest"].as_str().unwrap_or("-")
+        )
+    );
+    println!(
+        "{}",
+        tf2(
+            Msg::TokenAccessLive,
+            status["access_tokens_live"].as_u64().unwrap_or(0),
+            status["ttl_default_secs"].as_u64().unwrap_or(0),
+        )
+    );
+    match status["rotation"]["grace_until"]
+        .as_i64()
+        .filter(|v| *v > 0)
+    {
+        Some(until) => println!("{}", tf(Msg::TokenRotationPending, until)),
+        None => println!("{}", t(Msg::TokenRotationNone)),
+    }
     Ok(())
 }
 

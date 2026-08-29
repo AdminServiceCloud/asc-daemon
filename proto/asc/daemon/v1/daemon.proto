@@ -308,3 +308,92 @@ message GetMetricsHistoryRequest {
 message GetMetricsHistoryResponse {
   repeated SystemMetrics samples = 1;
 }
+
+// API tokens (DMN-065, DMN-066). Two kinds of bearer token guard this API:
+// the long-lived **primary** in api.token — the credential the platform
+// stores at enrollment, and from here on a refresh token — and short-lived
+// **access** tokens minted from it, kept only in the daemon's memory.
+//
+// An access token carries the same authority as the primary for every other
+// service; what it may not do is manage tokens. Every method below except
+// GetTokenStatus therefore requires the primary and answers PERMISSION_DENIED
+// otherwise. REST mirror: /v1/token, /v1/token/access, /v1/token/rotate.
+service TokenService {
+  // Mint a short-lived access token.
+  rpc IssueAccessToken(IssueAccessTokenRequest) returns (IssueAccessTokenResponse);
+  // Kill every live access token at once — the "a token leaked" button.
+  // Also runs as the first step of RotatePrimaryToken.
+  rpc RevokeAccessTokens(RevokeAccessTokensRequest) returns (RevokeAccessTokensResponse);
+  // Replace the primary and return the new one in plaintext: a platform that
+  // reaches the node directly has no other way to learn it.
+  rpc RotatePrimaryToken(RotatePrimaryTokenRequest) returns (RotatePrimaryTokenResponse);
+  // Confirm that the new primary is stored, ending the grace window early.
+  // Must be called with the NEW token; the one it replaced is refused.
+  rpc CommitPrimaryTokenRotation(CommitPrimaryTokenRotationRequest) returns (CommitPrimaryTokenRotationResponse);
+  // Token state without any token material.
+  rpc GetTokenStatus(GetTokenStatusRequest) returns (GetTokenStatusResponse);
+}
+
+enum DaemonTokenKind {
+  DAEMON_TOKEN_KIND_UNSPECIFIED = 0;
+  DAEMON_TOKEN_KIND_PRIMARY = 1;
+  DAEMON_TOKEN_KIND_ACCESS = 2;
+  // The unix socket: identity came from the kernel, not from a token.
+  DAEMON_TOKEN_KIND_LOCAL = 3;
+}
+
+message IssueAccessTokenRequest {
+  // Requested lifetime; clamped by the daemon. 0 = the default (600s).
+  uint32 ttl_secs = 1;
+  // Free-form note about who asked for it, for the daemon's own reporting.
+  string label = 2;
+}
+
+message IssueAccessTokenResponse {
+  // Plaintext token, returned exactly once and never readable again.
+  string token = 1;
+  // Unix seconds when it expires.
+  int64 expires_at = 2;
+  uint32 ttl_secs = 3;
+}
+
+message RevokeAccessTokensRequest {}
+
+message RevokeAccessTokensResponse {
+  uint32 revoked = 1;
+}
+
+message RotatePrimaryTokenRequest {
+  // How long the previous primary keeps working, giving the caller time to
+  // persist the new one. Unset = 300s, 0 = switch over immediately.
+  optional uint32 grace_secs = 1;
+}
+
+message RotatePrimaryTokenResponse {
+  string token = 1;
+  int64 rotated_at = 2;
+  // Unix seconds until which the previous token still authenticates; 0 when
+  // the caller asked for no grace window.
+  int64 grace_until = 3;
+  uint32 revoked_access_tokens = 4;
+}
+
+message CommitPrimaryTokenRotationRequest {}
+
+message CommitPrimaryTokenRotationResponse {}
+
+message GetTokenStatusRequest {}
+
+message GetTokenStatusResponse {
+  // How the calling request authenticated.
+  DaemonTokenKind kind = 1;
+  // Unix seconds; set only when the caller presented an access token.
+  int64 expires_at = 2;
+  uint32 access_tokens_live = 3;
+  // First 16 hex characters of the primary's SHA-256 — enough to answer "is
+  // the token I hold still the current one" without transmitting it.
+  string primary_digest = 4;
+  bool rotation_pending = 5;
+  int64 grace_until = 6;
+  uint32 ttl_default_secs = 7;
+}

@@ -13,6 +13,7 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | Модуль | Док |
 |---|---|
 | 📡 API: gRPC (ConnectRPC) + REST, токены | [api](api.md) |
+| 🔐 Токены безопасности: основной и временный | [security-tokens](security-tokens.md) |
 | 📱 Управление приложениями (Docker + нативные) и CLI | [app-management](app-management.md) |
 | 📦 Пакетный менеджер (`asc.yaml`, реестры, `asc install`) | [package-manager](package-manager.md) |
 | 🚀 Установка ASC на сервер | [getting-started](getting-started.md) |

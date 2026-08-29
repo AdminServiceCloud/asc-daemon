@@ -396,6 +396,59 @@ impl Daemon {
             .context("the daemon issued no console token")
     }
 
+    // ── API tokens (DMN-065, DMN-066) ──
+    //
+    // Reached over the unix socket, where the peer uid is the authorization:
+    // these calls carry no bearer token and the daemon requires the peer to
+    // be root for everything but the status read.
+
+    /// Token state without any token material: kind, live access tokens,
+    /// rotation window, and the primary's truncated digest.
+    pub fn token_status(&self) -> Result<Value> {
+        self.request(Method::GET, "/v1/token", None)
+    }
+
+    /// The primary token itself. Root only, socket only — this is the value
+    /// the platform stores, and the recovery path when a rotation is lost.
+    pub fn primary_token(&self) -> Result<String> {
+        // The API never returns the primary over HTTP: reading the file is
+        // the point, and the socket call above only proves the daemon agrees
+        // this caller may see it.
+        self.token_status()?;
+        let path = crate::daemon::api::api_token_path();
+        std::fs::read_to_string(&path)
+            .map(|raw| raw.trim().to_string())
+            .with_context(|| format!("cannot read token file {}", path.display()))
+    }
+
+    /// Mint a short-lived access token. `(token, expires_at)`.
+    pub fn issue_access_token(&self, ttl_secs: Option<u64>, label: &str) -> Result<(String, i64)> {
+        let body = serde_json::json!({ "ttl_secs": ttl_secs, "label": label });
+        let json = self.request(Method::POST, "/v1/token/access", Some(body))?;
+        let token = json["token"]
+            .as_str()
+            .map(str::to_string)
+            .context("the daemon issued no access token")?;
+        Ok((token, json["expires_at"].as_i64().unwrap_or_default()))
+    }
+
+    /// Kill every live access token; returns how many were dropped.
+    pub fn revoke_access_tokens(&self) -> Result<u64> {
+        let json = self.request(Method::DELETE, "/v1/token/access", None)?;
+        Ok(json["revoked"].as_u64().unwrap_or_default())
+    }
+
+    /// Replace the primary token. Returns `(new token, grace_until)`.
+    pub fn rotate_primary_token(&self, grace_secs: Option<u64>) -> Result<(String, Option<i64>)> {
+        let body = serde_json::json!({ "grace_secs": grace_secs });
+        let json = self.request(Method::POST, "/v1/token/rotate", Some(body))?;
+        let token = json["token"]
+            .as_str()
+            .map(str::to_string)
+            .context("the daemon returned no new token")?;
+        Ok((token, json["grace_until"].as_i64()))
+    }
+
     /// Attach to an app's console through the daemon (DMN-043): the daemon
     /// holds the Docker connection, so this works for a user who is not in
     /// the `docker` group and cannot read the system app tree. The terminal's

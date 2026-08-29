@@ -11,6 +11,7 @@ mod local;
 pub mod proto;
 mod rest;
 pub mod tls;
+pub mod tokens;
 pub mod uds;
 mod ws;
 
@@ -32,6 +33,7 @@ use crate::daemon::monitor::Monitor;
 use crate::daemon::pkg;
 
 use console::ConsoleTokens;
+use tokens::TokenStore;
 
 /// Shared state behind both transports.
 pub struct ApiState {
@@ -42,8 +44,9 @@ pub struct ApiState {
     pub attach_hub: crate::daemon::console::hub::AttachHub,
     /// System metrics ring buffer, filled by the daemon's sampler task.
     pub monitor: Arc<Monitor>,
-    /// Bearer token required on every request.
-    token: String,
+    /// The bearer tokens this daemon accepts: the long-lived primary and the
+    /// short-lived access tokens minted from it (DMN-065).
+    pub tokens: TokenStore,
 }
 
 /// Apps-wide disk report (`asc disk` with no app): what each app occupies,
@@ -92,7 +95,7 @@ impl ApiState {
             console_tokens: ConsoleTokens::default(),
             attach_hub: Default::default(),
             monitor,
-            token,
+            tokens: TokenStore::new(token),
         })
     }
 
@@ -517,20 +520,46 @@ pub fn ensure_api_token(config: &mut Config) -> Result<String> {
     }
 }
 
-/// Write the token file with root-only permissions.
-fn write_token(path: &std::path::Path, token: &str) -> Result<()> {
-    if let Some(dir) = path.parent()
-        && !dir.as_os_str().is_empty()
-    {
+/// Write the token file with root-only permissions, atomically.
+///
+/// A plain truncate-then-write here is a lockout waiting to happen: a crash
+/// or a full disk in the middle of it leaves an empty `api.token`, and the
+/// platform can never authenticate again. So the token goes to a temporary
+/// file beside the target — created 0600 *before* it holds anything — is
+/// fsynced, and only then renamed over the target. The directory is fsynced
+/// too, so the new name survives a power loss.
+pub fn write_token(path: &std::path::Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    if let Some(dir) = dir {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("cannot create directory {}", dir.display()))?;
     }
-    std::fs::write(path, token)
-        .with_context(|| format!("cannot write token file {}", path.display()))?;
+
+    let temp = path.with_extension("token.tmp");
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("cannot set permissions on {}", path.display()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)
+            .with_context(|| format!("cannot create token file {}", temp.display()))?;
+        file.write_all(token.as_bytes())
+            .with_context(|| format!("cannot write token file {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("cannot flush token file {}", temp.display()))?;
+    }
+    std::fs::rename(&temp, path)
+        .with_context(|| format!("cannot install token file {}", path.display()))?;
+    if let Some(dir) = dir {
+        // Best-effort: a filesystem that refuses to open a directory still
+        // has the renamed file, it is only the crash guarantee that is lost.
+        if let Ok(handle) = std::fs::File::open(dir) {
+            let _ = handle.sync_all();
+        }
     }
     Ok(())
 }
@@ -556,6 +585,10 @@ pub async fn serve(
     state: Arc<ApiState>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    // Refuse a [api] section that cannot work before the port is bound: a
+    // listener that comes up and then fails every handshake is worse than one
+    // that never came up with a clear reason.
+    state.config.api.validate()?;
     let listen = state.config.api.listen.clone();
     let materials = tls::prepare(&state.config)?;
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -629,14 +662,21 @@ async fn serve_tls(
 /// `grpc-status: UNAUTHENTICATED` trailer-only response, REST callers 401.
 /// Authenticated requests carry the full-visibility [`api_context`] — the
 /// per-user context is the unix-socket listener's job (see [`uds`]).
+///
+/// Both token kinds authenticate the same way and get the same context; what
+/// separates them is the [`tokens::require_primary`] guard on the handful of
+/// token-management routes (DMN-065). The classification travels alongside
+/// the context so those handlers can consult it.
 async fn auth(state: Arc<ApiState>, mut req: Request<Body>, next: Next) -> Response {
-    let presented = req
+    let resolved = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    if presented.is_some_and(|t| console::constant_time_eq(t, &state.token)) {
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|token| state.tokens.resolve(token));
+    if let Some(resolved) = resolved {
         req.extensions_mut().insert(api_context());
+        req.extensions_mut().insert(resolved);
         return next.run(req).await;
     }
     if is_grpc(req.headers()) {
@@ -710,5 +750,83 @@ mod tests {
         assert_eq!(mode & 0o777, 0o644);
 
         unsafe { std::env::remove_var("ASC_CONFIG") };
+    }
+
+    /// The token file is replaced, never truncated in place: an interrupted
+    /// write must not be able to leave an empty `api.token` behind and lock
+    /// the platform out for good (DMN-066).
+    #[test]
+    fn the_token_file_is_replaced_atomically() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api.token");
+        write_token(&path, "first").unwrap();
+        write_token(&path, "second-and-longer").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second-and-longer");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // Nothing readable is left behind for someone to scoop up.
+        assert!(!dir.path().join("api.token.tmp").exists());
+    }
+
+    /// The whole point of the split (DMN-065): an access token drives the
+    /// daemon like the primary, right up to the routes that manage tokens.
+    #[tokio::test]
+    async fn an_access_token_may_work_but_may_not_manage_tokens() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.daemon.apps_dir = dir.path().join("apps");
+        config.daemon.data_dir = dir.path().join("data");
+        let state = ApiState::new(config, "primary-token".into());
+        let (access, _) = state.tokens.issue_access(None, "test");
+
+        let call = async |token: &str, method: &str, uri: &str| {
+            router(Arc::clone(&state))
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        };
+
+        // An ordinary route: both kinds of token get through.
+        assert_eq!(call(&access, "GET", "/v1/apps").await, StatusCode::OK);
+        assert_eq!(
+            call("primary-token", "GET", "/v1/apps").await,
+            StatusCode::OK
+        );
+        // Token management: primary only. 403, not 401 — the credential is
+        // valid, the operation is not open to it.
+        assert_eq!(
+            call(&access, "POST", "/v1/token/rotate").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&access, "DELETE", "/v1/token/access").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&access, "POST", "/v1/token/access").await,
+            StatusCode::FORBIDDEN
+        );
+        // Status is open to everyone, and never carries the primary.
+        assert_eq!(call(&access, "GET", "/v1/token").await, StatusCode::OK);
+        // An unknown token still gets nowhere.
+        assert_eq!(
+            call("nonsense", "GET", "/v1/apps").await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

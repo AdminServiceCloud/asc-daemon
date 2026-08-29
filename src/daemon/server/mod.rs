@@ -36,6 +36,15 @@ pub async fn run(mut config: Config) -> anyhow::Result<()> {
 
     // API server (gRPC + REST) runs until a shutdown signal arrives.
     let token = api::ensure_api_token(&mut config)?;
+
+    // The address or certificate may have changed while the daemon was down —
+    // a new IP, a renewed certificate, an operator running `asc api tls`.
+    // Registration is one-shot, so this is what keeps the platform current.
+    // Best-effort: an unreachable platform must not stop the daemon.
+    if let Err(err) = crate::daemon::platform::report_endpoint(&mut config) {
+        tracing::warn!(error = %format!("{err:#}"), "could not report the endpoint to the platform");
+    }
+
     let state = api::ApiState::new(config, token);
 
     // Background metrics sampler (DMN-006) feeds the API's ring buffer;

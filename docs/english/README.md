@@ -13,6 +13,7 @@ Open source CLI utility and daemon written in Rust, installed on the user's serv
 | Module | Doc |
 |---|---|
 | 📡 API: gRPC (ConnectRPC) + REST, tokens | [api](api.md) |
+| 🔐 Security tokens: primary and access | [security-tokens](security-tokens.md) |
 | 📱 Application management (Docker + native) and CLI | [app-management](app-management.md) |
 | 📦 Package manager (`asc.yaml`, registries, `asc install`) | [package-manager](package-manager.md) |
 | 🚀 Install ASC on a server | [getting-started](getting-started.md) |

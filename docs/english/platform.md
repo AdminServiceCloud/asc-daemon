@@ -125,14 +125,44 @@ status at all: the platform has neither SSH access nor an endpoint to dial.
 ```toml
 [api]
 listen = "0.0.0.0:8420"
-tls = "self_signed"   # off | self_signed | files
+tls = "self_signed"   # off | self_signed | acme | files
+# A name the platform dials instead of the address, so the node survives an
+# IP change. In self_signed mode it is baked into the certificate as a SAN.
+# domain = "node.example.com"
 # tls = "files" uses an operator-supplied certificate instead:
 # tls_cert = "/etc/asc/fullchain.pem"
 # tls_key  = "/etc/asc/privkey.pem"
 ```
 
 The certificate and key live next to config.toml as `api.crt` (0644) and
-`api.key` (0600).
+`api.key` (0600). `asc api tls` and `asc api listen` write these settings and
+validate them before they land, so a configuration that cannot work is refused
+where it is entered rather than at the next start.
+
+### 🔐 How the certificate is trusted (DMN-067)
+
+| `tls` | What vouches for the certificate |
+|---|---|
+| `self_signed` | Nothing does, so the platform pins its SHA-256 fingerprint at registration — the same contract as an SSH host key. |
+| `acme` | A public CA would, once the daemon can obtain a certificate itself. **Not available yet:** the daemon refuses to start in this mode; use `files` with a certbot-managed certificate for the same result. |
+| `files` | Whoever issued the certificate you installed. The platform verifies the chain and the host name; when the daemon also reports a fingerprint — a certificate from a private CA — it pins that instead. |
+
+A fingerprint is reported **only** for `self_signed`. Pinning a chain-verified
+certificate would break the node the first time it renews.
+
+### 📡 Reporting a change afterwards (DMN-068)
+
+Registration is a one-shot token redemption, so it cannot carry the news that
+an address or certificate changed later. The daemon calls
+`BootstrapService.ReportNodeEndpoint` instead — at startup when the computed
+endpoint differs from the last one reported, and after `asc api tls`. The call
+authenticates with the node's primary API token, the one secret both sides
+already share, and it can change only how the node is reached: never its
+organization, and never a deleted node.
+
+What was last reported is cached in config.toml (`[platform] reported_endpoint`
+/ `reported_fingerprint`) so a daemon that restarts with nothing changed does
+not call the platform on every boot.
 
 ### What is not implemented yet
 

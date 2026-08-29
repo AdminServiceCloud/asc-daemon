@@ -31,6 +31,50 @@ pub fn key_path() -> PathBuf {
     Config::path().with_file_name("api.key")
 }
 
+/// Where ACME material lives: the account key, and the certificate and key
+/// issued for the configured domain (DMN-067). Kept apart from the
+/// self-signed pair so switching modes never overwrites the other's files.
+pub fn acme_dir() -> PathBuf {
+    Config::path().with_file_name("acme")
+}
+
+pub fn acme_cert_path(domain: &str) -> PathBuf {
+    acme_dir().join(format!("{domain}.crt"))
+}
+
+pub fn acme_key_path(domain: &str) -> PathBuf {
+    acme_dir().join(format!("{domain}.key"))
+}
+
+/// The certificate and key the configured mode serves from.
+pub fn material_paths(config: &Config) -> Result<(PathBuf, PathBuf)> {
+    match config.api.tls {
+        TlsMode::Off => bail!("TLS is disabled"),
+        TlsMode::SelfSigned => Ok((cert_path(), key_path())),
+        TlsMode::Acme => {
+            let domain = config
+                .api
+                .domain
+                .clone()
+                .context("api.tls = \"acme\" requires api.domain")?;
+            Ok((acme_cert_path(&domain), acme_key_path(&domain)))
+        }
+        TlsMode::Files => {
+            let certificate = config
+                .api
+                .tls_cert
+                .clone()
+                .context("api.tls = \"files\" requires api.tls_cert")?;
+            let key = config
+                .api
+                .tls_key
+                .clone()
+                .context("api.tls = \"files\" requires api.tls_key")?;
+            Ok((certificate, key))
+        }
+    }
+}
+
 /// A loaded certificate together with the fingerprint the platform pins.
 pub struct Materials {
     pub config: Arc<ServerConfig>,
@@ -51,7 +95,12 @@ pub fn fingerprint(certificate: &CertificateDer<'_>) -> String {
 /// Reads the current certificate's fingerprint without starting a server.
 /// Used when reporting the node to the platform.
 pub fn current_fingerprint() -> Option<String> {
-    let certificates = CertificateDer::pem_file_iter(cert_path())
+    fingerprint_of(&cert_path())
+}
+
+/// The same for an arbitrary certificate file.
+pub fn fingerprint_of(path: &Path) -> Option<String> {
+    let certificates = CertificateDer::pem_file_iter(path)
         .ok()?
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
@@ -61,26 +110,13 @@ pub fn current_fingerprint() -> Option<String> {
 /// Prepares TLS material according to the configured mode, generating a
 /// self-signed certificate on first use.
 pub fn prepare(config: &Config) -> Result<Option<Materials>> {
-    let (certificate_file, key_file) = match config.api.tls {
-        TlsMode::Off => return Ok(None),
-        TlsMode::SelfSigned => {
-            ensure_self_signed(config)?;
-            (cert_path(), key_path())
-        }
-        TlsMode::Files => {
-            let certificate = config
-                .api
-                .tls_cert
-                .clone()
-                .context("api.tls = \"files\" requires api.tls_cert")?;
-            let key = config
-                .api
-                .tls_key
-                .clone()
-                .context("api.tls = \"files\" requires api.tls_key")?;
-            (certificate, key)
-        }
-    };
+    if config.api.tls == TlsMode::Off {
+        return Ok(None);
+    }
+    if config.api.tls == TlsMode::SelfSigned {
+        ensure_self_signed(config)?;
+    }
+    let (certificate_file, key_file) = material_paths(config)?;
 
     let certificates: Vec<CertificateDer<'static>> =
         CertificateDer::pem_file_iter(&certificate_file)
@@ -118,7 +154,13 @@ fn ensure_self_signed(config: &Config) -> Result<()> {
     if let Some(host) = hostname() {
         names.push(host);
     }
+    // The domain is what the platform dials once one is configured, so the
+    // certificate has to carry it even in self-signed mode.
+    if let Some(domain) = &config.api.domain {
+        names.push(domain.clone());
+    }
     names.extend(config.api.tls_sans.iter().cloned());
+    names.sort();
     names.dedup();
 
     let certified = rcgen::generate_simple_self_signed(names.clone())

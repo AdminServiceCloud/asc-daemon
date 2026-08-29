@@ -25,6 +25,7 @@ use tracing::info;
 
 use crate::daemon::apps::UserContext;
 
+use super::tokens::Resolved;
 use super::{ApiState, rest, ws};
 
 /// The client's sudo attribution hint (see [`UserContext::from_peer`]):
@@ -67,6 +68,10 @@ async fn peer_auth(mut req: Request<Body>, next: Next) -> Response {
     let (sudo_uid, sudo_user) = sudo_hint(req.headers());
     let ctx = UserContext::from_peer(uid, sudo_uid, sudo_user.as_deref());
     req.extensions_mut().insert(ctx);
+    // No token was presented, but the caller is authenticated all the same.
+    // Token management on this transport is gated on the peer being root
+    // (see [`super::tokens::require_primary`]).
+    req.extensions_mut().insert(Resolved::local_peer());
     next.run(req).await
 }
 

@@ -24,11 +24,12 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 Каждый аутентифицированный запрос получает `UserContext` (uid, имя пользователя, признак root), который проставляет middleware транспорта; сервисный слой применяет из него правило владения приложениями — то же, что в in-process-режиме CLI (DMN-002).
 
-**TCP (платформа): bearer-токен.**
+**TCP (платформа): bearer-токен.** Их два вида (DMN-065) — полная модель в [🔐 security-tokens](security-tokens.md).
 
-- Генерируется демоном при первом старте (32 байта из CSPRNG), хранится в `api.token` рядом с config.toml (root-only, 0600).
-- Обязателен для обоих транспортов: REST — заголовок `Authorization: Bearer <token>`, gRPC — metadata `authorization`. Сравнение — constant-time.
-- Без токена: REST → `401 {"error": ...}`, gRPC → `UNAUTHENTICATED`.
+- **Основной** токен демон генерирует при первом старте (32 байта из CSPRNG) и хранит в `api.token` рядом с config.toml (root-only, 0600). Именно его платформа сохраняет при добавлении ноды, и по сути он refresh-токен: выпускает временные токены и заменяется при ротации.
+- **Временный** токен выпускается по основному, живёт 10 минут по умолчанию и только в памяти демона. Права по всем сервисам здесь у него те же; единственное, чего он не может, — управлять токенами (`/v1/token/*` отвечает `403` с полем `token_denied`, gRPC — `PERMISSION_DENIED`).
+- Обязателен для обоих транспортов: REST — заголовок `Authorization: Bearer <token>`, gRPC — metadata `authorization`. Основной сравнивается constant-time, временные ищутся по SHA-256-дайджесту.
+- Без распознанного токена: REST → `401 {"error": ...}`, gRPC → `UNAUTHENTICATED`.
 - Токен-вызовы действуют с **полной видимостью** (права пользователей платформа проверяет сама); пер-пользовательские API-токены — задача после MVP.
 
 **Unix-сокет (CLI): SO_PEERCRED.** (DMN-042)
@@ -67,6 +68,11 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Временный токен консоли |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
+| `GET /v1/token` | `TokenService.GetTokenStatus` | Состояние токенов: вид, число живых временных, окно ротации, усечённый дайджест основного — никогда сам токен |
+| `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Выпуск временного токена (только по основному) |
+| `DELETE /v1/token/access` | `TokenService.RevokeAccessTokens` | Гасит все живые временные токены, `{"revoked": n}` (только по основному) |
+| `POST /v1/token/rotate {"grace_secs"?}` | `TokenService.RotatePrimaryToken` | Замена основного токена с отзывом всех временных; возвращает новый токен (только по основному) |
+| `POST /v1/token/rotate/commit` | `TokenService.CommitPrimaryTokenRotation` | Подтверждение, что новый основной токен сохранён, и закрытие окна; отклоняется, если предъявлен заменённый токен |
 
 ### 📜 Кодогенерация
 
@@ -75,4 +81,4 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 ## 🔗 Связанные задачи
 
-DMN-005, DMN-007, DMN-042, DMN-043, DMN-053 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

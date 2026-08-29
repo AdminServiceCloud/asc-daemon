@@ -82,7 +82,8 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
 
     // The platform needs to know how to reach this node back: over its own
     // SSH connection, or straight to the API when it is exposed with TLS.
-    let (api_endpoint, tls_fingerprint) = direct_endpoint(config);
+    let advertised = direct_endpoint(config);
+    let api_endpoint = advertised.endpoint.clone();
     // Handed over only in direct mode: with SSH the platform reads the token
     // off the machine itself, and there is no reason to send it twice.
     let api_token = if api_endpoint.is_empty() {
@@ -100,7 +101,9 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
         "arch": std::env::consts::ARCH,
         "daemonVersion": crate::VERSION,
         "apiEndpoint": api_endpoint,
-        "tlsFingerprint": tls_fingerprint,
+        "tlsFingerprint": advertised.fingerprint,
+        "tlsMode": advertised.tls_mode,
+        "domain": advertised.domain,
         "apiToken": api_token,
     })
     .to_string();
@@ -124,30 +127,115 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
     })
 }
 
+/// What the platform needs in order to dial this daemon directly.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Advertised {
+    /// `host:port`, empty when direct access is not available.
+    pub endpoint: String,
+    /// Set only for a self-signed certificate: that is the one case where no
+    /// CA vouches for it and the platform has to pin it instead.
+    pub fingerprint: String,
+    /// How the certificate is trusted: self_signed | acme | files.
+    pub tls_mode: String,
+    pub domain: String,
+}
+
 /// Where the platform can dial this daemon directly, if anywhere. An API bound
 /// to loopback is not reachable from outside, and one served without TLS must
 /// not be advertised: the bearer token would cross the network in the clear.
-fn direct_endpoint(config: &Config) -> (String, String) {
+pub fn direct_endpoint(config: &Config) -> Advertised {
     use crate::daemon::api::tls;
     use crate::daemon::config::TlsMode;
 
     if config.api.tls == TlsMode::Off {
-        return (String::new(), String::new());
+        return Advertised::default();
     }
     let listen = config.api.listen.clone();
     if listen.starts_with("127.") || listen.starts_with("localhost") {
-        return (String::new(), String::new());
+        return Advertised::default();
     }
     let port = listen.rsplit(':').next().unwrap_or("8420").to_string();
-    let host = primary_ip().unwrap_or_default();
+    // A domain outlives an address, so it wins whenever one is configured.
+    let domain = config.api.domain.clone().unwrap_or_default();
+    let host = if domain.is_empty() {
+        primary_ip().unwrap_or_default()
+    } else {
+        domain.clone()
+    };
     if host.is_empty() {
-        return (String::new(), String::new());
+        return Advertised::default();
     }
-    let fingerprint = tls::current_fingerprint().unwrap_or_default();
-    if fingerprint.is_empty() {
-        return (String::new(), String::new());
+
+    // Pinning is for the self-signed case only: an ACME or operator-supplied
+    // certificate is verified against its chain, and pinning one would break
+    // the node the first time it renews.
+    let fingerprint = match config.api.tls {
+        TlsMode::SelfSigned => {
+            let print = tls::current_fingerprint().unwrap_or_default();
+            if print.is_empty() {
+                return Advertised::default();
+            }
+            print
+        }
+        _ => String::new(),
+    };
+    Advertised {
+        endpoint: format!("{host}:{port}"),
+        fingerprint,
+        tls_mode: config.api.tls.as_str().to_string(),
+        domain,
     }
-    (format!("{host}:{port}"), fingerprint)
+}
+
+/// Tell the platform the address or certificate changed after registration
+/// (DMN-068).
+///
+/// Registration is a one-shot token redemption, so nothing else can carry the
+/// news that a certificate was renewed or an address moved. The call
+/// authenticates with the node's primary API token, which the platform already
+/// holds — the only secret the two sides share without a user session.
+///
+/// Best-effort by design: a node that cannot reach the platform right now is
+/// still a working node, and the health poller reconciles the drift anyway.
+pub fn report_endpoint(config: &mut Config) -> Result<bool> {
+    let (Some(platform_url), Some(node_id)) =
+        (config.platform.url.clone(), config.platform.node_id.clone())
+    else {
+        return Ok(false);
+    };
+    let advertised = direct_endpoint(config);
+    // Nothing changed since the last report: the platform already knows.
+    if config.platform.reported_endpoint.as_deref() == Some(advertised.endpoint.as_str())
+        && config.platform.reported_fingerprint.as_deref() == Some(advertised.fingerprint.as_str())
+    {
+        return Ok(false);
+    }
+
+    let api_token = std::fs::read_to_string(crate::daemon::api::api_token_path())
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    if api_token.is_empty() {
+        bail!("no API token to authenticate the report with");
+    }
+
+    let body = serde_json::json!({
+        "nodeId": node_id,
+        "apiToken": api_token,
+        "apiEndpoint": advertised.endpoint,
+        "tlsFingerprint": advertised.fingerprint,
+        "tlsMode": advertised.tls_mode,
+        "domain": advertised.domain,
+        "daemonVersion": crate::VERSION,
+    })
+    .to_string();
+    let endpoint =
+        format!("{platform_url}/bootstrap/asc.node.v1.BootstrapService/ReportNodeEndpoint");
+    http::post_json(&endpoint, &body)?;
+
+    config.platform.reported_endpoint = Some(advertised.endpoint);
+    config.platform.reported_fingerprint = Some(advertised.fingerprint);
+    config.save().context("cannot save config.toml")?;
+    Ok(true)
 }
 
 /// Result of a successful registration.

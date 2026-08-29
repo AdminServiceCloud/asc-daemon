@@ -1,12 +1,14 @@
 //! gRPC transport: generated tonic services delegating to [`ApiState`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use tonic::{Request, Response, Status};
 
 use super::console::SessionType;
 use super::proto::v1 as pb;
+use super::tokens;
 use super::{ApiState, proto};
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::pkg::InstallOutcome;
@@ -14,12 +16,14 @@ use crate::daemon::pkg::InstallOutcome;
 use pb::app_service_server::{AppService, AppServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
+use pb::token_service_server::{TokenService, TokenServiceServer};
 
 /// gRPC routes as an axum router (mounted next to REST on one listener).
 pub fn routes(state: Arc<ApiState>) -> Router {
     tonic::service::Routes::new(DaemonServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(AppServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(MonitorServiceServer::new(Grpc(state)))
+        .add_service(MonitorServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(TokenServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 
@@ -384,6 +388,115 @@ impl AppService for Grpc {
         Ok(Response::new(pb::IssueConsoleTokenResponse {
             token,
             expires_at,
+        }))
+    }
+}
+
+// ── API tokens (DMN-065, DMN-066 — see docs/security-tokens.md) ──
+
+/// How the calling request authenticated, stamped by the transport
+/// middleware next to the [`UserContext`]. Absent means a middleware bug, and
+/// [`tokens::require_primary`] fails closed on `None` — the same posture
+/// [`ctx_of`] takes.
+fn kind_of<T>(request: &Request<T>) -> Option<tokens::Resolved> {
+    request.extensions().get::<tokens::Resolved>().copied()
+}
+
+/// Token-management refusals become PERMISSION_DENIED, not INTERNAL: the
+/// credential is valid, the operation simply is not open to it.
+fn denied_to_status(err: tokens::TokenDenied) -> Status {
+    Status::permission_denied(err.reason)
+}
+
+#[tonic::async_trait]
+impl TokenService for Grpc {
+    async fn issue_access_token(
+        &self,
+        request: Request<pb::IssueAccessTokenRequest>,
+    ) -> Result<Response<pb::IssueAccessTokenResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        let req = request.into_inner();
+        let ttl = (req.ttl_secs > 0).then(|| Duration::from_secs(u64::from(req.ttl_secs)));
+        let (token, expires_at) = self.0.tokens.issue_access(ttl, &req.label);
+        Ok(Response::new(pb::IssueAccessTokenResponse {
+            token,
+            expires_at,
+            ttl_secs: tokens::ACCESS_TTL.as_secs() as u32,
+        }))
+    }
+
+    async fn revoke_access_tokens(
+        &self,
+        request: Request<pb::RevokeAccessTokensRequest>,
+    ) -> Result<Response<pb::RevokeAccessTokensResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        Ok(Response::new(pb::RevokeAccessTokensResponse {
+            revoked: self.0.tokens.revoke_all_access() as u32,
+        }))
+    }
+
+    async fn rotate_primary_token(
+        &self,
+        request: Request<pb::RotatePrimaryTokenRequest>,
+    ) -> Result<Response<pb::RotatePrimaryTokenResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        let grace = request
+            .into_inner()
+            .grace_secs
+            .map_or(tokens::ROTATION_GRACE, |secs| {
+                Duration::from_secs(u64::from(secs))
+            });
+        let path = super::api_token_path();
+        let rotation = self
+            .0
+            .tokens
+            .rotate(grace, |token| super::write_token(&path, token))
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RotatePrimaryTokenResponse {
+            token: rotation.token,
+            rotated_at: rotation.rotated_at,
+            grace_until: rotation.grace_until.unwrap_or_default(),
+            revoked_access_tokens: rotation.revoked as u32,
+        }))
+    }
+
+    async fn commit_primary_token_rotation(
+        &self,
+        request: Request<pb::CommitPrimaryTokenRotationRequest>,
+    ) -> Result<Response<pb::CommitPrimaryTokenRotationResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let resolved = kind_of(&request);
+        tokens::require_primary(resolved, &ctx).map_err(denied_to_status)?;
+        // Confirming with the token the rotation replaced would prove nothing
+        // about whether the new one was stored.
+        tokens::reject_grace(resolved).map_err(denied_to_status)?;
+        self.0.tokens.commit_rotation();
+        Ok(Response::new(pb::CommitPrimaryTokenRotationResponse {}))
+    }
+
+    async fn get_token_status(
+        &self,
+        request: Request<pb::GetTokenStatusRequest>,
+    ) -> Result<Response<pb::GetTokenStatusResponse>, Status> {
+        // Open to every kind of caller, so the response never carries token
+        // material — the primary appears only as a truncated digest.
+        let resolved = kind_of(&request).unwrap_or_else(tokens::Resolved::local_peer);
+        let status = self.0.tokens.status(resolved);
+        Ok(Response::new(pb::GetTokenStatusResponse {
+            kind: match status.kind {
+                tokens::TokenKind::Primary => pb::DaemonTokenKind::Primary,
+                tokens::TokenKind::Access => pb::DaemonTokenKind::Access,
+                tokens::TokenKind::LocalPeer => pb::DaemonTokenKind::Local,
+            } as i32,
+            expires_at: status.expires_at.unwrap_or_default(),
+            access_tokens_live: status.access_tokens_live as u32,
+            primary_digest: status.primary_digest,
+            rotation_pending: status.rotation_pending,
+            grace_until: status.grace_until.unwrap_or_default(),
+            ttl_default_secs: status.ttl_default_secs as u32,
         }))
     }
 }

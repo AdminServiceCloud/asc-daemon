@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.14.0-blue)](version.txt)
+[![Version](https://img.shields.io/badge/version-0.16.0-blue)](version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -154,6 +154,7 @@ Documentation for the daemon's modules lives in the [docs/english/](docs/english
 |---|---|
 | [🦀 Daemon overview](docs/english/README.md) | Architecture, API, installation |
 | [📡 api](docs/english/api.md) | gRPC (ConnectRPC) + REST on one port, tokens |
+| [🔐 security-tokens](docs/english/security-tokens.md) | Primary and access tokens, rotation, revocation |
 | [📱 app-management](docs/english/app-management.md) | Docker and native applications, CLI |
 | [📦 package-manager](docs/english/package-manager.md) | asc.yaml, registries, `asc install` |
 | [🤖 mcp-server](docs/english/mcp-server.md) | MCP server for AI |

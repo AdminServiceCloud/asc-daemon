@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ApiState;
 use super::console::SessionType;
+use super::tokens;
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::pkg::InstallOutcome;
 
@@ -42,6 +43,15 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(app_settings).put(set_app_settings),
         )
         .route("/v1/apps/{id}/console-token", post(console_token))
+        // API tokens (DMN-065/DMN-066). Mounted here, so the CLI reaches them
+        // over the unix socket too — `asc api token …` needs no bearer.
+        .route("/v1/token", get(token_status))
+        .route(
+            "/v1/token/access",
+            post(issue_access_token).delete(revoke_access_tokens),
+        )
+        .route("/v1/token/rotate", post(rotate_primary_token))
+        .route("/v1/token/rotate/commit", post(commit_token_rotation))
         .with_state(state)
 }
 
@@ -55,6 +65,12 @@ struct ApiError(anyhow::Error);
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         Self(err)
+    }
+}
+
+impl From<tokens::TokenDenied> for ApiError {
+    fn from(err: tokens::TokenDenied) -> Self {
+        Self(err.into())
     }
 }
 
@@ -125,6 +141,19 @@ impl IntoResponse for ApiError {
                         "image": choice.image,
                         "build": choice.build,
                     },
+                })),
+            )
+                .into_response();
+        }
+        // Token management attempted with something other than the primary
+        // (DMN-065). 403, not 401: the credential is valid, the operation is
+        // not open to it, and a client must not read this as "refresh me".
+        if let Some(denied) = self.0.downcast_ref::<super::tokens::TokenDenied>() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "token_denied": { "reason": denied.reason },
                 })),
             )
                 .into_response();
@@ -651,6 +680,123 @@ async fn console_token(
     };
     let (token, expires_at) = state.issue_console_token(ctx, id, session).await?;
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
+}
+
+// ── API tokens (DMN-065, DMN-066 — see docs/security-tokens.md) ──
+//
+// Four routes, three of them behind `require_primary`: an access token may
+// drive the whole daemon but may not touch the tokens themselves.
+
+#[derive(Deserialize, Default)]
+struct IssueAccessBody {
+    /// Requested lifetime; clamped by the store. Omitted → the 10-minute
+    /// default.
+    ttl_secs: Option<u64>,
+    /// Free-form note about who asked, surfaced by `asc api status`.
+    #[serde(default)]
+    label: String,
+}
+
+async fn issue_access_token(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    resolved: Option<Extension<tokens::Resolved>>,
+    body: Option<Json<IssueAccessBody>>,
+) -> Result<Response, ApiError> {
+    tokens::require_primary(resolved.map(|Extension(r)| r), &ctx)?;
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let ttl = body.ttl_secs.map(std::time::Duration::from_secs);
+    let (token, expires_at) = state.tokens.issue_access(ttl, &body.label);
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "expires_at": expires_at,
+        "ttl_secs": tokens::ACCESS_TTL.as_secs(),
+    }))
+    .into_response())
+}
+
+async fn revoke_access_tokens(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    resolved: Option<Extension<tokens::Resolved>>,
+) -> Result<Response, ApiError> {
+    tokens::require_primary(resolved.map(|Extension(r)| r), &ctx)?;
+    let revoked = state.tokens.revoke_all_access();
+    Ok(Json(serde_json::json!({ "revoked": revoked })).into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct RotateBody {
+    /// How long the previous primary keeps working. Omitted → 300s, `0` →
+    /// switch over immediately.
+    grace_secs: Option<u64>,
+}
+
+async fn rotate_primary_token(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    resolved: Option<Extension<tokens::Resolved>>,
+    body: Option<Json<RotateBody>>,
+) -> Result<Response, ApiError> {
+    tokens::require_primary(resolved.map(|Extension(r)| r), &ctx)?;
+    let grace = body
+        .map(|Json(b)| b)
+        .unwrap_or_default()
+        .grace_secs
+        .map_or(tokens::ROTATION_GRACE, std::time::Duration::from_secs);
+    let path = super::api_token_path();
+    let rotation = state
+        .tokens
+        .rotate(grace, |token| super::write_token(&path, token))?;
+    Ok(Json(serde_json::json!({
+        "token": rotation.token,
+        "rotated_at": rotation.rotated_at,
+        "grace_until": rotation.grace_until,
+        "revoked_access_tokens": rotation.revoked,
+    }))
+    .into_response())
+}
+
+async fn commit_token_rotation(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    resolved: Option<Extension<tokens::Resolved>>,
+) -> Result<Response, ApiError> {
+    let resolved = resolved.map(|Extension(r)| r);
+    tokens::require_primary(resolved, &ctx)?;
+    // The whole point of the confirmation is that the caller can already use
+    // the new token; confirming with the one it replaced proves nothing.
+    tokens::reject_grace(resolved)?;
+    state.tokens.commit_rotation();
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn token_status(
+    State(state): State<Arc<ApiState>>,
+    resolved: Option<Extension<tokens::Resolved>>,
+) -> Result<Response, ApiError> {
+    // Open to every kind of caller, so it must never carry a secret — the
+    // primary appears only as a truncated digest.
+    let resolved = resolved
+        .map(|Extension(r)| r)
+        .unwrap_or_else(tokens::Resolved::local_peer);
+    let status = state.tokens.status(resolved);
+    Ok(Json(serde_json::json!({
+        "kind": match status.kind {
+            tokens::TokenKind::Primary => "primary",
+            tokens::TokenKind::Access => "access",
+            tokens::TokenKind::LocalPeer => "local",
+        },
+        "expires_at": status.expires_at,
+        "access_tokens_live": status.access_tokens_live,
+        "primary_digest": status.primary_digest,
+        "rotation": {
+            "pending": status.rotation_pending,
+            "grace_until": status.grace_until,
+        },
+        "ttl_default_secs": status.ttl_default_secs,
+    }))
+    .into_response())
 }
 
 #[cfg(test)]

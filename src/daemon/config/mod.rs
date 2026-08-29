@@ -14,7 +14,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::i18n::Lang;
@@ -78,6 +78,13 @@ pub struct PlatformConfig {
     /// When registration succeeded, RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registered_at: Option<String>,
+    /// What was last reported to the platform (DMN-068). Not a secret and not
+    /// a setting — a cache, so a daemon that restarts with nothing changed
+    /// does not call the platform on every boot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_fingerprint: Option<String>,
 }
 
 /// `[policy]` — root-managed rules for regular (non-root) users.
@@ -167,7 +174,29 @@ pub struct ApiConfig {
     /// node's public IP, so the platform can dial it by address.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tls_sans: Vec<String>,
+    /// The DNS name this node is reached by (DMN-067). Required for `acme`,
+    /// added as a SAN for `self_signed`, and advertised to the platform in
+    /// place of the address — so the node survives an IP change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Contact address for the ACME account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acme_email: Option<String>,
+    /// ACME directory URL. Overridable so tests and staging can point at
+    /// Let's Encrypt's staging environment instead of burning rate limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acme_directory: Option<String>,
+    /// Where the HTTP-01 challenge is served, for the duration of one order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acme_http_listen: Option<String>,
 }
+
+/// Let's Encrypt production, used when `acme_directory` is unset.
+pub const DEFAULT_ACME_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/directory";
+
+/// Where the HTTP-01 challenge listens unless configured otherwise. ACME
+/// validation always connects to port 80, so this is not a free choice.
+pub const DEFAULT_ACME_HTTP_LISTEN: &str = "0.0.0.0:80";
 
 /// How the API listener terminates TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -179,12 +208,102 @@ pub enum TlsMode {
     /// A certificate the daemon issues itself; the platform pins its
     /// fingerprint at registration, like an SSH host key.
     SelfSigned,
-    /// Operator-supplied certificate and key, e.g. from Let's Encrypt.
+    /// A certificate the daemon obtains from an ACME provider (Let's
+    /// Encrypt) for its `domain` and renews on its own. The chain is
+    /// publicly trusted, so the platform verifies it normally instead of
+    /// pinning a fingerprint.
+    Acme,
+    /// Operator-supplied certificate and key, e.g. renewed by certbot.
     Files,
+}
+
+impl TlsMode {
+    /// The value as it appears in config.toml — also what the daemon reports
+    /// to the platform, so the two never drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::SelfSigned => "self_signed",
+            Self::Acme => "acme",
+            Self::Files => "files",
+        }
+    }
+}
+
+impl std::fmt::Display for TlsMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Default path of the daemon's local API socket (see `ApiConfig::socket`).
 pub const DEFAULT_API_SOCKET: &str = "/run/asc/asc.sock";
+
+impl ApiConfig {
+    /// Reject a `[api]` section that cannot work, before the listener is
+    /// bound rather than at the first handshake. Checked at startup and by
+    /// `asc api tls`, so a bad setting is refused where it is entered.
+    pub fn validate(&self) -> Result<()> {
+        match self.tls {
+            TlsMode::Off => {}
+            TlsMode::SelfSigned => {}
+            // The mode exists end to end everywhere else — the platform
+            // stores it, verifies the chain instead of pinning a fingerprint,
+            // and dials the domain — but the daemon does not obtain the
+            // certificate itself yet (DMN-067). An operator reaches the same
+            // result today with certbot and `files`, so this refuses at
+            // startup rather than binding a listener with nothing behind it.
+            TlsMode::Acme => bail!(
+                "api.tls = \"acme\" is not available yet: obtain the certificate with \
+                 certbot and set api.tls = \"files\" with api.tls_cert and api.tls_key"
+            ),
+            TlsMode::Files => {
+                if self.tls_cert.is_none() {
+                    bail!("api.tls = \"files\" requires api.tls_cert");
+                }
+                if self.tls_key.is_none() {
+                    bail!("api.tls = \"files\" requires api.tls_key");
+                }
+            }
+        }
+        if let Some(domain) = self.domain.as_deref()
+            && !domain.is_empty()
+            && !valid_domain(domain)
+        {
+            bail!("api.domain is not a valid host name: {domain}");
+        }
+        Ok(())
+    }
+
+    /// Whether the listener stays on the machine itself.
+    pub fn is_loopback(&self) -> bool {
+        self.listen.starts_with("127.")
+            || self.listen.starts_with("localhost")
+            || self.listen.starts_with("[::1]")
+    }
+}
+
+/// The conservative subset a certificate can be issued for: DNS labels, no
+/// scheme, no port, no path. The value ends up in a dial address and in an
+/// ACME order, so being generous here would be the wrong kind of helpful.
+pub fn valid_domain(value: &str) -> bool {
+    if value.is_empty() || value.len() > 253 {
+        return false;
+    }
+    let labels: Vec<&str> = value.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
+}
 
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -196,6 +315,10 @@ impl Default for ApiConfig {
             tls_cert: None,
             tls_key: None,
             tls_sans: Vec::new(),
+            domain: None,
+            acme_email: None,
+            acme_directory: None,
+            acme_http_listen: None,
         }
     }
 }
@@ -413,5 +536,113 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(&path, "language = \"klingon\"").unwrap();
         assert!(Config::load_from(&path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod api_validation_tests {
+    use super::*;
+
+    fn direct() -> ApiConfig {
+        ApiConfig {
+            listen: "0.0.0.0:8420".into(),
+            tls: TlsMode::SelfSigned,
+            ..ApiConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_default_configuration_is_valid() {
+        assert!(ApiConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn a_configuration_from_before_this_release_still_parses() {
+        // An existing config.toml carries none of the new keys; the daemon
+        // must come up on it untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[api]
+listen = \"127.0.0.1:8420\"
+tls = \"self_signed\"
+",
+        )
+        .unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.api.tls, TlsMode::SelfSigned);
+        assert!(loaded.api.domain.is_none());
+        assert!(loaded.api.validate().is_ok());
+    }
+
+    #[test]
+    fn files_mode_needs_both_halves_of_the_pair() {
+        let mut config = direct();
+        config.tls = TlsMode::Files;
+        assert!(config.validate().is_err());
+        config.tls_cert = Some(PathBuf::from("/etc/asc/api.crt"));
+        assert!(config.validate().is_err());
+        config.tls_key = Some(PathBuf::from("/etc/asc/api.key"));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn acme_is_refused_until_the_daemon_can_issue_certificates() {
+        // Better a clear refusal at startup than a listener with nothing
+        // behind it (DMN-067).
+        let mut config = direct();
+        config.tls = TlsMode::Acme;
+        config.domain = Some("node.example.com".into());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("acme"), "{err}");
+        assert!(
+            err.contains("files"),
+            "the message must point at the way that works: {err}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_domain_is_rejected_wherever_it_appears() {
+        let mut config = direct();
+        config.domain = Some("https://node.example.com/x".into());
+        assert!(config.validate().is_err());
+        config.domain = Some("node.example.com".into());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn loopback_is_recognised_for_every_spelling() {
+        for listen in ["127.0.0.1:8420", "localhost:8420", "[::1]:8420"] {
+            let config = ApiConfig {
+                listen: listen.into(),
+                ..ApiConfig::default()
+            };
+            assert!(config.is_loopback(), "{listen}");
+        }
+        assert!(!direct().is_loopback());
+    }
+
+    #[test]
+    fn domains_are_host_names_and_nothing_else() {
+        for good in ["node.example.com", "a-b.example.co.uk", "n1.eu"] {
+            assert!(valid_domain(good), "{good}");
+        }
+        // No scheme, no port, no path, no single label, no stray dots: the
+        // value ends up in a dial address and in a certificate.
+        for bad in [
+            "",
+            "localhost",
+            "node.example.com:8420",
+            "https://node.example.com",
+            "node.example.com/path",
+            "-node.example.com",
+            "node-.example.com",
+            "node..com",
+            "node example.com",
+            "NODE.example.com",
+        ] {
+            assert!(!valid_domain(bad), "{bad}");
+        }
     }
 }

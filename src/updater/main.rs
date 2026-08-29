@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 
 use asc_daemon::daemon::config::{Channel, Config, TlsMode};
 use asc_daemon::daemon::i18n::{self, Lang, Msg, t, tf, tf2};
@@ -52,6 +53,9 @@ enum Command {
         /// Do not wait for active daemon tasks to finish
         #[arg(long)]
         force: bool,
+        /// Emit newline-delimited JSON progress events
+        #[arg(long)]
+        json: bool,
     },
     /// Manage automatic updates (systemd timer)
     Auto {
@@ -63,7 +67,11 @@ enum Command {
     /// Roll back to the previously installed version
     Rollback,
     /// Show installed and available versions
-    Status,
+    Status {
+        /// Emit a single machine-readable JSON object
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -74,22 +82,29 @@ enum AutoAction {
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("asc-updater: {err:#}");
+    let cli = Cli::parse();
+    let machine_update = matches!(&cli.command, Command::Update { json: true, .. });
+    if let Err(err) = run(cli) {
+        if machine_update {
+            emit_update_event(installer::UpdateEvent::error(safe_machine_message(
+                &format!("{err:#}"),
+            )));
+        } else {
+            eprintln!("asc-updater: {err:#}");
+        }
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn run(cli: Cli) -> Result<()> {
     // Show warnings on stderr; RUST_LOG can raise verbosity.
     logging::init("warn");
     let mut config = Config::load()?;
     i18n::set_lang(config.language);
 
     if !matches!(
-        cli.command,
-        Command::Status
+        &cli.command,
+        Command::Status { .. }
             | Command::Auto {
                 action: AutoAction::Status
             }
@@ -120,7 +135,13 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Update { force } => installer::update(&config, force),
+        Command::Update { force, json } => {
+            if json {
+                installer::update_with_progress(&config, force, emit_update_event)
+            } else {
+                installer::update(&config, force)
+            }
+        }
         Command::Auto { action } => auto_cmd(action, config),
         Command::Channel { channel } => {
             config.updater.channel = channel;
@@ -129,7 +150,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Command::Rollback => installer::rollback(&config),
-        Command::Status => status_cmd(&config),
+        Command::Status { json } => status_cmd(&config, json),
     }
 }
 
@@ -189,13 +210,44 @@ fn auto_cmd(action: AutoAction, mut config: Config) -> Result<()> {
     Ok(())
 }
 
-fn status_cmd(config: &Config) -> Result<()> {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusOutput {
+    updater_version: &'static str,
+    installed_version: String,
+    available_version: String,
+    channel: String,
+    update_available: bool,
+}
+
+fn status_cmd(config: &Config, json: bool) -> Result<()> {
+    if json {
+        let installed_version = installer::installed_version(config)
+            .context("daemon is not installed or its version cannot be determined")?;
+        let available_version = github::latest_release(config.updater.channel)
+            .context("cannot check the available daemon version")?
+            .tag_name;
+        let update_available =
+            installer::is_strictly_newer(&installed_version, &available_version)?;
+        let output = StatusOutput {
+            updater_version: asc_daemon::VERSION,
+            installed_version,
+            available_version,
+            channel: config.updater.channel.to_string(),
+            update_available,
+        };
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+
+    let installed = installer::installed_version(config);
+    let available = github::latest_release(config.updater.channel);
     println!("asc-updater {}", asc_daemon::VERSION);
-    match installer::installed_version(config) {
+    match installed {
         Some(version) => println!("{}", tf(Msg::UpdStatusInstalled, version)),
         None => println!("{}", t(Msg::UpdNotInstalled)),
     }
-    match github::latest_release(config.updater.channel) {
+    match available {
         Ok(release) => println!(
             "{}",
             tf2(
@@ -208,6 +260,26 @@ fn status_cmd(config: &Config) -> Result<()> {
     }
     print_settings(config);
     Ok(())
+}
+
+fn emit_update_event(event: installer::UpdateEvent) {
+    // Serialization of this fixed structure is infallible. Flush every line
+    // so an SSH caller can stream progress without waiting for process exit.
+    println!(
+        "{}",
+        serde_json::to_string(&event).expect("update event is serializable")
+    );
+    std::io::stdout().flush().ok();
+}
+
+fn safe_machine_message(message: &str) -> String {
+    let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated = compact.chars().take(512).collect::<String>();
+    if truncated.is_empty() {
+        "daemon update failed".to_string()
+    } else {
+        truncated
+    }
 }
 
 fn print_settings(config: &Config) {
@@ -335,5 +407,46 @@ mod tests {
         assert!(validate_schedule("24:00").is_err());
         assert!(validate_schedule("04:60").is_err());
         assert!(validate_schedule("nope").is_err());
+    }
+
+    #[test]
+    fn json_flags_parse_on_status_and_update() {
+        let status = Cli::try_parse_from(["asc-updater", "status", "--json"]).unwrap();
+        assert!(matches!(status.command, Command::Status { json: true }));
+
+        let update = Cli::try_parse_from(["asc-updater", "update", "--json", "--force"]).unwrap();
+        assert!(matches!(
+            update.command,
+            Command::Update {
+                force: true,
+                json: true
+            }
+        ));
+    }
+
+    #[test]
+    fn status_json_uses_stable_camel_case_fields() {
+        let output = StatusOutput {
+            updater_version: "0.15.0",
+            installed_version: "0.14.0".into(),
+            available_version: "v0.15.0".into(),
+            channel: "stable".into(),
+            update_available: true,
+        };
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["updaterVersion"], "0.15.0");
+        assert_eq!(json["installedVersion"], "0.14.0");
+        assert_eq!(json["availableVersion"], "v0.15.0");
+        assert_eq!(json["channel"], "stable");
+        assert_eq!(json["updateAvailable"], true);
+    }
+
+    #[test]
+    fn machine_error_messages_are_single_line_and_bounded() {
+        let message = format!("  failure\nwith\tspaces {}", "x".repeat(600));
+        let safe = safe_machine_message(&message);
+        assert!(!safe.contains('\n'));
+        assert!(!safe.contains('\t'));
+        assert_eq!(safe.chars().count(), 512);
     }
 }

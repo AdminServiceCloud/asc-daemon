@@ -11,12 +11,67 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use semver::Version;
+use serde::Serialize;
 use tracing::{debug, warn};
 
 use asc_daemon::daemon::config::Config;
 use asc_daemon::daemon::i18n::{Msg, t, tf, tf2};
 
 use super::github::{self, Release};
+
+/// A single machine-readable `asc-updater update --json` line. Stage names
+/// are a stable interface consumed by nodeservice; human output remains
+/// localized and is emitted only by [`update`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateEvent {
+    #[serde(rename = "type")]
+    pub event_type: &'static str,
+    pub stage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub message: String,
+}
+
+impl UpdateEvent {
+    fn progress(
+        stage: &'static str,
+        percent: u8,
+        version: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            event_type: "progress",
+            stage,
+            percent: Some(percent),
+            version: version.map(str::to_owned),
+            message: message.into(),
+        }
+    }
+
+    fn complete(version: Option<&str>, message: impl Into<String>) -> Self {
+        Self {
+            event_type: "complete",
+            stage: "completed",
+            percent: Some(100),
+            version: version.map(str::to_owned),
+            message: message.into(),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            event_type: "error",
+            stage: "error",
+            percent: None,
+            version: None,
+            message: message.into(),
+        }
+    }
+}
 
 /// Rust target triple this binary was built for — release assets are named
 /// after it. `None` on platforms we do not publish builds for.
@@ -54,14 +109,31 @@ pub fn installed_version(config: &Config) -> Option<String> {
     raw.split_whitespace().last().map(str::to_string)
 }
 
-/// `v1.2.0` and `1.2.0` are the same version.
-pub fn same_version(a: &str, b: &str) -> bool {
-    a.trim_start_matches('v') == b.trim_start_matches('v')
+fn parse_version(raw: &str) -> Result<Version> {
+    let normalized = raw.strip_prefix('v').unwrap_or(raw);
+    Version::parse(normalized).with_context(|| format!("invalid semantic version '{raw}'"))
+}
+
+/// Whether `available` is a valid SemVer release strictly newer than the
+/// installed version. A leading `v` is accepted on either side.
+pub fn is_strictly_newer(installed: &str, available: &str) -> Result<bool> {
+    Ok(parse_version(available)? > parse_version(installed)?)
 }
 
 /// Download the release tarball for this platform, verify its checksum and
 /// return the contained `asc` binary.
 fn fetch_daemon_binary(release: &Release) -> Result<Vec<u8>> {
+    fetch_daemon_binary_inner(release, true, &mut |_| {})
+}
+
+fn fetch_daemon_binary_inner<F>(
+    release: &Release,
+    human_output: bool,
+    on_event: &mut F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(UpdateEvent),
+{
     let Some(triple) = target_triple() else {
         bail!(tf2(
             Msg::UpdNoBuildForPlatform,
@@ -81,10 +153,24 @@ fn fetch_daemon_binary(release: &Release) -> Result<Vec<u8>> {
         )
     })?;
 
-    println!("{}", tf(Msg::UpdDownloading, &tar_name));
+    if human_output {
+        println!("{}", tf(Msg::UpdDownloading, &tar_name));
+    }
+    on_event(UpdateEvent::progress(
+        "downloading",
+        15,
+        Some(&release.tag_name),
+        "Downloading release archive",
+    ));
     let tarball = github::download(tar_asset)?;
     let checksum = String::from_utf8(github::download(sha_asset)?)
         .context("checksum file is not valid UTF-8")?;
+    on_event(UpdateEvent::progress(
+        "verifying_checksum",
+        40,
+        Some(&release.tag_name),
+        "Verifying release checksum",
+    ));
     github::verify_sha256(&tarball, &checksum, &tar_name)?;
     extract_from_tar_gz(&tarball, "asc")
 }
@@ -143,29 +229,79 @@ pub fn install(config: &Config) -> Result<()> {
 
 /// Update to the channel's latest release, keeping the old binary for rollback.
 pub fn update(config: &Config, _force: bool) -> Result<()> {
+    update_inner(config, true, &mut |_| {})
+}
+
+/// Update with NDJSON-compatible progress events and no human-readable stdout.
+pub fn update_with_progress<F>(config: &Config, _force: bool, mut on_event: F) -> Result<()>
+where
+    F: FnMut(UpdateEvent),
+{
+    update_inner(config, false, &mut on_event)
+}
+
+fn update_inner<F>(config: &Config, human_output: bool, on_event: &mut F) -> Result<()>
+where
+    F: FnMut(UpdateEvent),
+{
     // TODO(DMN-005): once the daemon API exists, ask it for active tasks
     // (install, backup) and postpone the update unless --force.
+    on_event(UpdateEvent::progress(
+        "checking",
+        0,
+        None,
+        "Checking available daemon version",
+    ));
     let release = github::latest_release(config.updater.channel)?;
-    let installed = installed_version(config);
-    if let Some(installed) = &installed
-        && same_version(installed, &release.tag_name)
-    {
-        println!("{}", tf(Msg::UpdUpToDate, installed));
+    let installed = installed_version(config)
+        .context("daemon is not installed or its version cannot be determined")?;
+    if !is_strictly_newer(&installed, &release.tag_name)? {
+        if human_output {
+            println!("{}", tf(Msg::UpdUpToDate, &installed));
+        }
+        on_event(UpdateEvent::complete(
+            Some(&installed),
+            "No newer daemon version is available",
+        ));
         return Ok(());
     }
-    let binary = fetch_daemon_binary(&release)?;
+    let binary = fetch_daemon_binary_inner(&release, human_output, on_event)?;
 
     let current = installed_asc(config);
+    on_event(UpdateEvent::progress(
+        "backing_up",
+        55,
+        Some(&release.tag_name),
+        "Saving the currently installed daemon",
+    ));
     if current.exists() {
         let previous = previous_binary_path(config);
         fs::create_dir_all(previous.parent().expect("has parent"))
             .context("cannot create updater state directory")?;
         fs::copy(&current, &previous).context("cannot save previous version for rollback")?;
     }
+    on_event(UpdateEvent::progress(
+        "replacing",
+        75,
+        Some(&release.tag_name),
+        "Replacing the daemon binary",
+    ));
     write_binary(&current, &binary)?;
     install_completions(config);
+    on_event(UpdateEvent::progress(
+        "restarting",
+        90,
+        Some(&release.tag_name),
+        "Restarting the daemon service",
+    ));
     restart_daemon();
-    println!("{}", tf(Msg::UpdUpdated, &release.tag_name));
+    if human_output {
+        println!("{}", tf(Msg::UpdUpdated, &release.tag_name));
+    }
+    on_event(UpdateEvent::complete(
+        Some(&release.tag_name),
+        "Daemon update completed",
+    ));
     Ok(())
 }
 
@@ -398,10 +534,34 @@ mod tests {
     }
 
     #[test]
-    fn version_comparison_ignores_v_prefix() {
-        assert!(same_version("v1.2.0", "1.2.0"));
-        assert!(same_version("1.2.0", "v1.2.0"));
-        assert!(!same_version("v1.2.0", "v1.2.1"));
+    fn version_comparison_is_semver_and_strictly_newer() {
+        assert!(is_strictly_newer("v1.2.0", "1.2.1").unwrap());
+        assert!(!is_strictly_newer("1.2.0", "v1.2.0").unwrap());
+        assert!(!is_strictly_newer("v1.2.0", "v1.1.9").unwrap());
+
+        assert!(is_strictly_newer("1.0.0-beta.1", "v1.0.0-beta.2").unwrap());
+        assert!(is_strictly_newer("v1.0.0-rc.1", "1.0.0").unwrap());
+        assert!(!is_strictly_newer("1.0.0", "1.0.0-rc.1").unwrap());
+
+        assert!(is_strictly_newer("not-semver", "1.0.0").is_err());
+        assert!(is_strictly_newer("1.0.0", "latest").is_err());
+    }
+
+    #[test]
+    fn update_event_has_stable_machine_shape() {
+        let event = UpdateEvent::progress("verifying_checksum", 40, Some("v1.2.3"), "Verified");
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "progress");
+        assert_eq!(json["stage"], "verifying_checksum");
+        assert_eq!(json["percent"], 40);
+        assert_eq!(json["version"], "v1.2.3");
+        assert_eq!(json["message"], "Verified");
+
+        let error = serde_json::to_value(UpdateEvent::error("safe failure")).unwrap();
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["stage"], "error");
+        assert!(error.get("percent").is_none());
+        assert!(error.get("version").is_none());
     }
 
     #[test]

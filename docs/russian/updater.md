@@ -25,6 +25,7 @@
 - 🔄 **Автообновления**: проверка новых релизов по расписанию, обновление с учётом активных задач демона.
 - 🚫 **Отключение**: `asc-updater auto disable` — обновления только вручную.
 - 🆘 **Откат**: `asc-updater rollback` — возврат на предыдущую версию при проблемах.
+- 🤖 **Автоматизация платформой**: `status --json` сообщает состояние версий в JSON, а `update --json` передаёт машинный прогресс без примеси локализованного текста в stdout.
 
 ## 🏗️ Техническое решение
 
@@ -32,11 +33,11 @@
 
 ```bash
 asc-updater install [--silent|--interactive]    # установка демона (по умолчанию — интерактив; --silent — без вопросов, всё по умолчанию)
-asc-updater update [--force]                    # обновить сейчас (--force — не ждать завершения задач)
+asc-updater update [--force] [--json]           # обновить сейчас; --json передаёт NDJSON-прогресс
 asc-updater auto enable|disable|status          # управление автообновлениями
 asc-updater channel stable|beta                 # канал обновлений
 asc-updater rollback                            # откат на предыдущую версию
-asc-updater status                              # версии: установленная / доступная
+asc-updater status [--json]                     # версии: установленная / доступная
 ```
 
 Алиас из демона: `asc autoupdate enable|disable` проксирует в `asc-updater auto ...`.
@@ -47,9 +48,28 @@ asc-updater status                              # версии: установл
 - **Расписание**: systemd timer (не зависит от работоспособности демона); время проверки настраивается.
 - **Координация с демоном**: перед обновлением утилита спрашивает демон об активных задачах (установка, бекап) — если есть, обновление откладывается; `--force` обходит ожидание.
 - **Безопасность**: релизы скачиваются с GitHub Releases, проверка подписи/чексуммы обязательна; предыдущий бинарник сохраняется для отката.
+- **Политика версий**: установленная и доступная версии разбираются как SemVer после удаления необязательного префикса `v`. Бинарник заменяется, только если доступная версия строго новее; равная, более старая или невалидная версия никогда не запускает обновление.
 - **Конфигурация**: секция `[updater]` в `/etc/asc/config.toml` (enabled, channel, schedule); выбранные при установке настройки сохраняются туда же.
 - **Обновление самой утилиты**: демон умеет обновлять `asc-updater` (взаимное обновление — ни один компонент не является неубиваемой точкой отказа).
 
+### Машиночитаемый вывод
+
+`asc-updater status --json` записывает один JSON-объект. `updateAvailable` равен `true` только для валидного и строго более нового SemVer-релиза. Отсутствующая или невалидная установленная версия и ошибка получения релиза завершают команду с ненулевым кодом, поэтому автоматизация не примет неудачную проверку за актуальное состояние.
+
+```json
+{"updaterVersion":"0.17.0","installedVersion":"0.16.0","availableVersion":"v0.17.0","channel":"stable","updateAvailable":true}
+```
+
+`asc-updater update --json` записывает по одному JSON-объекту в строке (NDJSON) и немедленно сбрасывает каждый event в stdout. В этом режиме человекочитаемый и локализованный вывод отключён. Поля события: `type`, `stage`, необязательный `percent`, необязательный `version` и безопасное сообщение `message`. Стабильные коды этапов: `checking`, `downloading`, `verifying_checksum`, `backing_up`, `replacing`, `restarting`, `completed` и `error`.
+
+```jsonl
+{"type":"progress","stage":"checking","percent":0,"message":"Checking available daemon version"}
+{"type":"progress","stage":"downloading","percent":15,"version":"v0.17.0","message":"Downloading release archive"}
+{"type":"complete","stage":"completed","percent":100,"version":"v0.17.0","message":"Daemon update completed"}
+```
+
+При ошибке утилита записывает событие с `type: "error"` и `stage: "error"`, после чего завершается с ненулевым кодом. Поля `percent` и `version` в событии ошибки отсутствуют.
+
 ## 🔗 Связанные задачи
 
-DMN-001, DMN-014 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-001, DMN-014, DMN-064 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

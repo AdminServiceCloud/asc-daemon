@@ -153,6 +153,20 @@ fn metrics_to_pb(m: &crate::daemon::monitor::SystemMetrics) -> pb::SystemMetrics
                 tx_bytes_per_sec: n.tx_bytes_per_sec,
             })
             .collect(),
+        gpus: m
+            .gpus
+            .iter()
+            .map(|g| pb::GpuMetrics {
+                index: g.index,
+                vendor: g.vendor.clone(),
+                name: g.name.clone(),
+                utilization_percent: g.utilization_percent,
+                memory_total: g.memory_total,
+                memory_used: g.memory_used,
+                temperature_c: g.temperature_c,
+                power_watts: g.power_watts,
+            })
+            .collect(),
     }
 }
 

@@ -47,6 +47,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
 /// A fake metrics sample pushed straight into the ring buffer, standing in
 /// for the daemon's background sampler.
 fn fake_metrics(timestamp: i64) -> asc_daemon::daemon::monitor::SystemMetrics {
+    use asc_daemon::daemon::monitor::GpuMetrics;
     use asc_daemon::daemon::monitor::system::*;
     SystemMetrics {
         timestamp,
@@ -79,6 +80,16 @@ fn fake_metrics(timestamp: i64) -> asc_daemon::daemon::monitor::SystemMetrics {
             tx_errors: 0,
             rx_bytes_per_sec: Some(10.0),
             tx_bytes_per_sec: Some(20.0),
+        }],
+        gpus: vec![GpuMetrics {
+            index: 0,
+            vendor: "nvidia".into(),
+            name: "NVIDIA GeForce RTX 4090".into(),
+            utilization_percent: Some(37.0),
+            memory_total: 24 * 1024 * 1024 * 1024,
+            memory_used: 2 * 1024 * 1024 * 1024,
+            temperature_c: Some(52.0),
+            power_watts: Some(121.45),
         }],
         uptime_secs: 3600,
     }
@@ -222,6 +233,9 @@ mod rest {
         assert_eq!(m["disks"][0]["mount"], "/");
         assert_eq!(m["network"][0]["interface"], "eth0");
         assert_eq!(m["network"][0]["rx_bytes_per_sec"], 10.0);
+        assert_eq!(m["gpus"][0]["vendor"], "nvidia");
+        assert_eq!(m["gpus"][0]["utilization_percent"], 37.0);
+        assert_eq!(m["gpus"][0]["memory_used"], 2_u64 * 1024 * 1024 * 1024);
 
         // History honours the limit and returns oldest-first.
         let (status, body) = call(&state, "GET", "/v1/metrics/history", Some(TOKEN), None).await;
@@ -416,6 +430,8 @@ mod grpc {
         assert_eq!(metrics.cpu_usage_percent, Some(12.5));
         assert_eq!(metrics.cpu_cores, 4);
         assert_eq!(metrics.disks[0].mount, "/");
+        assert_eq!(metrics.gpus[0].vendor, "nvidia");
+        assert_eq!(metrics.gpus[0].temperature_c, Some(52.0));
 
         let history = client
             .get_metrics_history(with_auth(tonic::Request::new(

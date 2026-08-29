@@ -3,12 +3,14 @@
 //! plus REST `/v1/metrics`). Per-app metrics, SQLite history and the
 //! platform push stream are follow-up increments (see docs/monitoring.md).
 
+pub mod gpu;
 pub mod system;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+pub use gpu::GpuMetrics;
 pub use system::SystemMetrics;
 
 use crate::daemon::config::MonitorConfig;
@@ -40,12 +42,31 @@ impl Monitor {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                // procfs reads and statvfs are microseconds — no need to
-                // leave the async context for them.
-                match collector.sample() {
-                    Ok(sample) => monitor.push(sample),
+                // procfs reads and statvfs are microseconds, but GPU
+                // collection may spawn `nvidia-smi` — which is why the whole
+                // sample runs on a blocking thread. The collector is moved in
+                // and handed back so it keeps its previous reading, the
+                // basis for CPU usage and network rates.
+                let sampled = tokio::task::spawn_blocking(move || {
+                    let sample = collector.sample();
+                    (collector, sample)
+                })
+                .await;
+                match sampled {
+                    Ok((returned, sample)) => {
+                        collector = returned;
+                        match sample {
+                            Ok(sample) => monitor.push(sample),
+                            Err(err) => {
+                                tracing::warn!(error = %format!("{err:#}"), "metrics sample failed")
+                            }
+                        }
+                    }
                     Err(err) => {
-                        tracing::warn!(error = %format!("{err:#}"), "metrics sample failed")
+                        // The blocking task panicked: the collector is gone
+                        // with it, so start over rather than stop sampling.
+                        tracing::warn!(error = %err.to_string(), "metrics sampler panicked");
+                        collector = system::Collector::new();
                     }
                 }
             }
@@ -128,6 +149,7 @@ mod tests {
             },
             disks: Vec::new(),
             network: Vec::new(),
+            gpus: Vec::new(),
             uptime_secs: ts as u64,
         }
     }

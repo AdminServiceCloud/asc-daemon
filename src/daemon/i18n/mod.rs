@@ -157,6 +157,7 @@ pub enum Msg {
     StatusCpu,
     StatusMemory,
     StatusDisk,
+    StatusGpu,
     NoLogs,
     ErrRootRequired,
     ErrNoSystemd,
@@ -522,6 +523,7 @@ pub fn t(msg: Msg) -> &'static str {
         ),
         Msg::StatusMemory => ("Memory: {}", "Память: {}"),
         Msg::StatusDisk => ("Disk {}: {}", "Диск {}: {}"),
+        Msg::StatusGpu => ("GPU {}: {}, {}", "GPU {}: {}, {}"),
         Msg::NoLogs => ("no logs yet", "логов пока нет"),
         Msg::ErrRootRequired => (
             "this command requires root privileges (run with sudo)",

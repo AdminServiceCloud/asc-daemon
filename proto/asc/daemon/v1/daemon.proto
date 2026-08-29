@@ -250,6 +250,8 @@ message SystemMetrics {
   uint64 uptime_secs = 12;
   repeated DiskMetrics disks = 13;
   repeated NetworkMetrics network = 14;
+  // Every GPU found on the machine; empty on a server without one.
+  repeated GpuMetrics gpus = 15;
 }
 
 // One mounted real filesystem; sizes in bytes.
@@ -273,6 +275,23 @@ message NetworkMetrics {
   // Absent on the first sample.
   optional double rx_bytes_per_sec = 6;
   optional double tx_bytes_per_sec = 7;
+}
+
+// One GPU. NVIDIA figures come from nvidia-smi, AMD ones from the amdgpu
+// sysfs interface; fields a source cannot report are absent rather than zero.
+message GpuMetrics {
+  // Position in its vendor's enumeration (nvidia-smi index, DRM card number).
+  uint32 index = 1;
+  // "nvidia" or "amd".
+  string vendor = 2;
+  string name = 3;
+  // Busy share of the graphics engine, 0-100.
+  optional double utilization_percent = 4;
+  // VRAM sizes in bytes.
+  uint64 memory_total = 5;
+  uint64 memory_used = 6;
+  optional double temperature_c = 7;
+  optional double power_watts = 8;
 }
 
 message GetSystemMetricsRequest {}

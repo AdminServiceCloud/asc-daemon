@@ -3498,6 +3498,23 @@ fn print_system_metrics() {
             )
         );
     }
+    // Nothing is printed on a machine without a GPU: an empty list is the
+    // normal case on a server, not a failure worth a line.
+    for gpu in &metrics.gpus {
+        let load = gpu
+            .utilization_percent
+            .map(|u| format!("{u:.0}%"))
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{}",
+            tf3(
+                Msg::StatusGpu,
+                &gpu.name,
+                load,
+                usage_string(gpu.memory_used, gpu.memory_total)
+            )
+        );
+    }
 }
 
 /// "1.2 GiB / 15.6 GiB (7%)" — language-neutral usage figure.
@@ -3659,6 +3676,7 @@ mod tests {
                 },
             ],
             network: vec![],
+            gpus: vec![],
             uptime_secs: 0,
         };
         // RAM 4G > 1G free and CPU 4 > 2 cores are short; the disk check

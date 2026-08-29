@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::gpu::{Detector as GpuDetector, GpuMetrics};
+
 /// One snapshot of system-wide metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMetrics {
@@ -20,6 +22,8 @@ pub struct SystemMetrics {
     pub memory: MemoryMetrics,
     pub disks: Vec<DiskMetrics>,
     pub network: Vec<NetworkMetrics>,
+    /// Every GPU the machine exposes; empty on the usual headless server.
+    pub gpus: Vec<GpuMetrics>,
     pub uptime_secs: u64,
 }
 
@@ -94,6 +98,9 @@ pub struct Collector {
     prev_cpu: Option<CpuTimes>,
     /// (unix seconds, per-interface cumulative counters) of the last sample.
     prev_net: Option<(i64, Vec<NetworkMetrics>)>,
+    /// Remembers which GPU sources this machine has, so a server without one
+    /// never spawns `nvidia-smi` twice.
+    gpus: GpuDetector,
 }
 
 impl Collector {
@@ -102,8 +109,11 @@ impl Collector {
     }
 
     /// Take one snapshot. Never fails outright on a single unreadable source:
-    /// disks/network degrade to empty lists, but /proc/stat and /proc/meminfo
-    /// are mandatory — without them the sample is meaningless.
+    /// disks/network/GPU degrade to empty lists, but /proc/stat and
+    /// /proc/meminfo are mandatory — without them the sample is meaningless.
+    ///
+    /// Blocking: GPU collection may run `nvidia-smi`, so the daemon calls
+    /// this from a blocking task rather than straight from the sampler.
     pub fn sample(&mut self) -> Result<SystemMetrics> {
         let timestamp = unix_now();
 
@@ -156,6 +166,7 @@ impl Collector {
             memory,
             disks: collect_disks(),
             network,
+            gpus: self.gpus.collect(),
             uptime_secs,
         })
     }

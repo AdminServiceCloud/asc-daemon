@@ -251,6 +251,16 @@ fn metrics_json(m: &crate::daemon::monitor::SystemMetrics) -> serde_json::Value 
             "rx_bytes_per_sec": n.rx_bytes_per_sec,
             "tx_bytes_per_sec": n.tx_bytes_per_sec,
         })).collect::<Vec<_>>(),
+        "gpus": m.gpus.iter().map(|g| serde_json::json!({
+            "index": g.index,
+            "vendor": g.vendor,
+            "name": g.name,
+            "utilization_percent": g.utilization_percent,
+            "memory_total": g.memory_total,
+            "memory_used": g.memory_used,
+            "temperature_c": g.temperature_c,
+            "power_watts": g.power_watts,
+        })).collect::<Vec<_>>(),
     })
 }
 

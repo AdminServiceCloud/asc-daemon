@@ -66,6 +66,7 @@ Rotation is two-phase:
 | `POST /v1/token/rotate` | `TokenService.RotatePrimaryToken` | primary | New primary; `{"grace_secs"?}` → `{"token", "rotated_at", "grace_until"}` |
 | `POST /v1/token/rotate/commit` | `TokenService.CommitPrimaryTokenRotation` | primary, not the grace token | Confirm the rotation, end the window |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | any | Status, never a secret |
+| `POST /v1/system/reboot` | `SystemService.RebootSystem` | primary | Accept a full operating-system reboot; the daemon acknowledges first, then requests reboot without accepting an arbitrary command |
 
 `GET /v1/token` answers with the caller's token kind, its expiry when it has one, the number of live access tokens, the rotation state and `primary_digest` — the first 16 hex characters of the primary's SHA-256. That is enough for the platform to answer "is the token I hold still the current one" without either side transmitting it.
 

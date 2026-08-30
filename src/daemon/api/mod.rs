@@ -485,6 +485,29 @@ impl ApiState {
             .await?;
         Ok(self.console_tokens.issue(&app_id, session))
     }
+
+    /// Request a whole-host reboot after the API response has left the
+    /// machine. The fixed `systemctl` invocation deliberately exposes no
+    /// caller-supplied command surface.
+    pub async fn reboot_system(self: &Arc<Self>) -> Result<()> {
+        let _ = self;
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if cfg!(test) {
+                return;
+            }
+            match tokio::process::Command::new("systemctl")
+                .args(["reboot", "--no-wall"])
+                .status()
+                .await
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => warn!(%status, "system reboot request was rejected"),
+                Err(error) => warn!(%error, "could not start system reboot request"),
+            }
+        });
+        Ok(())
+    }
 }
 
 /// The API bearer token file, next to config.toml (`/etc/asc/api.token`).

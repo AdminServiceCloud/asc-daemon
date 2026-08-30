@@ -21,6 +21,7 @@ use crate::daemon::pkg::InstallOutcome;
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/system/reboot", post(reboot_system))
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
         .route("/v1/apps", get(list_apps).post(install_app))
@@ -233,6 +234,16 @@ fn to_json(status: &AppStatus) -> AppJson {
         package: status.meta.package.clone(),
         quota: status.meta.quota,
     }
+}
+
+async fn reboot_system(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    resolved: Option<Extension<tokens::Resolved>>,
+) -> Result<Response, ApiError> {
+    tokens::require_primary(resolved.map(|Extension(r)| r), &ctx)?;
+    state.reboot_system().await?;
+    Ok(Json(serde_json::json!({ "accepted": true })).into_response())
 }
 
 async fn status(

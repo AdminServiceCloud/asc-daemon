@@ -16,12 +16,14 @@ use crate::daemon::pkg::InstallOutcome;
 use pb::app_service_server::{AppService, AppServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
+use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
 
 /// gRPC routes as an axum router (mounted next to REST on one listener).
 pub fn routes(state: Arc<ApiState>) -> Router {
     tonic::service::Routes::new(DaemonServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(AppServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(SystemServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(MonitorServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(TokenServiceServer::new(Grpc(state)))
         .into_axum_router()
@@ -116,6 +118,19 @@ impl DaemonService for Grpc {
             apps_total: total as u32,
             apps_running: running as u32,
         }))
+    }
+}
+
+#[tonic::async_trait]
+impl SystemService for Grpc {
+    async fn reboot_system(
+        &self,
+        request: Request<pb::RebootSystemRequest>,
+    ) -> Result<Response<pb::RebootSystemResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        self.0.reboot_system().await.map_err(to_status)?;
+        Ok(Response::new(pb::RebootSystemResponse { accepted: true }))
     }
 }
 

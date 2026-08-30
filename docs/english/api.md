@@ -69,6 +69,7 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | Metrics history from the ring buffer, oldest → newest |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Token state: kind, live access tokens, rotation window, the primary's truncated digest — never token material |
+| `POST /v1/system/reboot` | `SystemService.RebootSystem` | Requests a full host reboot after acknowledging the caller; primary token only |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Mint a short-lived access token (primary only) |
 | `DELETE /v1/token/access` | `TokenService.RevokeAccessTokens` | Kill every live access token, `{"revoked": n}` (primary only) |
 | `POST /v1/token/rotate {"grace_secs"?}` | `TokenService.RotatePrimaryToken` | Replace the primary, revoking all access tokens; returns the new token (primary only) |

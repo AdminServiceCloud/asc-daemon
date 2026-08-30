@@ -66,6 +66,7 @@ Unix-сокета это не касается: там личность даёт
 | `POST /v1/token/rotate` | `TokenService.RotatePrimaryToken` | основной | Новый основной; `{"grace_secs"?}` → `{"token", "rotated_at", "grace_until"}` |
 | `POST /v1/token/rotate/commit` | `TokenService.CommitPrimaryTokenRotation` | основной, не grace-токен | Подтверждение ротации, закрытие окна |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | любой | Статус, никогда не секрет |
+| `POST /v1/system/reboot` | `SystemService.RebootSystem` | основной | Принимает полную перезагрузку ОС: демон сначала отвечает, затем запрашивает reboot, не принимая произвольную команду |
 
 `GET /v1/token` отдаёт вид предъявленного токена, срок его жизни (если есть), число живых временных токенов, состояние ротации и `primary_digest` — первые 16 hex-символов SHA-256 основного токена. Этого достаточно, чтобы платформа ответила «тот ли у меня основной токен», ничего не пересылая.
 

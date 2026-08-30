@@ -16,6 +16,19 @@ service DaemonService {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
+// Privileged host lifecycle operations. These do not accept a command or
+// arguments: the only supported action is a full operating-system reboot.
+service SystemService {
+  rpc RebootSystem(RebootSystemRequest) returns (RebootSystemResponse);
+}
+
+message RebootSystemRequest {}
+
+message RebootSystemResponse {
+  // The request was accepted before the machine begins shutting down.
+  bool accepted = 1;
+}
+
 message GetStatusRequest {}
 
 message GetStatusResponse {

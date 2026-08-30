@@ -69,6 +69,7 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Состояние токенов: вид, число живых временных, окно ротации, усечённый дайджест основного — никогда сам токен |
+| `POST /v1/system/reboot` | `SystemService.RebootSystem` | Запрашивает полную перезагрузку хоста после подтверждения вызова; только основной токен |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Выпуск временного токена (только по основному) |
 | `DELETE /v1/token/access` | `TokenService.RevokeAccessTokens` | Гасит все живые временные токены, `{"revoked": n}` (только по основному) |
 | `POST /v1/token/rotate {"grace_secs"?}` | `TokenService.RotatePrimaryToken` | Замена основного токена с отзывом всех временных; возвращает новый токен (только по основному) |

@@ -74,6 +74,14 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 | `DELETE /v1/token/access` | `TokenService.RevokeAccessTokens` | Kill every live access token, `{"revoked": n}` (primary only) |
 | `POST /v1/token/rotate {"grace_secs"?}` | `TokenService.RotatePrimaryToken` | Replace the primary, revoking all access tokens; returns the new token (primary only) |
 | `POST /v1/token/rotate/commit` | `TokenService.CommitPrimaryTokenRotation` | Confirm the new primary is stored and close the grace window; refused when presented with the token it replaced |
+| `GET /v1/files?path=&hidden=` | `FileService.ListDirectory` | List a directory from `/`; details — [📁 files](files.md) |
+| `GET /v1/files/stat?path=` | `FileService.StatPath` | Metadata for one path |
+| `POST /v1/files/directory` | `FileService.CreateDirectory` | Create a directory |
+| `POST /v1/files/move` · `/copy` · `/delete` · `/archive` | `FileService.MovePath` / `CopyPath` / `DeletePaths` / `CreateArchive` | Move, copy, delete, archive |
+| `GET /v1/files/content?path=&offset=` | `FileService.ReadFile` (stream) | Download a file |
+| `PUT /v1/files/content?path=&name=&overwrite=` | `FileService.WriteFile` (stream) | Upload a file |
+| `POST /v1/files/attributes` | `FileService.SetPathAttributes` | Mode and/or owner/group by name |
+| `GET /v1/files/identities` | `FileService.ListSystemIdentities` | The machine's local users and groups |
 
 ### 📜 Code generation
 
@@ -82,4 +90,4 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 
 ## 🔗 Related tasks
 
-DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

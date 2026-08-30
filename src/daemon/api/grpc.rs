@@ -1,9 +1,11 @@
 //! gRPC transport: generated tonic services delegating to [`ApiState`].
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use futures_util::stream::Stream;
 use tonic::{Request, Response, Status};
 
 use super::console::SessionType;
@@ -11,10 +13,12 @@ use super::proto::v1 as pb;
 use super::tokens;
 use super::{ApiState, proto};
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
+use crate::daemon::files;
 use crate::daemon::pkg::InstallOutcome;
 
 use pb::app_service_server::{AppService, AppServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
+use pb::file_service_server::{FileService, FileServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
 use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
@@ -25,7 +29,8 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(AppServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(SystemServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(MonitorServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(TokenServiceServer::new(Grpc(state)))
+        .add_service(TokenServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(FileServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 
@@ -48,10 +53,25 @@ fn ctx_of<T>(request: &Request<T>) -> UserContext {
         })
 }
 
-/// anyhow errors → gRPC status. "not found" errors keep their code; the rest
-/// become INTERNAL with the message preserved.
+/// anyhow errors → gRPC status. Typed [`files::FileError`]s keep their own
+/// code (DMN-070); "not found" text otherwise keeps its code too; everything
+/// else becomes INTERNAL with the message preserved.
 fn to_status(err: anyhow::Error) -> Status {
     let msg = format!("{err:#}");
+    if let Some(err) = err.downcast_ref::<files::FileError>() {
+        use files::FileError as F;
+        return match err {
+            F::NotFound(_) => Status::not_found(msg),
+            F::Exists(_) => Status::already_exists(msg),
+            F::PermissionDenied(_) | F::Protected(_) => Status::permission_denied(msg),
+            F::InvalidPath(_) | F::DestinationInsideSource { .. } => Status::invalid_argument(msg),
+            F::UnknownUser(_) | F::UnknownGroup(_) => Status::invalid_argument(msg),
+            F::NotADirectory(_) | F::IsADirectory(_) | F::DirectoryNotEmpty(_) => {
+                Status::failed_precondition(msg)
+            }
+            F::Io(..) => Status::internal(msg),
+        };
+    }
     if msg.contains("not found") || msg.contains("не найдено") {
         Status::not_found(msg)
     } else {
@@ -512,6 +532,298 @@ impl TokenService for Grpc {
             rotation_pending: status.rotation_pending,
             grace_until: status.grace_until.unwrap_or_default(),
             ttl_default_secs: status.ttl_default_secs as u32,
+        }))
+    }
+}
+
+// ── Files (DMN-070) — see docs/files.md ──
+
+fn file_kind_to_pb(kind: files::FileKind) -> pb::FileKind {
+    match kind {
+        files::FileKind::File => pb::FileKind::File,
+        files::FileKind::Directory => pb::FileKind::Directory,
+        files::FileKind::Symlink => pb::FileKind::Symlink,
+        files::FileKind::Other => pb::FileKind::Other,
+    }
+}
+
+fn file_entry_to_pb(entry: &files::FileEntry) -> pb::FileEntry {
+    pb::FileEntry {
+        name: entry.name.clone(),
+        kind: file_kind_to_pb(entry.kind) as i32,
+        size: entry.size,
+        modified_at: entry.modified_at,
+        mode: entry.mode,
+        uid: entry.uid,
+        gid: entry.gid,
+        owner: entry.owner.clone(),
+        group: entry.group.clone(),
+        is_symlink: entry.is_symlink,
+        symlink_target: entry.symlink_target.clone(),
+        target_kind: entry.target_kind.map(|k| file_kind_to_pb(k) as i32),
+    }
+}
+
+fn archive_format_from_pb(value: i32) -> Result<files::ArchiveFormat, Status> {
+    match pb::ArchiveFormat::try_from(value) {
+        Ok(pb::ArchiveFormat::Unspecified) | Ok(pb::ArchiveFormat::TarGz) => {
+            Ok(files::ArchiveFormat::TarGz)
+        }
+        // Reserved in the contract, not implemented yet (see docs/files.md):
+        // adding a zip encoder is not worth the dependency weight today.
+        Ok(pb::ArchiveFormat::Zip) => Err(Status::unimplemented(
+            "zip archives are not supported yet; use tar.gz",
+        )),
+        Err(_) => Err(Status::invalid_argument("invalid archive format")),
+    }
+}
+
+#[tonic::async_trait]
+impl FileService for Grpc {
+    type ReadFileStream = Pin<Box<dyn Stream<Item = Result<pb::FileChunk, Status>> + Send>>;
+
+    async fn list_directory(
+        &self,
+        request: Request<pb::ListDirectoryRequest>,
+    ) -> Result<Response<pb::ListDirectoryResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let listing = self
+            .0
+            .list_directory(ctx, req.path, req.include_hidden)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListDirectoryResponse {
+            path: listing.path,
+            entries: listing.entries.iter().map(file_entry_to_pb).collect(),
+            truncated: listing.truncated,
+            total_entries: listing.total_entries,
+        }))
+    }
+
+    async fn stat_path(
+        &self,
+        request: Request<pb::StatPathRequest>,
+    ) -> Result<Response<pb::StatPathResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let (entry, parent) = self
+            .0
+            .stat_path(ctx, request.into_inner().path)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::StatPathResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+            parent,
+        }))
+    }
+
+    async fn create_directory(
+        &self,
+        request: Request<pb::CreateDirectoryRequest>,
+    ) -> Result<Response<pb::CreateDirectoryResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let entry = self
+            .0
+            .create_directory(ctx, req.path, req.parents)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::CreateDirectoryResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+        }))
+    }
+
+    async fn move_path(
+        &self,
+        request: Request<pb::MovePathRequest>,
+    ) -> Result<Response<pb::MovePathResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let entry = self
+            .0
+            .move_path(ctx, req.source, req.destination, req.overwrite)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::MovePathResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+        }))
+    }
+
+    async fn copy_path(
+        &self,
+        request: Request<pb::CopyPathRequest>,
+    ) -> Result<Response<pb::CopyPathResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let (entry, bytes, files) = self
+            .0
+            .copy_path(ctx, req.source, req.destination, req.overwrite)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::CopyPathResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+            bytes_copied: bytes,
+            files_copied: files,
+        }))
+    }
+
+    async fn delete_paths(
+        &self,
+        request: Request<pb::DeletePathsRequest>,
+    ) -> Result<Response<pb::DeletePathsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let (deleted, failures) = self
+            .0
+            .delete_paths(ctx, req.paths, req.recursive)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DeletePathsResponse {
+            deleted,
+            failures: failures
+                .into_iter()
+                .map(|(path, error)| pb::DeleteFailure { path, error })
+                .collect(),
+        }))
+    }
+
+    async fn create_archive(
+        &self,
+        request: Request<pb::CreateArchiveRequest>,
+    ) -> Result<Response<pb::CreateArchiveResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let format = archive_format_from_pb(req.format)?;
+        let (entry, bytes, file_count) = self
+            .0
+            .create_archive(ctx, req.directory, req.names, req.archive_path, format)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::CreateArchiveResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+            bytes,
+            files: file_count,
+        }))
+    }
+
+    async fn read_file(
+        &self,
+        request: Request<pb::ReadFileRequest>,
+    ) -> Result<Response<Self::ReadFileStream>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let (size, rx) = self
+            .0
+            .open_file_read(ctx, req.path, req.offset)
+            .await
+            .map_err(to_status)?;
+        let stream =
+            futures_util::stream::unfold((rx, true, size), |(mut rx, first, size)| async move {
+                match rx.recv().await {
+                    Some(Ok(data)) => {
+                        let total_size = first.then_some(size);
+                        Some((Ok(pb::FileChunk { data, total_size }), (rx, false, size)))
+                    }
+                    Some(Err(err)) => {
+                        Some((Err(Status::internal(err.to_string())), (rx, first, size)))
+                    }
+                    None => None,
+                }
+            });
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn set_path_attributes(
+        &self,
+        request: Request<pb::SetPathAttributesRequest>,
+    ) -> Result<Response<pb::SetPathAttributesResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let entry = self
+            .0
+            .set_file_attributes(ctx, req.path, req.mode, req.owner, req.group)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SetPathAttributesResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+        }))
+    }
+
+    async fn list_system_identities(
+        &self,
+        request: Request<pb::ListSystemIdentitiesRequest>,
+    ) -> Result<Response<pb::ListSystemIdentitiesResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let (users, groups) = self
+            .0
+            .list_system_identities(ctx)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListSystemIdentitiesResponse {
+            users: users
+                .into_iter()
+                .map(|u| pb::SystemUser {
+                    name: u.name,
+                    uid: u.uid,
+                    home: u.home,
+                })
+                .collect(),
+            groups: groups
+                .into_iter()
+                .map(|g| pb::SystemGroup {
+                    name: g.name,
+                    gid: g.gid,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn write_file(
+        &self,
+        request: Request<tonic::Streaming<pb::WriteFileRequest>>,
+    ) -> Result<Response<pb::WriteFileResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let mut stream = request.into_inner();
+        let first = stream
+            .message()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::invalid_argument("empty upload stream"))?;
+        let header_pb = first
+            .header
+            .ok_or_else(|| Status::invalid_argument("the first message must carry the header"))?;
+        let header = files::WriteHeader {
+            directory: header_pb.directory,
+            name: header_pb.name,
+            overwrite: header_pb.overwrite,
+            mode: header_pb.mode,
+        };
+        let (tx, join) = self
+            .0
+            .open_file_write(ctx, header)
+            .await
+            .map_err(to_status)?;
+        // The first message may also carry a data chunk alongside the header.
+        if !first.data.is_empty() && tx.send(first.data).await.is_err() {
+            return Err(Status::aborted("upload sink closed early"));
+        }
+        while let Some(msg) = stream
+            .message()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            if !msg.data.is_empty() && tx.send(msg.data).await.is_err() {
+                break;
+            }
+        }
+        drop(tx);
+        let entry = join
+            .await
+            .map_err(|_| Status::internal("upload worker panicked"))?
+            .map_err(to_status)?;
+        Ok(Response::new(pb::WriteFileResponse {
+            bytes_written: entry.size,
+            entry: Some(file_entry_to_pb(&entry)),
         }))
     }
 }

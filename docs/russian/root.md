@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.18.0-blue)](../../version.txt)
+[![Version](https://img.shields.io/badge/version-0.19.0-blue)](../../version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -147,6 +147,7 @@ cp -r skills/* .claude/skills/
 | [📊 monitoring](monitoring.md) | Метрики системы и приложений |
 | [💾 backups](backups.md) | Бекапы приложений |
 | [📁 sftp](sftp.md) | SFTP с изоляцией по приложению |
+| [📁 files](files.md) | Файловый API: обход ФС ноды, потоковая передача |
 | [🖥️ console](console.md) | WebSocket-консоль приложений |
 | [⏰ scheduler](scheduler.md) | Планировщик задач |
 | [⌨️ completion](completion.md) | Автодополнение по Tab для bash, zsh и fish — команды, флаги и живые значения |

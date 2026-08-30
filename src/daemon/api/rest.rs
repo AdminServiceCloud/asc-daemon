@@ -5,17 +5,20 @@
 use std::sync::Arc;
 
 use axum::Extension;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::ApiState;
 use super::console::SessionType;
 use super::tokens;
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
+use crate::daemon::files;
 use crate::daemon::pkg::InstallOutcome;
 
 pub fn router(state: Arc<ApiState>) -> Router {
@@ -53,6 +56,23 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/v1/token/rotate", post(rotate_primary_token))
         .route("/v1/token/rotate/commit", post(commit_token_rotation))
+        // Node filesystem access (DMN-070, see docs/files.md). Every handler
+        // requires a root caller context (files::require_root, enforced in
+        // the service layer) — unlike the rest of this API, a non-root
+        // unix-socket peer is refused here.
+        .route("/v1/files", get(list_directory))
+        .route("/v1/files/stat", get(stat_path))
+        .route("/v1/files/directory", post(create_directory))
+        .route("/v1/files/move", post(move_path))
+        .route("/v1/files/copy", post(copy_path))
+        .route("/v1/files/delete", post(delete_paths))
+        .route("/v1/files/archive", post(create_archive))
+        .route("/v1/files/attributes", post(set_path_attributes))
+        .route("/v1/files/identities", get(list_system_identities))
+        .route(
+            "/v1/files/content",
+            get(read_file_content).put(write_file_content),
+        )
         .with_state(state)
 }
 
@@ -145,6 +165,24 @@ impl IntoResponse for ApiError {
                 })),
             )
                 .into_response();
+        }
+        // Typed file-operation errors (DMN-070): the file manager UI needs
+        // "already exists" told apart from "the node is broken", and both
+        // arrive here as one `anyhow::Error`.
+        if let Some(err) = self.0.downcast_ref::<files::FileError>() {
+            use files::FileError as F;
+            let status = match err {
+                F::NotFound(_) => StatusCode::NOT_FOUND,
+                F::Exists(_) => StatusCode::CONFLICT,
+                F::PermissionDenied(_) | F::Protected(_) => StatusCode::FORBIDDEN,
+                F::InvalidPath(_) | F::DestinationInsideSource { .. } => StatusCode::BAD_REQUEST,
+                F::NotADirectory(_) | F::IsADirectory(_) | F::DirectoryNotEmpty(_) => {
+                    StatusCode::CONFLICT
+                }
+                F::UnknownUser(_) | F::UnknownGroup(_) => StatusCode::BAD_REQUEST,
+                F::Io(..) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
         // Token management attempted with something other than the primary
         // (DMN-065). 403, not 401: the credential is valid, the operation is
@@ -808,6 +846,340 @@ async fn token_status(
         "ttl_default_secs": status.ttl_default_secs,
     }))
     .into_response())
+}
+
+// ── Files (DMN-070) — see docs/files.md ──
+
+fn file_kind_str(kind: files::FileKind) -> &'static str {
+    match kind {
+        files::FileKind::File => "file",
+        files::FileKind::Directory => "directory",
+        files::FileKind::Symlink => "symlink",
+        files::FileKind::Other => "other",
+    }
+}
+
+fn file_entry_json(entry: &files::FileEntry) -> serde_json::Value {
+    serde_json::json!({
+        "name": entry.name,
+        "kind": file_kind_str(entry.kind),
+        "size": entry.size,
+        "modified_at": entry.modified_at,
+        "mode": entry.mode,
+        "uid": entry.uid,
+        "gid": entry.gid,
+        "owner": entry.owner,
+        "group": entry.group,
+        "is_symlink": entry.is_symlink,
+        "symlink_target": entry.symlink_target,
+        "target_kind": entry.target_kind.map(file_kind_str),
+    })
+}
+
+/// Minimal RFC 5987 `filename*` percent-encoding: alphanumerics and a small
+/// safe set pass through, everything else (including all non-ASCII bytes)
+/// is escaped. Conservative on purpose — this only needs to round-trip
+/// through `Content-Disposition`, not be pretty.
+fn percent_encode_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    path: String,
+    #[serde(default)]
+    hidden: bool,
+}
+
+async fn list_directory(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<ListQuery>,
+) -> Result<Response, ApiError> {
+    let listing = state.list_directory(ctx, query.path, query.hidden).await?;
+    Ok(Json(serde_json::json!({
+        "path": listing.path,
+        "entries": listing.entries.iter().map(file_entry_json).collect::<Vec<_>>(),
+        "truncated": listing.truncated,
+        "total_entries": listing.total_entries,
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct StatQuery {
+    path: String,
+}
+
+async fn stat_path(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<StatQuery>,
+) -> Result<Response, ApiError> {
+    let (entry, parent) = state.stat_path(ctx, query.path).await?;
+    Ok(
+        Json(serde_json::json!({ "entry": file_entry_json(&entry), "parent": parent }))
+            .into_response(),
+    )
+}
+
+#[derive(Deserialize)]
+struct DirectoryBody {
+    path: String,
+    #[serde(default)]
+    parents: bool,
+}
+
+async fn create_directory(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<DirectoryBody>,
+) -> Result<Response, ApiError> {
+    let entry = state.create_directory(ctx, body.path, body.parents).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "entry": file_entry_json(&entry) })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct TransformBody {
+    source: String,
+    destination: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+async fn move_path(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<TransformBody>,
+) -> Result<Response, ApiError> {
+    let entry = state
+        .move_path(ctx, body.source, body.destination, body.overwrite)
+        .await?;
+    Ok(Json(serde_json::json!({ "entry": file_entry_json(&entry) })).into_response())
+}
+
+async fn copy_path(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<TransformBody>,
+) -> Result<Response, ApiError> {
+    let (entry, bytes, files) = state
+        .copy_path(ctx, body.source, body.destination, body.overwrite)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "entry": file_entry_json(&entry),
+        "bytes_copied": bytes,
+        "files_copied": files,
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct DeleteBody {
+    paths: Vec<String>,
+    #[serde(default)]
+    recursive: bool,
+}
+
+async fn delete_paths(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<DeleteBody>,
+) -> Result<Response, ApiError> {
+    let (deleted, failures) = state.delete_paths(ctx, body.paths, body.recursive).await?;
+    Ok(Json(serde_json::json!({
+        "deleted": deleted,
+        "failures": failures.into_iter().map(|(path, error)| serde_json::json!({
+            "path": path,
+            "error": error,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    directory: String,
+    names: Vec<String>,
+    archive_path: String,
+    #[serde(default)]
+    format: String,
+}
+
+async fn create_archive(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<ArchiveBody>,
+) -> Result<Response, ApiError> {
+    let format = match body.format.as_str() {
+        "" | "tar.gz" | "tar_gz" => files::ArchiveFormat::TarGz,
+        "zip" => {
+            return Ok((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({
+                    "error": "zip archives are not supported yet; use tar.gz",
+                })),
+            )
+                .into_response());
+        }
+        other => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown archive format '{other}'") })),
+            )
+                .into_response());
+        }
+    };
+    let (entry, bytes, file_count) = state
+        .create_archive(ctx, body.directory, body.names, body.archive_path, format)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "entry": file_entry_json(&entry),
+            "bytes": bytes,
+            "files": file_count,
+        })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct AttributesBody {
+    path: String,
+    #[serde(default)]
+    mode: Option<u32>,
+    /// User/group name from `GET /v1/files/identities`, not a raw uid/gid.
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+}
+
+async fn set_path_attributes(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<AttributesBody>,
+) -> Result<Response, ApiError> {
+    let entry = state
+        .set_file_attributes(ctx, body.path, body.mode, body.owner, body.group)
+        .await?;
+    Ok(Json(serde_json::json!({ "entry": file_entry_json(&entry) })).into_response())
+}
+
+/// The machine's local users and groups, for a UI dropdown when reassigning
+/// ownership (see `POST /v1/files/attributes`).
+async fn list_system_identities(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let (users, groups) = state.list_system_identities(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "users": users.into_iter().map(|u| serde_json::json!({
+            "name": u.name,
+            "uid": u.uid,
+            "home": u.home,
+        })).collect::<Vec<_>>(),
+        "groups": groups.into_iter().map(|g| serde_json::json!({
+            "name": g.name,
+            "gid": g.gid,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct ContentQuery {
+    path: String,
+    #[serde(default)]
+    offset: u64,
+}
+
+/// Streams the file straight from the daemon's read worker into the HTTP
+/// body — the platform facade relays it the same way, so the file's bytes
+/// are never buffered whole at any hop.
+async fn read_file_content(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<ContentQuery>,
+) -> Result<Response, ApiError> {
+    let (size, rx) = state
+        .open_file_read(ctx, query.path.clone(), query.offset)
+        .await?;
+    let remaining = size.saturating_sub(query.offset);
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let filename = query.path.rsplit('/').next().unwrap_or("file");
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("content-length", remaining.to_string())
+        .header(
+            "content-disposition",
+            format!(
+                "attachment; filename*=UTF-8''{}",
+                percent_encode_filename(filename)
+            ),
+        )
+        .body(Body::from_stream(stream))
+        .expect("static response builder");
+    Ok(response)
+}
+
+#[derive(Deserialize)]
+struct WriteQuery {
+    path: String,
+    name: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// Accepts the request body as raw bytes — not multipart: the body *is* the
+/// file, so the platform facade's upload route can relay it unparsed and
+/// report progress from the byte count alone.
+async fn write_file_content(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<WriteQuery>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let header = files::WriteHeader {
+        directory: query.path,
+        name: query.name,
+        overwrite: query.overwrite,
+        mode: None,
+    };
+    let (tx, join) = state.open_file_write(ctx, header).await?;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("error reading upload body: {e}"))?;
+        if tx.send(chunk.to_vec()).await.is_err() {
+            break;
+        }
+    }
+    drop(tx);
+    let entry = join
+        .await
+        .map_err(|_| anyhow::anyhow!("upload worker panicked"))??;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "entry": file_entry_json(&entry) })),
+    )
+        .into_response())
 }
 
 #[cfg(test)]

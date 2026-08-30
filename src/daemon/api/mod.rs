@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 use crate::daemon::apps::meta::AppMeta;
 use crate::daemon::apps::{AppManager, AppStatus, Outcome, UserContext};
 use crate::daemon::config::Config;
+use crate::daemon::files;
 use crate::daemon::monitor::Monitor;
 use crate::daemon::pkg;
 
@@ -507,6 +508,207 @@ impl ApiState {
             }
         });
         Ok(())
+    }
+
+    // ── Files (DMN-070): node filesystem access from "/", see docs/files.md.
+    // Every entry point starts with `files::require_root` — the unix socket
+    // is otherwise world-connectable and authorizes purely by peer uid, a
+    // rule this service must not inherit. The TCP transport (platform) is
+    // unaffected: `api_context()` above already carries `is_root: true`.
+
+    pub async fn list_directory(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        path: String,
+        include_hidden: bool,
+    ) -> Result<files::Listing> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::list_directory(&path, include_hidden)?)
+        })
+        .await
+    }
+
+    pub async fn stat_path(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        path: String,
+    ) -> Result<(files::FileEntry, String)> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::stat(&path)?)
+        })
+        .await
+    }
+
+    pub async fn create_directory(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        path: String,
+        parents: bool,
+    ) -> Result<files::FileEntry> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::create_directory(&path, parents)?)
+        })
+        .await
+    }
+
+    pub async fn move_path(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        source: String,
+        destination: String,
+        overwrite: bool,
+    ) -> Result<files::FileEntry> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::move_path(&source, &destination, overwrite)?)
+        })
+        .await
+    }
+
+    pub async fn copy_path(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        source: String,
+        destination: String,
+        overwrite: bool,
+    ) -> Result<(files::FileEntry, u64, u32)> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::copy_path(&source, &destination, overwrite)?)
+        })
+        .await
+    }
+
+    pub async fn delete_paths(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        paths: Vec<String>,
+        recursive: bool,
+    ) -> Result<(u32, Vec<(String, String)>)> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::delete_paths(&paths, recursive))
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_archive(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        directory: String,
+        names: Vec<String>,
+        archive_path: String,
+        format: files::ArchiveFormat,
+    ) -> Result<(files::FileEntry, u64, u32)> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::create_archive(
+                &directory,
+                &names,
+                &archive_path,
+                format,
+            )?)
+        })
+        .await
+    }
+
+    /// Open a file for streaming download on a worker thread. Byte transfer
+    /// does not fit [`Self::blocking`] (which hands back a single result):
+    /// the read loop runs on its own `spawn_blocking` task, feeding chunks
+    /// through a 4-deep bounded channel — back-pressure is the channel
+    /// depth, and the async runtime never blocks on a disk read.
+    pub async fn open_file_read(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        path: String,
+        offset: u64,
+    ) -> Result<(u64, tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>)> {
+        files::require_root(&ctx)?;
+        let mut handle =
+            tokio::task::spawn_blocking(move || files::ReadHandle::open(&path, offset))
+                .await
+                .context("file read worker panicked")??;
+        let size = handle.size;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::task::spawn_blocking(move || {
+            let mut buf = vec![0u8; files::CHUNK_BYTES];
+            loop {
+                match handle.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                            break; // the caller went away; stop reading
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.blocking_send(Err(err));
+                        break;
+                    }
+                }
+            }
+        });
+        Ok((size, rx))
+    }
+
+    pub async fn set_file_attributes(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        path: String,
+        mode: Option<u32>,
+        owner: Option<String>,
+        group: Option<String>,
+    ) -> Result<files::FileEntry> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::set_attributes(
+                &path,
+                mode,
+                owner.as_deref(),
+                group.as_deref(),
+            )?)
+        })
+        .await
+    }
+
+    pub async fn list_system_identities(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<(Vec<files::SystemUser>, Vec<files::SystemGroup>)> {
+        self.blocking(move |_| {
+            files::require_root(&ctx)?;
+            Ok(files::list_system_identities()?)
+        })
+        .await
+    }
+
+    /// Open an upload sink on a worker thread; the mirror of
+    /// [`Self::open_file_read`]. The returned sender feeds chunks in; the
+    /// join handle resolves once the header, every chunk and the final
+    /// atomic commit have all landed, or reports why they did not.
+    pub async fn open_file_write(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        header: files::WriteHeader,
+    ) -> Result<(
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        tokio::task::JoinHandle<Result<files::FileEntry>>,
+    )> {
+        files::require_root(&ctx)?;
+        let mut handle = tokio::task::spawn_blocking(move || files::WriteHandle::open(&header))
+            .await
+            .context("file write worker panicked")??;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let join = tokio::task::spawn_blocking(move || -> Result<files::FileEntry> {
+            while let Some(chunk) = rx.blocking_recv() {
+                handle.write_all(&chunk)?;
+            }
+            Ok(handle.commit()?)
+        });
+        Ok((tx, join))
     }
 }
 

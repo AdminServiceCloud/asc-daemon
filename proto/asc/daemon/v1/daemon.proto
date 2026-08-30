@@ -410,3 +410,233 @@ message GetTokenStatusResponse {
   int64 grace_until = 6;
   uint32 ttl_default_secs = 7;
 }
+
+// Node filesystem access (DMN-070). The daemon runs as root and the whole
+// tree from "/" is in scope: the platform performs its own per-user
+// authorization before it ever reaches here (see docs/api.md). Symlinks are
+// reported but never traversed — a recursive operation stops at the link.
+// Every method requires a root caller context; a non-root unix-socket peer is
+// refused, unlike the rest of this API (see docs/files.md).
+service FileService {
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc StatPath(StatPathRequest) returns (StatPathResponse);
+  rpc CreateDirectory(CreateDirectoryRequest) returns (CreateDirectoryResponse);
+  // Rename and move are one operation: a rename is a move whose destination
+  // shares the source's parent.
+  rpc MovePath(MovePathRequest) returns (MovePathResponse);
+  rpc CopyPath(CopyPathRequest) returns (CopyPathResponse);
+  rpc DeletePaths(DeletePathsRequest) returns (DeletePathsResponse);
+  rpc CreateArchive(CreateArchiveRequest) returns (CreateArchiveResponse);
+  rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
+  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse);
+  // Change of mode and/or owner/group, chmod/chown-style: an unset field
+  // leaves that attribute untouched.
+  rpc SetPathAttributes(SetPathAttributesRequest) returns (SetPathAttributesResponse);
+  // The machine's local users and groups (/etc/passwd, /etc/group), for a
+  // UI to offer as a dropdown when reassigning ownership. Root-gated like
+  // every other method here, not because the listing itself is sensitive —
+  // every file's owner/group name is already visible through ListDirectory
+  // — but for the same reason everything else in this service is: it is
+  // not scoped per calling user.
+  rpc ListSystemIdentities(ListSystemIdentitiesRequest) returns (ListSystemIdentitiesResponse);
+}
+
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  FILE_KIND_FILE = 1;
+  FILE_KIND_DIRECTORY = 2;
+  FILE_KIND_SYMLINK = 3;
+  // Socket, fifo, block/char device: listed, never opened.
+  FILE_KIND_OTHER = 4;
+}
+
+// One directory entry as lstat sees it: a symlink is always SYMLINK, never
+// the kind of what it points at.
+message FileEntry {
+  string name = 1;
+  FileKind kind = 2;
+  uint64 size = 3;
+  // Unix seconds; 0 when unreadable.
+  int64 modified_at = 4;
+  // st_mode & 0o7777.
+  uint32 mode = 5;
+  uint32 uid = 6;
+  uint32 gid = 7;
+  // User/group name, falling back to the numeric id when unresolvable.
+  string owner = 8;
+  string group = 9;
+  bool is_symlink = 10;
+  // Raw readlink() value, unresolved. Set only when is_symlink is true.
+  optional string symlink_target = 11;
+  // stat() through the link; absent when is_symlink is false or the link is
+  // broken.
+  optional FileKind target_kind = 12;
+}
+
+message ListDirectoryRequest {
+  // Absolute path.
+  string path = 1;
+  // Default false: dotfiles are omitted.
+  bool include_hidden = 2;
+}
+
+message ListDirectoryResponse {
+  // What the daemon actually listed (equals the request path).
+  string path = 1;
+  // Directories first, then by name, case-insensitively.
+  repeated FileEntry entries = 2;
+  // True when the entry cap was hit — entries is a prefix, not the whole
+  // directory.
+  bool truncated = 3;
+  uint64 total_entries = 4;
+}
+
+message StatPathRequest {
+  string path = 1;
+}
+
+message StatPathResponse {
+  FileEntry entry = 1;
+  string parent = 2;
+}
+
+message CreateDirectoryRequest {
+  string path = 1;
+  bool parents = 2;
+}
+
+message CreateDirectoryResponse {
+  FileEntry entry = 1;
+}
+
+message MovePathRequest {
+  string source = 1;
+  string destination = 2;
+  bool overwrite = 3;
+}
+
+message MovePathResponse {
+  FileEntry entry = 1;
+}
+
+message CopyPathRequest {
+  string source = 1;
+  string destination = 2;
+  bool overwrite = 3;
+}
+
+message CopyPathResponse {
+  FileEntry entry = 1;
+  uint64 bytes_copied = 2;
+  uint32 files_copied = 3;
+}
+
+message DeletePathsRequest {
+  repeated string paths = 1;
+  bool recursive = 2;
+}
+
+// Best-effort per path, like backup pruning: one refusal does not abort the
+// rest.
+message DeletePathsResponse {
+  uint32 deleted = 1;
+  repeated DeleteFailure failures = 2;
+}
+
+message DeleteFailure {
+  string path = 1;
+  string error = 2;
+}
+
+enum ArchiveFormat {
+  ARCHIVE_FORMAT_UNSPECIFIED = 0;
+  ARCHIVE_FORMAT_TAR_GZ = 1;
+  // Reserved: answers UNIMPLEMENTED until a zip encoder is worth the
+  // dependency (see docs/files.md).
+  ARCHIVE_FORMAT_ZIP = 2;
+}
+
+message CreateArchiveRequest {
+  // Names are resolved relative to this directory.
+  string directory = 1;
+  // Basenames, never paths.
+  repeated string names = 2;
+  // Absolute destination for the archive file.
+  string archive_path = 3;
+  ArchiveFormat format = 4;
+}
+
+message CreateArchiveResponse {
+  FileEntry entry = 1;
+  uint64 bytes = 2;
+  uint32 files = 3;
+}
+
+message ReadFileRequest {
+  string path = 1;
+  // Resume from this byte offset; 0 = from the start.
+  uint64 offset = 2;
+}
+
+message FileChunk {
+  bytes data = 1;
+  // First message only: what the daemon is about to send, so the caller can
+  // set Content-Length and draw a real progress bar.
+  optional uint64 total_size = 2;
+}
+
+message WriteFileHeader {
+  string directory = 1;
+  // Basename; the daemon joins it to directory itself — a name containing a
+  // path separator is rejected.
+  string name = 2;
+  bool overwrite = 3;
+  // Default 0644.
+  optional uint32 mode = 4;
+  optional uint64 expected_size = 5;
+}
+
+message WriteFileRequest {
+  // First message only.
+  optional WriteFileHeader header = 1;
+  bytes data = 2;
+}
+
+message WriteFileResponse {
+  FileEntry entry = 1;
+  uint64 bytes_written = 2;
+}
+
+message SetPathAttributesRequest {
+  string path = 1;
+  // st_mode & 0o7777; unset leaves the mode untouched.
+  optional uint32 mode = 2;
+  // User/group name from ListSystemIdentities, not a uid/gid: the caller is
+  // a UI dropdown, not a script. Unset leaves that half of ownership
+  // untouched — chown semantics, not "reset to root".
+  optional string owner = 3;
+  optional string group = 4;
+}
+
+message SetPathAttributesResponse {
+  FileEntry entry = 1;
+}
+
+message ListSystemIdentitiesRequest {}
+
+message SystemUser {
+  string name = 1;
+  uint32 uid = 2;
+  string home = 3;
+}
+
+message SystemGroup {
+  string name = 1;
+  uint32 gid = 2;
+}
+
+message ListSystemIdentitiesResponse {
+  // Ordered by uid/gid ascending.
+  repeated SystemUser users = 1;
+  repeated SystemGroup groups = 2;
+}

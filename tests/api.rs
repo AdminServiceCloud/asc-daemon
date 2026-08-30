@@ -302,6 +302,160 @@ mod rest {
     }
 }
 
+/// DMN-070: the file API's REST content route, over the same bearer-token
+/// TCP transport the rest of this file exercises.
+mod files {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn raw(
+        state: &Arc<ApiState>,
+        method: &str,
+        uri: &str,
+        token: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Vec<u8>) {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(body))
+            .unwrap();
+        let response = api::router(Arc::clone(state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    async fn json(
+        state: &Arc<ApiState>,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = api::router(Arc::clone(state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, json)
+    }
+
+    /// `PUT` then `GET` on `/v1/files/content` round-trip the same bytes, and
+    /// a successful upload leaves no `.asc-upload-*.part` staging file behind
+    /// in the target directory.
+    #[tokio::test]
+    async fn upload_then_download_round_trips_bytes() {
+        let (state, ws) = test_state();
+        let dir = ws.path().join("uploads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.display().to_string();
+
+        let (status, _) = raw(
+            &state,
+            "PUT",
+            &format!("/v1/files/content?path={dir_str}&name=hello.txt"),
+            TOKEN,
+            b"hello world".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("hello.txt")],
+            "no leftover .part staging file, got {entries:?}"
+        );
+
+        let (status, bytes) = raw(
+            &state,
+            "GET",
+            &format!("/v1/files/content?path={dir_str}/hello.txt"),
+            TOKEN,
+            vec![],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn uploading_over_an_existing_file_without_overwrite_is_refused() {
+        let (state, ws) = test_state();
+        let dir = ws.path().join("uploads");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("taken.txt"), b"existing").unwrap();
+        let dir_str = dir.display().to_string();
+
+        let (status, _) = raw(
+            &state,
+            "PUT",
+            &format!("/v1/files/content?path={dir_str}&name=taken.txt"),
+            TOKEN,
+            b"new".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(dir.join("taken.txt")).unwrap(), b"existing");
+
+        let (status, _) = raw(
+            &state,
+            "PUT",
+            &format!("/v1/files/content?path={dir_str}&name=taken.txt&overwrite=true"),
+            TOKEN,
+            b"new".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(std::fs::read(dir.join("taken.txt")).unwrap(), b"new");
+    }
+
+    /// Files are not primary-only, unlike `/v1/token/*` — a short-lived
+    /// access token can list and read them like any other route.
+    #[tokio::test]
+    async fn an_access_token_may_list_files() {
+        let (state, ws) = test_state();
+        std::fs::write(ws.path().join("note.txt"), b"hi").unwrap();
+        let (access, _) = state.tokens.issue_access(None, "test");
+
+        let (status, body) = json(
+            &state,
+            &format!("/v1/files?path={}", ws.path().display()),
+            &access,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<_> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"note.txt"), "got: {names:?}");
+    }
+}
+
 mod grpc {
     use super::*;
     use pb::app_service_client::AppServiceClient;

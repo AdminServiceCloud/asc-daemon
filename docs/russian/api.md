@@ -74,6 +74,14 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `DELETE /v1/token/access` | `TokenService.RevokeAccessTokens` | Гасит все живые временные токены, `{"revoked": n}` (только по основному) |
 | `POST /v1/token/rotate {"grace_secs"?}` | `TokenService.RotatePrimaryToken` | Замена основного токена с отзывом всех временных; возвращает новый токен (только по основному) |
 | `POST /v1/token/rotate/commit` | `TokenService.CommitPrimaryTokenRotation` | Подтверждение, что новый основной токен сохранён, и закрытие окна; отклоняется, если предъявлен заменённый токен |
+| `GET /v1/files?path=&hidden=` | `FileService.ListDirectory` | Список каталога от `/`; подробности — [📁 files](files.md) |
+| `GET /v1/files/stat?path=` | `FileService.StatPath` | Метаданные одного пути |
+| `POST /v1/files/directory` | `FileService.CreateDirectory` | Создание каталога |
+| `POST /v1/files/move` · `/copy` · `/delete` · `/archive` | `FileService.MovePath` / `CopyPath` / `DeletePaths` / `CreateArchive` | Перемещение, копирование, удаление, архивирование |
+| `GET /v1/files/content?path=&offset=` | `FileService.ReadFile` (стрим) | Скачивание файла |
+| `PUT /v1/files/content?path=&name=&overwrite=` | `FileService.WriteFile` (стрим) | Загрузка файла |
+| `POST /v1/files/attributes` | `FileService.SetPathAttributes` | Режим и/или владелец/группа по имени |
+| `GET /v1/files/identities` | `FileService.ListSystemIdentities` | Локальные пользователи и группы |
 
 ### 📜 Кодогенерация
 
@@ -82,4 +90,4 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 ## 🔗 Связанные задачи
 
-DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

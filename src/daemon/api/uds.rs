@@ -139,6 +139,7 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
 
     #[test]
     fn sudo_hint_parses_headers() {
@@ -149,5 +150,48 @@ mod tests {
         assert_eq!(sudo_hint(&headers), (Some(1000), Some("alice".into())));
         headers.insert(SUDO_UID_HEADER, "not-a-uid".parse().unwrap());
         assert_eq!(sudo_hint(&headers).0, None);
+    }
+
+    /// DMN-070 regression for the F1 hazard: this socket is world-connectable
+    /// (0666) and normally safe because every operation is scoped by the
+    /// peer's own uid. `FileService` reaches the whole filesystem as root, so
+    /// it must refuse a non-root peer outright rather than inherit that rule.
+    /// `ConnectInfo<PeerCred>` is stamped by hand — the same slot the real
+    /// accept loop fills — so the test does not depend on which uid actually
+    /// runs `cargo test`.
+    #[tokio::test]
+    async fn file_routes_refuse_a_non_root_peer_but_allow_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::daemon::config::Config::default();
+        config.daemon.apps_dir = dir.path().join("apps");
+        config.daemon.data_dir = dir.path().join("data");
+        let state = ApiState::new(config, "primary-token".into());
+
+        let call = |uid: u32| {
+            let state = Arc::clone(&state);
+            async move {
+                router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri("/v1/files?path=/")
+                            .extension(ConnectInfo(PeerCred { uid: Some(uid) }))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let non_root = call(1000).await;
+        assert_eq!(
+            non_root.status(),
+            StatusCode::FORBIDDEN,
+            "a non-root peer must not reach the file API"
+        );
+
+        let root = call(0).await;
+        assert_eq!(root.status(), StatusCode::OK, "root peer may use it");
     }
 }

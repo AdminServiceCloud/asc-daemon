@@ -8,6 +8,7 @@ pub mod client;
 pub mod config;
 pub mod console;
 pub mod docker;
+pub mod files;
 pub mod http;
 pub mod i18n;
 pub mod logging;

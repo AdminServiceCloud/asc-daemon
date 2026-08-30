@@ -3905,6 +3905,7 @@ mod tests {
                 },
             ],
             network: vec![],
+            disk_io: vec![],
             gpus: vec![],
             uptime_secs: 0,
         };

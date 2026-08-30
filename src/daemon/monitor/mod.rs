@@ -4,30 +4,52 @@
 //! platform push stream are follow-up increments (see docs/monitoring.md).
 
 pub mod gpu;
+pub mod network;
 pub mod system;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::sync::broadcast;
+
 pub use gpu::GpuMetrics;
+pub use network::{InterfaceAddress, NetworkInterface};
 pub use system::SystemMetrics;
 
 use crate::daemon::config::MonitorConfig;
 
-/// Ring buffer of recent system samples, shared between the sampler task and
-/// the API. Lock scope stays tiny: clone-out on read, push on write.
+/// Broadcast capacity: a handful of samples is enough slack for a subscriber
+/// briefly busy encoding a websocket frame; falling further behind than this
+/// is reported as `Lagged` and the subscriber just skips ahead rather than
+/// blocking the sampler.
+const BROADCAST_CAPACITY: usize = 16;
+
+/// Ring buffer of recent system samples plus a live broadcast, shared
+/// between the sampler task and the API. Lock scope stays tiny: clone-out on
+/// read, push on write. `StreamSystemMetrics` (DMN-072) subscribes to the
+/// broadcast side instead of polling `latest()`.
 pub struct Monitor {
     samples: RwLock<VecDeque<SystemMetrics>>,
     capacity: usize,
+    live: broadcast::Sender<SystemMetrics>,
 }
 
 impl Monitor {
     pub fn new(config: &MonitorConfig) -> Arc<Self> {
+        let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
             samples: RwLock::new(VecDeque::with_capacity(config.history_samples)),
             capacity: config.history_samples.max(1),
+            live,
         })
+    }
+
+    /// Subscribe to every sample as it is taken. The receiver reports
+    /// `Lagged` if it falls more than [`BROADCAST_CAPACITY`] samples behind;
+    /// callers should treat that as "skip ahead", not as an error to bubble up.
+    pub fn subscribe(&self) -> broadcast::Receiver<SystemMetrics> {
+        self.live.subscribe()
     }
 
     /// Spawn the background sampler; it stops when the daemon shuts down
@@ -36,10 +58,14 @@ impl Monitor {
     /// second sample onward.
     pub fn start_sampler(self: &Arc<Self>, config: &MonitorConfig) {
         let monitor = Arc::clone(self);
-        let interval = Duration::from_secs(config.interval_secs.max(1));
+        let interval = Duration::from_millis(config.interval_ms());
         tokio::spawn(async move {
             let mut collector = system::Collector::new();
             let mut ticker = tokio::time::interval(interval);
+            // A 100ms sampler that falls behind (a slow blocking sample, a
+            // busy host) should not fire a burst of catch-up ticks; it
+            // should just resume at the normal cadence.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
                 // procfs reads and statvfs are microseconds, but GPU
@@ -74,6 +100,9 @@ impl Monitor {
     }
 
     pub fn push(&self, sample: SystemMetrics) {
+        // No receivers is the common case between panel opens; `send`
+        // returning an error just means "nobody is listening right now".
+        let _ = self.live.send(sample.clone());
         let mut samples = self.samples.write().expect("metrics lock poisoned");
         if samples.len() == self.capacity {
             samples.pop_front();
@@ -149,6 +178,7 @@ mod tests {
             },
             disks: Vec::new(),
             network: Vec::new(),
+            disk_io: Vec::new(),
             gpus: Vec::new(),
             uptime_secs: ts as u64,
         }
@@ -156,7 +186,8 @@ mod tests {
 
     fn monitor(capacity: usize) -> Arc<Monitor> {
         Monitor::new(&MonitorConfig {
-            interval_secs: 10,
+            interval_ms: Some(10_000),
+            interval_secs: None,
             history_samples: capacity,
         })
     }
@@ -187,5 +218,21 @@ mod tests {
     fn empty_monitor_has_no_latest() {
         assert!(monitor(3).latest().is_none());
         assert!(monitor(3).history(0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscribers_receive_pushed_samples() {
+        let m = monitor(3);
+        let mut rx = m.subscribe();
+        m.push(sample(1));
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.timestamp, 1);
+    }
+
+    #[tokio::test]
+    async fn push_with_no_subscribers_does_not_panic() {
+        let m = monitor(3);
+        m.push(sample(1));
+        assert_eq!(m.latest().unwrap().timestamp, 1);
     }
 }

@@ -22,6 +22,8 @@ pub struct SystemMetrics {
     pub memory: MemoryMetrics,
     pub disks: Vec<DiskMetrics>,
     pub network: Vec<NetworkMetrics>,
+    /// Per-device disk I/O; empty when `/proc/diskstats` cannot be read.
+    pub disk_io: Vec<DiskIoMetrics>,
     /// Every GPU the machine exposes; empty on the usual headless server.
     pub gpus: Vec<GpuMetrics>,
     pub uptime_secs: u64,
@@ -72,6 +74,20 @@ pub struct NetworkMetrics {
     pub tx_bytes_per_sec: Option<f64>,
 }
 
+/// One block device from `/proc/diskstats`. Byte counters are cumulative
+/// since boot (sectors * 512); per-second rates are deltas against the
+/// previous sample, `None` on the first one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskIoMetrics {
+    pub device: String,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub read_bytes_per_sec: Option<f64>,
+    pub write_bytes_per_sec: Option<f64>,
+    /// Milliseconds spent doing I/O (field 13, cumulative since boot).
+    pub io_ms: u64,
+}
+
 /// Aggregate CPU time counters from `/proc/stat` (USER_HZ ticks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuTimes {
@@ -98,10 +114,22 @@ pub struct Collector {
     prev_cpu: Option<CpuTimes>,
     /// (unix seconds, per-interface cumulative counters) of the last sample.
     prev_net: Option<(i64, Vec<NetworkMetrics>)>,
+    /// (unix seconds, per-device cumulative counters) of the last sample.
+    prev_disk_io: Option<(i64, Vec<DiskIoMetrics>)>,
     /// Remembers which GPU sources this machine has, so a server without one
     /// never spawns `nvidia-smi` twice.
     gpus: GpuDetector,
+    /// Millisecond clock and last reading of the GPU poll. `nvidia-smi` is a
+    /// subprocess spawn — sampling it on every 100ms tick would pile up
+    /// blocking work, so it is refreshed on its own slower cadence and the
+    /// last known reading is repeated in between.
+    last_gpu_poll_ms: Option<i64>,
+    cached_gpus: Vec<GpuMetrics>,
 }
+
+/// Minimum gap between two GPU polls. Fast enough that a graph feels live,
+/// slow enough that `nvidia-smi` never overlaps itself under a 100ms sampler.
+const GPU_POLL_MIN_INTERVAL_MS: i64 = 1000;
 
 impl Collector {
     pub fn new() -> Self {
@@ -116,6 +144,7 @@ impl Collector {
     /// this from a blocking task rather than straight from the sampler.
     pub fn sample(&mut self) -> Result<SystemMetrics> {
         let timestamp = unix_now();
+        let timestamp_ms = unix_now_ms();
 
         let stat = fs::read_to_string("/proc/stat").context("cannot read /proc/stat")?;
         let cpu_times = parse_cpu_times(&stat).context("cannot parse /proc/stat")?;
@@ -136,8 +165,8 @@ impl Collector {
             .ok()
             .map(|raw| parse_net_dev(&raw))
             .unwrap_or_default();
-        if let Some((prev_ts, prev)) = &self.prev_net {
-            let elapsed = (timestamp - prev_ts) as f64;
+        if let Some((prev_ts_ms, prev)) = &self.prev_net {
+            let elapsed = (timestamp_ms - prev_ts_ms) as f64 / 1000.0;
             if elapsed > 0.0 {
                 for iface in &mut network {
                     if let Some(p) = prev.iter().find(|p| p.interface == iface.interface) {
@@ -149,7 +178,37 @@ impl Collector {
                 }
             }
         }
-        self.prev_net = Some((timestamp, network.clone()));
+        self.prev_net = Some((timestamp_ms, network.clone()));
+
+        let mut disk_io = fs::read_to_string("/proc/diskstats")
+            .ok()
+            .map(|raw| parse_diskstats(&raw))
+            .unwrap_or_default();
+        if let Some((prev_ts_ms, prev)) = &self.prev_disk_io {
+            let elapsed = (timestamp_ms - prev_ts_ms) as f64 / 1000.0;
+            if elapsed > 0.0 {
+                for device in &mut disk_io {
+                    if let Some(p) = prev.iter().find(|p| p.device == device.device) {
+                        device.read_bytes_per_sec =
+                            Some(device.read_bytes.saturating_sub(p.read_bytes) as f64 / elapsed);
+                        device.write_bytes_per_sec =
+                            Some(device.write_bytes.saturating_sub(p.write_bytes) as f64 / elapsed);
+                    }
+                }
+            }
+        }
+        self.prev_disk_io = Some((timestamp_ms, disk_io.clone()));
+
+        // nvidia-smi is a subprocess spawn; polled on its own slower cadence
+        // (see GPU_POLL_MIN_INTERVAL_MS) so a 100ms sampler never piles up
+        // blocking work waiting on it. The reading in between is repeated.
+        let due = self
+            .last_gpu_poll_ms
+            .is_none_or(|last| timestamp_ms - last >= GPU_POLL_MIN_INTERVAL_MS);
+        if due {
+            self.cached_gpus = self.gpus.collect();
+            self.last_gpu_poll_ms = Some(timestamp_ms);
+        }
 
         let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
         let uptime_secs = parse_uptime(&uptime).unwrap_or(0);
@@ -166,7 +225,8 @@ impl Collector {
             memory,
             disks: collect_disks(),
             network,
-            gpus: self.gpus.collect(),
+            disk_io,
+            gpus: self.cached_gpus.clone(),
             uptime_secs,
         })
     }
@@ -185,6 +245,16 @@ fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Millisecond clock for rate deltas. A 100ms sampler needs sub-second
+/// resolution — `unix_now()` alone would see the same second across several
+/// consecutive samples and report a zero elapsed time.
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
@@ -278,6 +348,68 @@ pub fn parse_net_dev(raw: &str) -> Vec<NetworkMetrics> {
             })
         })
         .collect()
+}
+
+/// Parse `/proc/diskstats`, keeping whole block devices and skipping loop
+/// devices and partitions of a disk already present in the file (`sda1` when
+/// `sda` is listed, `nvme0n1p1` when `nvme0n1` is listed).
+///
+/// Fields (space-separated, 1-indexed per the kernel docs): 1 major,
+/// 2 minor, 3 device, 4 reads completed, 5 reads merged, 6 sectors read,
+/// 7 ms reading, 8 writes completed, 9 writes merged, 10 sectors written,
+/// 11 ms writing, 12 I/Os in progress, 13 ms doing I/O, 14 weighted ms.
+pub fn parse_diskstats(raw: &str) -> Vec<DiskIoMetrics> {
+    const SECTOR_BYTES: u64 = 512;
+    let rows: Vec<(&str, u64, u64, u64)> = raw
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 14 {
+                return None;
+            }
+            let name = fields[2];
+            let sectors_read: u64 = fields[5].parse().ok()?;
+            let sectors_written: u64 = fields[9].parse().ok()?;
+            let io_ms: u64 = fields[12].parse().ok()?;
+            Some((name, sectors_read, sectors_written, io_ms))
+        })
+        .collect();
+    let names: std::collections::HashSet<&str> = rows.iter().map(|r| r.0).collect();
+    rows.into_iter()
+        .filter(|(name, ..)| !is_virtual_or_partition(name, &names))
+        .map(
+            |(name, sectors_read, sectors_written, io_ms)| DiskIoMetrics {
+                device: name.to_string(),
+                read_bytes: sectors_read * SECTOR_BYTES,
+                write_bytes: sectors_written * SECTOR_BYTES,
+                read_bytes_per_sec: None,
+                write_bytes_per_sec: None,
+                io_ms,
+            },
+        )
+        .collect()
+}
+
+/// True for loopback/ramdisk devices and for a device name that is a
+/// partition of another whole disk already in `all` — `sda1` when `sda` is
+/// present, `nvme0n1p1` when `nvme0n1` is present.
+fn is_virtual_or_partition(name: &str, all: &std::collections::HashSet<&str>) -> bool {
+    if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") {
+        return true;
+    }
+    // nvme0n1p1 / mmcblk0p1 -> base is everything before the trailing "pN".
+    if let Some(pos) = name.rfind('p') {
+        let suffix = &name[pos + 1..];
+        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            let base = &name[..pos];
+            if (base.starts_with("nvme") || base.starts_with("mmcblk")) && all.contains(base) {
+                return true;
+            }
+        }
+    }
+    // sda1 / vdb2 / xvda1 -> base is the name with trailing digits stripped.
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    base != name && all.contains(base)
 }
 
 /// Whole seconds of `/proc/uptime`.
@@ -438,6 +570,33 @@ Inter-|   Receive                                                |  Transmit
         assert_eq!(eth.rx_errors, 2);
         assert_eq!(eth.tx_bytes, 3_000_000);
         assert_eq!(eth.tx_errors, 3);
+    }
+
+    #[test]
+    fn diskstats_skips_partitions_and_loop_devices() {
+        let raw = "\
+   8       0 sda 1000 0 200000 500 2000 0 400000 900 0 1200 1400
+   8       1 sda1 900 0 180000 400 1800 0 380000 800 0 1100 1200
+ 259       0 nvme0n1 3000 0 600000 700 4000 0 800000 1100 0 1700 1900
+ 259       1 nvme0n1p1 2900 0 580000 650 3900 0 780000 1050 0 1650 1850
+   7       0 loop0 10 0 200 5 0 0 0 0 0 5 5
+";
+        let disks = parse_diskstats(raw);
+        let names: Vec<&str> = disks.iter().map(|d| d.device.as_str()).collect();
+        assert_eq!(names, vec!["sda", "nvme0n1"]);
+        let sda = disks.iter().find(|d| d.device == "sda").unwrap();
+        assert_eq!(sda.read_bytes, 200_000 * 512);
+        assert_eq!(sda.write_bytes, 400_000 * 512);
+        assert_eq!(sda.io_ms, 1200);
+        assert!(sda.read_bytes_per_sec.is_none());
+    }
+
+    #[test]
+    fn diskstats_keeps_standalone_device_without_partitions() {
+        let raw = "   8       0 md0 100 0 20000 50 200 0 40000 90 0 120 140\n";
+        let disks = parse_diskstats(raw);
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].device, "md0");
     }
 
     #[test]

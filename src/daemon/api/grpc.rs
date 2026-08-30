@@ -206,11 +206,46 @@ fn metrics_to_pb(m: &crate::daemon::monitor::SystemMetrics) -> pb::SystemMetrics
                 power_watts: g.power_watts,
             })
             .collect(),
+        disk_io: m
+            .disk_io
+            .iter()
+            .map(|d| pb::DiskIoMetrics {
+                device: d.device.clone(),
+                read_bytes: d.read_bytes,
+                write_bytes: d.write_bytes,
+                read_bytes_per_sec: d.read_bytes_per_sec,
+                write_bytes_per_sec: d.write_bytes_per_sec,
+                io_ms: d.io_ms,
+            })
+            .collect(),
+    }
+}
+
+fn interface_to_pb(i: &crate::daemon::monitor::NetworkInterface) -> pb::NetworkInterface {
+    pb::NetworkInterface {
+        name: i.name.clone(),
+        mac: i.mac.clone(),
+        mtu: i.mtu,
+        state: i.state.clone(),
+        is_loopback: i.is_loopback,
+        addresses: i
+            .addresses
+            .iter()
+            .map(|a| pb::InterfaceAddress {
+                address: a.address.clone(),
+                prefix_len: a.prefix_len,
+                family: a.family.clone(),
+                scope: a.scope.clone(),
+            })
+            .collect(),
     }
 }
 
 #[tonic::async_trait]
 impl MonitorService for Grpc {
+    type StreamSystemMetricsStream =
+        Pin<Box<dyn Stream<Item = Result<pb::SystemMetrics, Status>> + Send>>;
+
     async fn get_system_metrics(
         &self,
         _request: Request<pb::GetSystemMetricsRequest>,
@@ -233,6 +268,39 @@ impl MonitorService for Grpc {
         let samples = self.0.monitor.history(limit);
         Ok(Response::new(pb::GetMetricsHistoryResponse {
             samples: samples.iter().map(metrics_to_pb).collect(),
+        }))
+    }
+
+    async fn stream_system_metrics(
+        &self,
+        _request: Request<pb::StreamSystemMetricsRequest>,
+    ) -> Result<Response<Self::StreamSystemMetricsStream>, Status> {
+        let rx = self.0.monitor.subscribe();
+        // unfold rather than a broadcast-to-Stream adapter crate: a `Lagged`
+        // receiver is not a stream error here, it is "skip ahead and keep
+        // going" — the panel wants the newest numbers, not a gap-free log.
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(sample) => return Some((Ok(metrics_to_pb(&sample)), rx)),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn list_network_interfaces(
+        &self,
+        _request: Request<pb::ListNetworkInterfacesRequest>,
+    ) -> Result<Response<pb::ListNetworkInterfacesResponse>, Status> {
+        let interfaces =
+            tokio::task::spawn_blocking(crate::daemon::monitor::network::list_interfaces)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+        Ok(Response::new(pb::ListNetworkInterfacesResponse {
+            interfaces: interfaces.iter().map(interface_to_pb).collect(),
         }))
     }
 }

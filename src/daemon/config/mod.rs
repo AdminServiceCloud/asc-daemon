@@ -106,21 +106,41 @@ pub enum UserInstall {
     Docker,
 }
 
-/// `[monitor]` — system metrics sampling (DMN-006).
+/// `[monitor]` — system metrics sampling (DMN-006, DMN-072).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorConfig {
-    /// Seconds between samples.
-    pub interval_secs: u64,
-    /// Ring buffer depth (360 × 10 s = one hour of history in memory).
+    /// Milliseconds between samples. `None` defers to `interval_secs`, then
+    /// to the 100ms default — see [`MonitorConfig::interval_ms`].
+    pub interval_ms: Option<u64>,
+    /// Deprecated: seconds between samples, from configs written before the
+    /// switch to millisecond sampling (DMN-072). Ignored once `interval_ms`
+    /// is set explicitly.
+    pub interval_secs: Option<u64>,
+    /// Ring buffer depth. At the default 100ms cadence, 300 samples is 30s
+    /// of in-memory history; the sampler also writes a decimated history
+    /// (see `Monitor::start_sampler`) so short-term detail does not cost a
+    /// hour-long buffer at 10 samples/second.
     pub history_samples: usize,
+}
+
+impl MonitorConfig {
+    /// The interval actually used by the sampler: an explicit `interval_ms`
+    /// wins, then a legacy `interval_secs` (converted), then 100ms.
+    pub fn interval_ms(&self) -> u64 {
+        self.interval_ms
+            .or_else(|| self.interval_secs.map(|secs| secs.saturating_mul(1000)))
+            .unwrap_or(100)
+            .max(10)
+    }
 }
 
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
-            interval_secs: 10,
-            history_samples: 360,
+            interval_ms: None,
+            interval_secs: None,
+            history_samples: 300,
         }
     }
 }
@@ -484,6 +504,31 @@ impl Config {
 mod tests {
     use super::*;
     use crate::daemon::i18n::Lang;
+
+    #[test]
+    fn monitor_interval_defaults_to_100ms() {
+        assert_eq!(MonitorConfig::default().interval_ms(), 100);
+    }
+
+    #[test]
+    fn monitor_interval_honours_legacy_seconds() {
+        let cfg = MonitorConfig {
+            interval_ms: None,
+            interval_secs: Some(10),
+            history_samples: 300,
+        };
+        assert_eq!(cfg.interval_ms(), 10_000);
+    }
+
+    #[test]
+    fn monitor_interval_ms_wins_over_legacy_seconds() {
+        let cfg = MonitorConfig {
+            interval_ms: Some(250),
+            interval_secs: Some(10),
+            history_samples: 300,
+        };
+        assert_eq!(cfg.interval_ms(), 250);
+    }
 
     #[test]
     fn missing_file_yields_defaults() {

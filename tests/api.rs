@@ -91,6 +91,14 @@ fn fake_metrics(timestamp: i64) -> asc_daemon::daemon::monitor::SystemMetrics {
             temperature_c: Some(52.0),
             power_watts: Some(121.45),
         }],
+        disk_io: vec![DiskIoMetrics {
+            device: "sda".into(),
+            read_bytes: 500_000,
+            write_bytes: 300_000,
+            read_bytes_per_sec: Some(1_000.0),
+            write_bytes_per_sec: Some(500.0),
+            io_ms: 42,
+        }],
         uptime_secs: 3600,
     }
 }
@@ -236,6 +244,8 @@ mod rest {
         assert_eq!(m["gpus"][0]["vendor"], "nvidia");
         assert_eq!(m["gpus"][0]["utilization_percent"], 37.0);
         assert_eq!(m["gpus"][0]["memory_used"], 2_u64 * 1024 * 1024 * 1024);
+        assert_eq!(m["disk_io"][0]["device"], "sda");
+        assert_eq!(m["disk_io"][0]["read_bytes_per_sec"], 1_000.0);
 
         // History honours the limit and returns oldest-first.
         let (status, body) = call(&state, "GET", "/v1/metrics/history", Some(TOKEN), None).await;
@@ -253,6 +263,15 @@ mod rest {
         .await;
         assert_eq!(body["samples"].as_array().unwrap().len(), 1);
         assert_eq!(body["samples"][0]["timestamp"], 110);
+    }
+
+    #[tokio::test]
+    async fn network_interfaces_rest() {
+        let (state, _ws) = test_state();
+        let (status, body) = call(&state, "GET", "/v1/network/interfaces", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let interfaces = body["interfaces"].as_array().unwrap();
+        assert!(interfaces.iter().any(|i| i["is_loopback"] == true));
     }
 
     #[tokio::test]
@@ -586,6 +605,8 @@ mod grpc {
         assert_eq!(metrics.disks[0].mount, "/");
         assert_eq!(metrics.gpus[0].vendor, "nvidia");
         assert_eq!(metrics.gpus[0].temperature_c, Some(52.0));
+        assert_eq!(metrics.disk_io[0].device, "sda");
+        assert_eq!(metrics.disk_io[0].io_ms, 42);
 
         let history = client
             .get_metrics_history(with_auth(tonic::Request::new(
@@ -595,6 +616,31 @@ mod grpc {
             .unwrap()
             .into_inner();
         assert_eq!(history.samples.len(), 1);
+
+        // The stream (DMN-072) delivers samples pushed after subscribing —
+        // it is a live feed off the broadcast channel, not a replay of the
+        // ring buffer.
+        let mut stream = client
+            .stream_system_metrics(with_auth(tonic::Request::new(
+                pb::StreamSystemMetricsRequest {},
+            )))
+            .await
+            .unwrap()
+            .into_inner();
+        monitor.push(fake_metrics(99));
+        let streamed = stream.message().await.unwrap().unwrap();
+        assert_eq!(streamed.timestamp, 99);
+
+        // The machine running the test always has a loopback interface.
+        let interfaces = client
+            .list_network_interfaces(with_auth(tonic::Request::new(
+                pb::ListNetworkInterfacesRequest {},
+            )))
+            .await
+            .unwrap()
+            .into_inner()
+            .interfaces;
+        assert!(interfaces.iter().any(|i| i.is_loopback));
     }
 
     #[tokio::test]

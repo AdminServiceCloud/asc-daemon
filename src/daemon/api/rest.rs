@@ -27,6 +27,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/system/reboot", post(reboot_system))
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
+        .route("/v1/network/interfaces", get(network_interfaces))
         .route("/v1/apps", get(list_apps).post(install_app))
         // Apps-wide reports (DMN-053): the per-app routes below answer for
         // one app, these for every app the caller may see — the figures the
@@ -339,7 +340,42 @@ fn metrics_json(m: &crate::daemon::monitor::SystemMetrics) -> serde_json::Value 
             "temperature_c": g.temperature_c,
             "power_watts": g.power_watts,
         })).collect::<Vec<_>>(),
+        "disk_io": m.disk_io.iter().map(|d| serde_json::json!({
+            "device": d.device,
+            "read_bytes": d.read_bytes,
+            "write_bytes": d.write_bytes,
+            "read_bytes_per_sec": d.read_bytes_per_sec,
+            "write_bytes_per_sec": d.write_bytes_per_sec,
+            "io_ms": d.io_ms,
+        })).collect::<Vec<_>>(),
     })
+}
+
+/// Flat JSON mirroring `NetworkInterface` in the proto.
+fn interface_json(i: &crate::daemon::monitor::NetworkInterface) -> serde_json::Value {
+    serde_json::json!({
+        "name": i.name,
+        "mac": i.mac,
+        "mtu": i.mtu,
+        "state": i.state,
+        "is_loopback": i.is_loopback,
+        "addresses": i.addresses.iter().map(|a| serde_json::json!({
+            "address": a.address,
+            "prefix_len": a.prefix_len,
+            "family": a.family,
+            "scope": a.scope,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+async fn network_interfaces() -> Response {
+    let interfaces = tokio::task::spawn_blocking(crate::daemon::monitor::network::list_interfaces)
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "interfaces": interfaces.iter().map(interface_json).collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 async fn system_metrics(State(state): State<Arc<ApiState>>) -> Response {

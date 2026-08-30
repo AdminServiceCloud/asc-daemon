@@ -23,7 +23,11 @@ Collecting system and application metrics on the node: CPU, RAM, disk, network, 
 
 ### 🧩 Implementation (current increment)
 
-- The `src/daemon/monitor/` module: `system.rs` — procfs parsers (pure functions over `&str`, covered by unit tests) and snapshot capture; `mod.rs` — `Monitor`: a background sampler in the daemon; the interval and history depth are set in `config.toml` (`[monitor] interval_secs = 10`, `history_samples = 360` — an hour of history at 10 s).
+- The `src/daemon/monitor/` module: `system.rs` — procfs parsers (pure functions over `&str`, covered by unit tests) and snapshot capture; `mod.rs` — `Monitor`: a background sampler in the daemon; the interval and history depth are set in `config.toml` (`[monitor] interval_ms = 100`, `history_samples = 300` — 30 s of in-memory history at 100 ms; the old `interval_secs` key from configs written before DMN-072 is still read, but ignored once `interval_ms` is set).
+- **Live stream (DMN-072)**: `Monitor` holds a `tokio::sync::broadcast` channel; every `push()` fans the sample out to subscribers (capacity 16 — a receiver that falls behind just skips ahead on `Lagged` rather than blocking the sampler). `MonitorService.StreamSystemMetrics` subscribes to the channel instead of being polled by `GetSystemMetrics` — the platform panel gets frames as fast as the daemon actually samples them.
+- **GPU at 100ms**: `nvidia-smi` is a process spawn — it cannot survive 10 calls a second. GPU is polled on its own timer, no more than once a second (`GPU_POLL_MIN_INTERVAL_MS`), and the last known reading is mixed into samples in between.
+- **Disk I/O**: per-device read/write from `/proc/diskstats` (sectors × 512), rates as a delta between samples. Partitions (`sda1` when `sda` is present, `nvme0n1p1` when `nvme0n1` is present) and `loop`/`ram`/`zram` devices are filtered out — only whole disks remain.
+- **Network interfaces (DMN-074)**: `MonitorService.ListNetworkInterfaces` + REST `GET /v1/network/interfaces` — separate from metrics because it needs a full inventory, loopback included (metrics deliberately drop it): name, MAC, MTU, state and every IPv4/IPv6 address per interface.
 - CPU usage is computed as the delta of two `/proc/stat` reads; network rates (bytes/s) — as counter deltas between samples.
 - **GPU metrics**: `gpu.rs` — one entry per card (vendor, model, utilisation, VRAM used/total, temperature, power). NVIDIA comes from `nvidia-smi --query-gpu=... --format=csv,noheader,nounits`: the proprietary driver exposes no kernel interface with utilisation, so the vendor tool — shipped with every driver package — is the only portable source; the call is bounded by a 5 s timeout and the child is killed if it hangs. AMD comes from the `amdgpu` sysfs interface (`gpu_busy_percent`, `mem_info_vram_total`/`_used`, `hwmon/*/temp1_input`, `power1_average`), read like every other metric here. Sources are **probed once**: a machine with no GPU never spawns a process again, and its `gpus` list simply stays empty. Because a sample may spawn a process, the daemon's sampler runs the whole collection on a blocking thread.
 - **API**: `MonitorService` in proto (`GetSystemMetrics`, `GetMetricsHistory`) + REST routes `GET /v1/metrics` and `GET /v1/metrics/history?limit=N` — both transports on top of the shared layer, like the rest of the API (DMN-005).
@@ -34,4 +38,4 @@ Collecting system and application metrics on the node: CPU, RAM, disk, network, 
 
 ## 🔗 Related tasks
 
-DMN-006, NODE-003, FE-004 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-006, DMN-072, DMN-073, DMN-074, NODE-003, NODE-016, NODE-017, FE-004, FE-052, FE-053 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

@@ -233,15 +233,24 @@ message IssueConsoleTokenResponse {
 }
 
 // System monitoring (DMN-006). The daemon samples metrics in the background
-// (config `[monitor]`, default every 10s) into an in-memory ring buffer;
-// these calls read from that buffer. REST mirror: GET /v1/metrics and
-// GET /v1/metrics/history?limit=N.
+// (config `[monitor]`, default every 100ms — DMN-072) into an in-memory ring
+// buffer; GetSystemMetrics/GetMetricsHistory read from that buffer, while
+// StreamSystemMetrics subscribes to the live sampler directly. REST mirror:
+// GET /v1/metrics, GET /v1/metrics/history?limit=N, GET /v1/network/interfaces.
 service MonitorService {
   // Latest sample. Fails with UNAVAILABLE right after startup until the
   // first sample lands (typically < 1s).
   rpc GetSystemMetrics(GetSystemMetricsRequest) returns (GetSystemMetricsResponse);
   // Recent samples, oldest first.
   rpc GetMetricsHistory(GetMetricsHistoryRequest) returns (GetMetricsHistoryResponse);
+  // Every sample as it is taken, pushed for as long as the caller keeps the
+  // stream open. Callers that fall behind the sampler's broadcast buffer
+  // just miss the oldest queued frames rather than stalling it (DMN-072).
+  rpc StreamSystemMetrics(StreamSystemMetricsRequest) returns (stream SystemMetrics);
+  // Every network interface on the machine, loopback included — an
+  // inventory, not a metric: MAC, MTU, state and every IPv4/IPv6 address
+  // (DMN-074).
+  rpc ListNetworkInterfaces(ListNetworkInterfacesRequest) returns (ListNetworkInterfacesResponse);
 }
 
 message SystemMetrics {
@@ -265,6 +274,9 @@ message SystemMetrics {
   repeated NetworkMetrics network = 14;
   // Every GPU found on the machine; empty on a server without one.
   repeated GpuMetrics gpus = 15;
+  // Per-device disk read/write throughput (DMN-073); empty when
+  // /proc/diskstats cannot be read.
+  repeated DiskIoMetrics disk_io = 16;
 }
 
 // One mounted real filesystem; sizes in bytes.
@@ -288,6 +300,21 @@ message NetworkMetrics {
   // Absent on the first sample.
   optional double rx_bytes_per_sec = 6;
   optional double tx_bytes_per_sec = 7;
+}
+
+// One block device from /proc/diskstats (whole disks only — partitions and
+// loop/ram/zram devices are filtered out). Byte counters are cumulative
+// since boot; per-second rates are deltas between samples, absent on the
+// first one.
+message DiskIoMetrics {
+  string device = 1;
+  uint64 read_bytes = 2;
+  uint64 write_bytes = 3;
+  optional double read_bytes_per_sec = 4;
+  optional double write_bytes_per_sec = 5;
+  // Milliseconds spent doing I/O, cumulative since boot (field 13 of
+  // /proc/diskstats).
+  uint64 io_ms = 6;
 }
 
 // One GPU. NVIDIA figures come from nvidia-smi, AMD ones from the amdgpu
@@ -320,6 +347,36 @@ message GetMetricsHistoryRequest {
 
 message GetMetricsHistoryResponse {
   repeated SystemMetrics samples = 1;
+}
+
+message StreamSystemMetricsRequest {}
+
+message ListNetworkInterfacesRequest {}
+
+message ListNetworkInterfacesResponse {
+  repeated NetworkInterface interfaces = 1;
+}
+
+// One network interface, loopback included. Metadata comes from
+// /sys/class/net/<name>; addresses from the kernel's interface address list.
+message NetworkInterface {
+  string name = 1;
+  // Empty for interfaces without a link-layer address (e.g. some tunnels).
+  string mac = 2;
+  uint32 mtu = 3;
+  // "up" or "down", read from /sys/class/net/<name>/operstate.
+  string state = 4;
+  bool is_loopback = 5;
+  repeated InterfaceAddress addresses = 6;
+}
+
+message InterfaceAddress {
+  string address = 1;
+  uint32 prefix_len = 2;
+  // "ipv4" or "ipv6".
+  string family = 3;
+  // "host", "link", "global" etc. — RFC 3549 scope name, when known.
+  string scope = 4;
 }
 
 // API tokens (DMN-065, DMN-066). Two kinds of bearer token guard this API:

@@ -617,9 +617,9 @@ mod grpc {
             .into_inner();
         assert_eq!(history.samples.len(), 1);
 
-        // The stream (DMN-072) delivers samples pushed after subscribing —
-        // it is a live feed off the broadcast channel, not a replay of the
-        // ring buffer.
+        // The stream (DMN-072) opens with the sample already in the buffer
+        // (DMN-075) so a panel paints without waiting out a sampling
+        // interval, then continues as a live feed off the broadcast channel.
         let mut stream = client
             .stream_system_metrics(with_auth(tonic::Request::new(
                 pb::StreamSystemMetricsRequest {},
@@ -627,6 +627,8 @@ mod grpc {
             .await
             .unwrap()
             .into_inner();
+        let buffered = stream.message().await.unwrap().unwrap();
+        assert_eq!(buffered.timestamp, 42);
         monitor.push(fake_metrics(99));
         let streamed = stream.message().await.unwrap().unwrap();
         assert_eq!(streamed.timestamp, 99);

@@ -214,6 +214,27 @@ mod tests {
         assert_eq!(stamps, vec![4, 5]);
     }
 
+    /// DMN-075 end to end: a config carrying only the obsolete key must still
+    /// drive the sampler at the 100ms default. Guards the sampler wiring, not
+    /// just `interval_ms()` — the two were connected by a fallback that made
+    /// every pre-DMN-072 install sample once per 10 seconds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_config_still_samples_ten_times_a_second() {
+        let config = MonitorConfig {
+            interval_ms: None,
+            interval_secs: Some(10),
+            history_samples: 300,
+        };
+        let monitor = Monitor::new(&config);
+        monitor.start_sampler(&config);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let taken = monitor.history(0).len();
+        assert!(
+            taken >= 4,
+            "expected several samples in 700ms, took {taken} — the legacy interval is back"
+        );
+    }
+
     #[test]
     fn empty_monitor_has_no_latest() {
         assert!(monitor(3).latest().is_none());

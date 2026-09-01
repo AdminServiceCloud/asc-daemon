@@ -275,14 +275,24 @@ impl MonitorService for Grpc {
         &self,
         _request: Request<pb::StreamSystemMetricsRequest>,
     ) -> Result<Response<Self::StreamSystemMetricsStream>, Status> {
+        // Subscribe before reading `latest()`: the other order would drop a
+        // sample taken between the two calls.
         let rx = self.0.monitor.subscribe();
+        // The sample already in the buffer is the first frame (DMN-075), so a
+        // panel that just connected paints immediately instead of waiting out
+        // a whole sampling interval. Repeating it as the next broadcast frame
+        // is harmless — the client only ever renders the newest numbers.
+        let pending = self.0.monitor.latest();
         // unfold rather than a broadcast-to-Stream adapter crate: a `Lagged`
         // receiver is not a stream error here, it is "skip ahead and keep
         // going" — the panel wants the newest numbers, not a gap-free log.
-        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        let stream = futures_util::stream::unfold((pending, rx), |(pending, mut rx)| async move {
+            if let Some(sample) = pending {
+                return Some((Ok(metrics_to_pb(&sample)), (None, rx)));
+            }
             loop {
                 match rx.recv().await {
-                    Ok(sample) => return Some((Ok(metrics_to_pb(&sample)), rx)),
+                    Ok(sample) => return Some((Ok(metrics_to_pb(&sample)), (None, rx))),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }

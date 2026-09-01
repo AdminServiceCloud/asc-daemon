@@ -106,16 +106,21 @@ pub enum UserInstall {
     Docker,
 }
 
-/// `[monitor]` — system metrics sampling (DMN-006, DMN-072).
+/// `[monitor]` — system metrics sampling (DMN-006, DMN-072, DMN-075).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorConfig {
-    /// Milliseconds between samples. `None` defers to `interval_secs`, then
-    /// to the 100ms default — see [`MonitorConfig::interval_ms`].
+    /// Milliseconds between samples. `None` means the 100ms default — see
+    /// [`MonitorConfig::interval_ms`].
     pub interval_ms: Option<u64>,
-    /// Deprecated: seconds between samples, from configs written before the
-    /// switch to millisecond sampling (DMN-072). Ignored once `interval_ms`
-    /// is set explicitly.
+    /// Deprecated and ignored (DMN-075): seconds between samples, written by
+    /// daemons that predate millisecond sampling. Every install older than
+    /// DMN-072 carries `interval_secs = 10` here, and honouring it kept those
+    /// nodes on one sample per 10 seconds long after the daemon learned to
+    /// stream — the panel looked frozen on an up-to-date daemon. Still parsed
+    /// so an old config loads, never serialized: the key leaves the file on
+    /// the next save.
+    #[serde(skip_serializing)]
     pub interval_secs: Option<u64>,
     /// Ring buffer depth. At the default 100ms cadence, 300 samples is 30s
     /// of in-memory history; the sampler also writes a decimated history
@@ -125,13 +130,11 @@ pub struct MonitorConfig {
 }
 
 impl MonitorConfig {
-    /// The interval actually used by the sampler: an explicit `interval_ms`
-    /// wins, then a legacy `interval_secs` (converted), then 100ms.
+    /// The interval actually used by the sampler: an explicit `interval_ms`,
+    /// otherwise 100ms. The legacy `interval_secs` is deliberately not part
+    /// of this decision.
     pub fn interval_ms(&self) -> u64 {
-        self.interval_ms
-            .or_else(|| self.interval_secs.map(|secs| secs.saturating_mul(1000)))
-            .unwrap_or(100)
-            .max(10)
+        self.interval_ms.unwrap_or(100).max(10)
     }
 }
 
@@ -461,8 +464,20 @@ impl Config {
 
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         match fs::read_to_string(path) {
-            Ok(raw) => toml::from_str(&raw)
-                .with_context(|| format!("invalid config file {}", path.display())),
+            Ok(raw) => {
+                let config: Self = toml::from_str(&raw)
+                    .with_context(|| format!("invalid config file {}", path.display()))?;
+                if config.monitor.interval_secs.is_some() {
+                    // Loud on purpose: this key is why an updated daemon could
+                    // still feel a sample behind (DMN-075). It stops mattering
+                    // the moment anything saves the config back.
+                    tracing::warn!(
+                        path = %path.display(),
+                        "[monitor] interval_secs is obsolete and ignored; sampling runs at interval_ms (100ms by default)"
+                    );
+                }
+                Ok(config)
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             // Pre-split installs kept config.toml root-only (0600). Regular
             // users fall back to defaults until the daemon migrates the file
@@ -511,13 +526,16 @@ mod tests {
     }
 
     #[test]
-    fn monitor_interval_honours_legacy_seconds() {
+    fn monitor_interval_ignores_legacy_seconds() {
+        // The regression this guards: an install that predates DMN-072 has
+        // `interval_secs = 10` in its config, and honouring it left the panel
+        // ten seconds behind on a daemon that can stream every 100ms.
         let cfg = MonitorConfig {
             interval_ms: None,
             interval_secs: Some(10),
             history_samples: 300,
         };
-        assert_eq!(cfg.interval_ms(), 10_000);
+        assert_eq!(cfg.interval_ms(), 100);
     }
 
     #[test]
@@ -528,6 +546,22 @@ mod tests {
             history_samples: 300,
         };
         assert_eq!(cfg.interval_ms(), 250);
+    }
+
+    #[test]
+    fn saving_drops_the_legacy_monitor_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[monitor]\ninterval_secs = 10\n").unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.monitor.interval_secs, Some(10));
+        assert_eq!(loaded.monitor.interval_ms(), 100);
+
+        loaded.save_to(&path).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("interval_secs"), "legacy key survived a save");
+        assert_eq!(Config::load_from(&path).unwrap().monitor.interval_ms(), 100);
     }
 
     #[test]

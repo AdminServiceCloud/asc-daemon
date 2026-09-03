@@ -40,6 +40,18 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 - CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`), `app attach` and `app settings` (DMN-043), and the reporting and upgrade commands (`disk`/`ports`/`stats`/`stacks`/`upgrade`, DMN-053) go through the socket whenever it exists. No socket file — the CLI works in-process as before (DMN-041: root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
 - Known limits (DMN-043): docker containers still run with the daemon's (root) privileges — a malicious manifest can request dangerous mounts, so a container policy for non-root owners is the follow-up; private-repo installs through the daemon use the daemon's git credentials, not the caller's.
 
+### 🧭 Capability discovery (DMN-076)
+
+`GetStatus` carries a `capabilities` list (empty array on a daemon that predates this
+field — that's a valid, distinguishable state, not a parsing gap): feature strings such
+as `app.upgrade`, `app.settings`, `app.ports`, `app.stats`, `console.exec`, `sources`,
+`credentials`, added to the response in the same change that ships the matching RPC. A
+caller that needs to know whether a node's daemon supports, say, an interactive shell
+session checks this list before offering the button, instead of opening a socket that
+immediately fails or catching an `UNIMPLEMENTED` after the fact. Values are only ever
+appended, never removed or renamed — an older platform build checking for a name it
+recognizes keeps working against a newer daemon.
+
 ### 🎫 Temporary console tokens
 
 - `AppService.IssueConsoleToken(app_id, session)` / `POST /v1/apps/{id}/console-token {"session": "logs"|"attach"}`.
@@ -50,7 +62,7 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 
 | REST | gRPC | Description |
 |---|---|---|
-| `GET /v1/status` | `DaemonService.GetStatus` | Version, application counters |
+| `GET /v1/status` | `DaemonService.GetStatus` | Version, application counters, capability list (DMN-076) |
 | `GET /v1/apps` | `AppService.ListApps` | Application list (scoped by the caller's context) |
 | `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Install from a registry or directly from a git URL (DMN-040); without `license_ack` a repository shipping a LICENSE fails with `409` + `license_required` payload, an ambiguous package with `409` + `ambiguous` (candidate list) — the CLI renders its consent prompt / source pick from these |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | A single application |

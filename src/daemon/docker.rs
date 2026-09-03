@@ -8,12 +8,14 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 
 use anyhow::{Result, anyhow};
 use bollard::Docker;
 use bollard::auth::DockerCredentials;
-use bollard::container::AttachContainerResults;
+use bollard::container::{AttachContainerResults, LogOutput};
 use bollard::errors::Error as BollardError;
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::moby::buildkit::v1::{StatusResponse, Vertex};
 use bollard::models::{
     BuildInfoAux, ContainerCreateBody, HostConfig, PortBinding, ResourcesUlimits, RestartPolicy,
@@ -26,6 +28,7 @@ use bollard::query_parameters::{
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWrite;
 use tracing::{debug, info, trace, warn};
 
 use crate::daemon::config::DockerConfig;
@@ -1014,6 +1017,178 @@ pub async fn attach(cfg: &DockerConfig, container: &str) -> Result<AttachContain
         .attach_container(container, Some(opts))
         .await
         .map_err(|e| friendly(cfg, e))
+}
+
+/// The resize half of an exec session, split out from [`ExecSession`] itself
+/// so calling it does not need `&ExecSession`. `ExecSession` holds trait
+/// objects (`output`/`input`) that are `Send` but not `Sync`, which makes
+/// `&ExecSession` not `Send` — and the WebSocket handler this feeds is
+/// required to be `Send` end to end (it runs on axum's `on_upgrade`, see
+/// ws.rs). `Docker` and the exec id are plain `Send + Sync` data, so a
+/// reference to just this struct carries across an `.await` without issue.
+#[derive(Clone)]
+pub struct ExecResizer {
+    docker: Docker,
+    exec_id: String,
+}
+
+impl ExecResizer {
+    /// Resizes the exec's PTY. Best-effort by design at the call sites: a
+    /// resize failing (the process already exited, e.g.) should not tear
+    /// down an otherwise-live session.
+    pub async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.docker
+            .resize_exec(
+                &self.exec_id,
+                ResizeExecOptions {
+                    width: cols,
+                    height: rows,
+                },
+            )
+            .await
+            .map_err(|e| anyhow!("resize exec: {e}"))
+    }
+}
+
+/// A live `docker exec` session (DMN-082): bidirectional stdin/stdout over a
+/// PTY, plus resize via `resizer`. Kept open for the life of the shell.
+pub struct ExecSession {
+    pub resizer: ExecResizer,
+    pub output: Pin<Box<dyn Stream<Item = std::result::Result<LogOutput, BollardError>> + Send>>,
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+}
+
+/// Shells to try when the caller does not name a command, in order.
+const SHELL_PROBE: [&str; 2] = ["/bin/bash", "/bin/sh"];
+
+/// Interactive shell inside a running container: `docker exec` with a PTY.
+/// An empty `command` probes `SHELL_PROBE` in order and uses the first one
+/// that actually runs.
+///
+/// The Engine API does **not** fail `create_exec`/`start_exec` for a missing
+/// interpreter: the runtime error ("OCI runtime exec failed: ... no such
+/// file or directory") arrives as *output* of an otherwise successfully
+/// started exec, not as an `Err` from either call — confirmed against a real
+/// `busybox` container in `tests/exec_docker.rs`, which has `/bin/sh` but
+/// not `/bin/bash`. So the probe cannot try to start each candidate
+/// interactively and catch a `Result::Err`; instead each candidate is
+/// verified first with a short-lived, non-interactive `<shell> -c "exit 0"`
+/// whose exit code is checked via `inspect_exec`, and only the winner gets
+/// the real interactive (PTY) exec.
+pub async fn exec(
+    cfg: &DockerConfig,
+    container: &str,
+    command: &[String],
+    cols: u16,
+    rows: u16,
+) -> Result<ExecSession> {
+    let docker = connect(cfg)?;
+
+    let cmd = if command.is_empty() {
+        probe_shell(&docker, cfg, container).await?
+    } else {
+        command.to_vec()
+    };
+
+    let (exec_id, output, input) = start_exec(&docker, cfg, container, &cmd, true).await?;
+    let resizer = ExecResizer { docker, exec_id };
+    // Best effort: the shell already has a default TTY size from the
+    // Engine, and a client's own resize frame corrects it a moment later
+    // regardless.
+    let _ = resizer.resize(cols, rows).await;
+    Ok(ExecSession {
+        resizer,
+        output,
+        input,
+    })
+}
+
+/// Finds the first of `SHELL_PROBE` that actually runs in `container` — see
+/// [`exec`] for why a synchronous `Err` from `start_exec` cannot be trusted
+/// to catch a missing interpreter.
+async fn probe_shell(docker: &Docker, cfg: &DockerConfig, container: &str) -> Result<Vec<String>> {
+    for shell in SHELL_PROBE {
+        let probe = vec![shell.to_string(), "-c".to_string(), "exit 0".to_string()];
+        if shell_probe_succeeds(docker, cfg, container, &probe).await {
+            return Ok(vec![shell.to_string()]);
+        }
+    }
+    Err(anyhow!(
+        "no shell found in the container (tried {})",
+        SHELL_PROBE.join(", ")
+    ))
+}
+
+/// Runs `probe` to completion (non-interactive, no PTY) and reports whether
+/// it exited 0. Any failure along the way — starting the exec, or reading
+/// its exit code back — counts as "no": the caller falls through to the
+/// next candidate rather than surfacing a probe-only failure to the user.
+async fn shell_probe_succeeds(
+    docker: &Docker,
+    cfg: &DockerConfig,
+    container: &str,
+    probe: &[String],
+) -> bool {
+    let Ok((exec_id, mut output, _input)) = start_exec(docker, cfg, container, probe, false).await
+    else {
+        return false;
+    };
+    // Docker closes this stream once the process exits; draining it is how
+    // we wait for the exit code to become available on inspect.
+    while output.next().await.is_some() {}
+    matches!(
+        docker.inspect_exec(&exec_id).await,
+        Ok(inspect) if inspect.exit_code == Some(0)
+    )
+}
+
+type ExecStreams = (
+    String,
+    Pin<Box<dyn Stream<Item = std::result::Result<LogOutput, BollardError>> + Send>>,
+    Pin<Box<dyn AsyncWrite + Send>>,
+);
+
+/// `tty = false` is used for the non-interactive `probe`; `true` for the
+/// real interactive shell the caller ends up talking to.
+async fn start_exec(
+    docker: &Docker,
+    cfg: &DockerConfig,
+    container: &str,
+    cmd: &[String],
+    tty: bool,
+) -> Result<ExecStreams> {
+    let created = docker
+        .create_exec(
+            container,
+            CreateExecOptions {
+                attach_stdin: Some(tty),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(tty),
+                cmd: Some(cmd.to_vec()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| friendly(cfg, e))?;
+
+    let started = docker
+        .start_exec(
+            &created.id,
+            Some(StartExecOptions {
+                tty,
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|e| friendly(cfg, e))?;
+
+    match started {
+        StartExecResults::Attached { output, input } => Ok((created.id, output, input)),
+        StartExecResults::Detached => Err(anyhow!(
+            "exec started detached; expected an attached session"
+        )),
+    }
 }
 
 #[cfg(test)]

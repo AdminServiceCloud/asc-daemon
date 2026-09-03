@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
@@ -44,6 +44,13 @@ struct ConsoleQuery {
     /// Initial log tail (logs sessions).
     #[serde(default)]
     tail: Option<usize>,
+    /// Initial PTY geometry (exec sessions, DMN-082). Defaults to 80x24
+    /// until the client's first resize frame — a plain fallback, not a
+    /// negotiated one, since the handshake carries no room for it.
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
 }
 
 async fn upgrade(
@@ -60,10 +67,19 @@ async fn upgrade(
             .into_response();
     };
     let tail = query.tail.unwrap_or(100);
-    ws.on_upgrade(move |socket| handle(socket, state, grant, tail))
+    let cols = query.cols.unwrap_or(80);
+    let rows = query.rows.unwrap_or(24);
+    ws.on_upgrade(move |socket| handle(socket, state, grant, tail, cols, rows))
 }
 
-async fn handle(socket: WebSocket, state: Arc<ApiState>, grant: ConsoleGrant, tail: usize) {
+async fn handle(
+    socket: WebSocket,
+    state: Arc<ApiState>,
+    grant: ConsoleGrant,
+    tail: usize,
+    cols: u16,
+    rows: u16,
+) {
     let (meta, dir) = match load_app(&state, &grant.app_id) {
         Ok(pair) => pair,
         Err(err) => {
@@ -92,6 +108,21 @@ async fn handle(socket: WebSocket, state: Arc<ApiState>, grant: ConsoleGrant, ta
                     socket,
                     &format!(
                         "attach is not supported for {} apps yet (docker only)",
+                        other.kind()
+                    ),
+                )
+                .await
+            }
+        },
+        SessionType::Exec => match &meta.runtime {
+            Runtime::Docker { container, .. } => {
+                exec_docker(socket, &state, container, &grant.command, cols, rows).await
+            }
+            other => {
+                close_with_error(
+                    socket,
+                    &format!(
+                        "exec is not supported for {} apps yet (docker only)",
                         other.kind()
                     ),
                 )
@@ -201,6 +232,79 @@ async fn attach_docker(
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
+                Some(Err(err)) => {
+                    warn!(error = %err, "console socket error");
+                    break;
+                }
+            },
+        }
+    }
+    socket.close().await.ok();
+    Ok(())
+}
+
+/// Frame tags for an exec session (DMN-082) — the one console kind where
+/// both directions are tagged, unlike LOGS/ATTACH. Values match
+/// wsapi/protocol.go's TagData/TagResize byte-for-byte: the platform relay
+/// forwards these largely unchanged rather than re-deriving them from an
+/// out-of-band signal, so a mismatch here would silently corrupt every
+/// shell session.
+const EXEC_TAG_DATA: u8 = 0x00;
+const EXEC_TAG_RESIZE: u8 = 0x01;
+
+/// Interactive shell inside a container (DMN-082): tagged binary frames in
+/// both directions — data (0x00) and, client→daemon only, resize (0x01: a
+/// 4-byte big-endian cols then rows payload). Not run through the console
+/// hub: unlike attach, an exec session is personal to whoever opened it,
+/// never fanned out to other viewers of the same app.
+async fn exec_docker(
+    mut socket: WebSocket,
+    state: &ApiState,
+    container: &str,
+    command: &[String],
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<()> {
+    let cfg = &state.config.docker;
+    let mut session = match docker::exec(cfg, container, command, cols, rows).await {
+        Ok(session) => session,
+        Err(err) => return close_with_error(socket, &format!("{err:#}")).await,
+    };
+
+    loop {
+        tokio::select! {
+            output = session.output.next() => match output {
+                Some(Ok(chunk)) => {
+                    let bytes = chunk.into_bytes();
+                    let mut frame = Vec::with_capacity(bytes.len() + 1);
+                    frame.push(EXEC_TAG_DATA);
+                    frame.extend_from_slice(&bytes);
+                    socket.send(Message::Binary(frame.into())).await?;
+                }
+                Some(Err(err)) => {
+                    socket.send(Message::Text(format!("error: {err:#}").into())).await.ok();
+                    break;
+                }
+                None => break, // the shell process exited
+            },
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(data))) if !data.is_empty() => match data[0] {
+                    EXEC_TAG_DATA => session.input.write_all(&data[1..]).await?,
+                    EXEC_TAG_RESIZE if data.len() == 5 => {
+                        let cols = u16::from_be_bytes([data[1], data[2]]);
+                        let rows = u16::from_be_bytes([data[3], data[4]]);
+                        // Best effort: a resize racing the shell's exit must
+                        // not tear down a session that is otherwise fine.
+                        let _ = session.resizer.resize(cols, rows).await;
+                    }
+                    // An unrecognized or malformed tag is dropped rather
+                    // than failing the connection — the same forward-
+                    // compatibility stance DecodeResize/Split take on the
+                    // platform side.
+                    _ => {}
+                },
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {} // empty frames and text frames carry nothing here
                 Some(Err(err)) => {
                     warn!(error = %err, "console socket error");
                     break;

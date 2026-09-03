@@ -115,6 +115,7 @@ async fn spawn_server(state: Arc<ApiState>) -> std::net::SocketAddr {
 
 mod rest {
     use super::*;
+    use asc_daemon::daemon::api::console::SessionType;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use http_body_util::BodyExt;
@@ -172,6 +173,9 @@ mod rest {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["version"], asc_daemon::VERSION);
         assert_eq!(body["apps_total"], 1);
+        // DMN-076: always present so a caller can tell "no capabilities" from
+        // "daemon predates this field" — no capability has shipped yet.
+        assert_eq!(body["capabilities"].as_array().unwrap().len(), 0);
 
         let (status, body) = call(&state, "GET", "/v1/apps", Some(TOKEN), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -318,6 +322,42 @@ mod rest {
         let grant = state.console_tokens.consume(token).unwrap();
         assert_eq!(grant.app_id, "demo");
         assert!(state.console_tokens.consume(token).is_none());
+
+        // DMN-082: "exec" is now a valid session type, and its command
+        // round-trips into the issued grant.
+        let (status, body) = call(
+            &state,
+            "POST",
+            "/v1/apps/demo/console-token",
+            Some(TOKEN),
+            Some(serde_json::json!({ "session": "exec", "command": ["ls", "-la"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let exec_token = body["token"].as_str().unwrap().to_string();
+        let exec_grant = state.console_tokens.consume(&exec_token).unwrap();
+        assert_eq!(exec_grant.session, SessionType::Exec);
+        assert_eq!(exec_grant.command, vec!["ls", "-la"]);
+
+        // No command → an empty probe list, not a missing-field error.
+        let (status, body) = call(
+            &state,
+            "POST",
+            "/v1/apps/demo/console-token",
+            Some(TOKEN),
+            Some(serde_json::json!({ "session": "exec" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bare_token = body["token"].as_str().unwrap();
+        assert!(
+            state
+                .console_tokens
+                .consume(bare_token)
+                .unwrap()
+                .command
+                .is_empty()
+        );
     }
 }
 
@@ -510,6 +550,7 @@ mod grpc {
             .into_inner();
         assert_eq!(status.version, asc_daemon::VERSION);
         assert_eq!(status.apps_total, 1);
+        assert!(status.capabilities.is_empty());
 
         let mut apps = AppServiceClient::new(channel(addr).await);
         let list = apps
@@ -534,6 +575,7 @@ mod grpc {
                 pb::IssueConsoleTokenRequest {
                     app_id: "demo".into(),
                     session: pb::ConsoleSessionType::Logs as i32,
+                    command: vec![],
                 },
             )))
             .await

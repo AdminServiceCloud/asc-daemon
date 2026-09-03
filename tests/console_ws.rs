@@ -73,7 +73,7 @@ async fn ws_streams_logs_with_valid_token() {
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Logs)
+        .issue_console_token(root(), "demo".into(), SessionType::Logs, Vec::new())
         .await
         .unwrap();
 
@@ -105,7 +105,7 @@ async fn ws_rejects_invalid_and_reused_tokens() {
 
     // A valid token works once...
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Logs)
+        .issue_console_token(root(), "demo".into(), SessionType::Logs, Vec::new())
         .await
         .unwrap();
     let ok = connect_async(format!("ws://{addr}/v1/console?token={token}")).await;
@@ -123,7 +123,7 @@ async fn attach_reports_unsupported_runtime() {
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Attach)
+        .issue_console_token(root(), "demo".into(), SessionType::Attach, Vec::new())
         .await
         .unwrap();
     let (mut socket, _) = connect_async(format!("ws://{addr}/v1/console?token={token}"))
@@ -132,6 +132,55 @@ async fn attach_reports_unsupported_runtime() {
     // Process apps cannot attach yet: the server says so and closes.
     match socket.next().await.expect("one frame").unwrap() {
         Message::Text(text) => assert!(text.contains("attach is not supported")),
+        other => panic!("expected error text frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exec_reports_unsupported_runtime() {
+    let (state, _ws) = test_state();
+    install_app_with_logs(&state, "demo", "");
+    let addr = spawn_server(Arc::clone(&state)).await;
+
+    let (token, _) = state
+        .issue_console_token(root(), "demo".into(), SessionType::Exec, Vec::new())
+        .await
+        .unwrap();
+    let (mut socket, _) = connect_async(format!("ws://{addr}/v1/console?token={token}"))
+        .await
+        .unwrap();
+    // Process apps cannot exec into either: same as attach, docker only.
+    match socket.next().await.expect("one frame").unwrap() {
+        Message::Text(text) => assert!(text.contains("exec is not supported")),
+        other => panic!("expected error text frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exec_token_carries_the_command_and_geometry_query_params_are_accepted() {
+    let (state, _ws) = test_state();
+    install_app_with_logs(&state, "demo", "");
+    let addr = spawn_server(Arc::clone(&state)).await;
+
+    let (token, _) = state
+        .issue_console_token(
+            root(),
+            "demo".into(),
+            SessionType::Exec,
+            vec!["/bin/sh".into(), "-c".into(), "echo hi".into()],
+        )
+        .await
+        .unwrap();
+    // Geometry travels as query params (cols/rows) alongside the token; a
+    // process app still reports unsupported, but the handshake and query
+    // parsing must not fail before that check runs.
+    let (mut socket, _) = connect_async(format!(
+        "ws://{addr}/v1/console?token={token}&cols=120&rows=40"
+    ))
+    .await
+    .unwrap();
+    match socket.next().await.expect("one frame").unwrap() {
+        Message::Text(text) => assert!(text.contains("exec is not supported")),
         other => panic!("expected error text frame, got {other:?}"),
     }
 }

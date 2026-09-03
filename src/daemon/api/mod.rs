@@ -36,6 +36,13 @@ use crate::daemon::pkg;
 use console::ConsoleTokens;
 use tokens::TokenStore;
 
+/// Optional features this daemon build supports, reported by `GetStatus`
+/// (DMN-076) so a caller can gate UI on what actually works instead of
+/// discovering it by hitting `UNIMPLEMENTED`. Append a value here in the same
+/// change that ships the matching capability; never remove or rename a value
+/// once released — older platform builds may still be checking for it.
+pub const CAPABILITIES: &[&str] = &[];
+
 /// Shared state behind both transports.
 pub struct ApiState {
     pub config: Config,
@@ -479,12 +486,13 @@ impl ApiState {
         ctx: UserContext,
         app_id: String,
         session: console::SessionType,
+        command: Vec<String>,
     ) -> Result<(String, i64)> {
         let id = app_id.clone();
         // Existence + authorization check first: no tokens for unknown apps.
         self.blocking(move |s| s.manager.get_authorized(&ctx, &id))
             .await?;
-        Ok(self.console_tokens.issue(&app_id, session))
+        Ok(self.console_tokens.issue(&app_id, session, command))
     }
 
     /// Request a whole-host reboot after the API response has left the

@@ -36,6 +36,13 @@ message GetStatusResponse {
   string version = 1;
   uint32 apps_total = 2;
   uint32 apps_running = 3;
+  // Optional features this daemon build supports, e.g. "app.upgrade",
+  // "app.settings", "app.ports", "app.stats", "console.exec", "sources",
+  // "credentials" (DMN-076). Absent/empty on a daemon built before this
+  // field existed — a caller that needs to know falls back to trying the
+  // RPC and handling UNIMPLEMENTED. Values are added here as the matching
+  // capability ships; never removed once shipped.
+  repeated string capabilities = 4;
 }
 
 // App lifecycle management. The REST transport exposes the same operations
@@ -219,11 +226,18 @@ enum ConsoleSessionType {
   CONSOLE_SESSION_TYPE_LOGS = 1;
   // Interactive attach (stdin/stdout).
   CONSOLE_SESSION_TYPE_ATTACH = 2;
+  // Interactive shell inside a running container — docker apps only
+  // (DMN-082). Frames on this session are tagged (0x00 data, 0x01 resize:
+  // big-endian u16 cols then u16 rows), unlike LOGS/ATTACH which are not.
+  CONSOLE_SESSION_TYPE_EXEC = 3;
 }
 
 message IssueConsoleTokenRequest {
   string app_id = 1;
   ConsoleSessionType session = 2;
+  // EXEC only: the command to run. Empty asks the daemon to probe a shell
+  // (/bin/bash, falling back to /bin/sh).
+  repeated string command = 3;
 }
 
 message IssueConsoleTokenResponse {

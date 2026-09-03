@@ -294,6 +294,7 @@ async fn status(
         "version": crate::VERSION,
         "apps_total": total,
         "apps_running": running,
+        "capabilities": super::CAPABILITIES,
     }))
     .into_response())
 }
@@ -742,8 +743,12 @@ async fn set_app_settings(
 
 #[derive(Deserialize)]
 struct ConsoleTokenBody {
-    /// "logs" or "attach" — mirrors ConsoleSessionType in the proto.
+    /// "logs", "attach" or "exec" — mirrors ConsoleSessionType in the proto.
     session: String,
+    /// EXEC only: the command to run. Empty asks the daemon to probe a
+    /// shell.
+    #[serde(default)]
+    command: Vec<String>,
 }
 
 async fn console_token(
@@ -755,15 +760,18 @@ async fn console_token(
     let session = match body.session.as_str() {
         "logs" => SessionType::Logs,
         "attach" => SessionType::Attach,
+        "exec" => SessionType::Exec,
         _ => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "session must be 'logs' or 'attach'" })),
+                Json(serde_json::json!({ "error": "session must be 'logs', 'attach' or 'exec'" })),
             )
                 .into_response());
         }
     };
-    let (token, expires_at) = state.issue_console_token(ctx, id, session).await?;
+    let (token, expires_at) = state
+        .issue_console_token(ctx, id, session, body.command)
+        .await?;
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
 }
 

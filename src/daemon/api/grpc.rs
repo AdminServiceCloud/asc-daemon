@@ -137,6 +137,7 @@ impl DaemonService for Grpc {
             version: crate::VERSION.to_string(),
             apps_total: total as u32,
             apps_running: running as u32,
+            capabilities: super::CAPABILITIES.iter().map(|s| s.to_string()).collect(),
         }))
     }
 }
@@ -491,11 +492,16 @@ impl AppService for Grpc {
         let session = match proto::v1::ConsoleSessionType::try_from(req.session) {
             Ok(pb::ConsoleSessionType::Attach) => SessionType::Attach,
             Ok(pb::ConsoleSessionType::Logs) => SessionType::Logs,
-            _ => return Err(Status::invalid_argument("session must be LOGS or ATTACH")),
+            Ok(pb::ConsoleSessionType::Exec) => SessionType::Exec,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "session must be LOGS, ATTACH or EXEC",
+                ));
+            }
         };
         let (token, expires_at) = self
             .0
-            .issue_console_token(ctx, req.app_id, session)
+            .issue_console_token(ctx, req.app_id, session, req.command)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::IssueConsoleTokenResponse {

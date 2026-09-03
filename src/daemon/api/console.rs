@@ -16,12 +16,17 @@ pub const TOKEN_TTL: Duration = Duration::from_secs(30);
 pub enum SessionType {
     Logs,
     Attach,
+    /// Interactive shell inside a running container (DMN-082), docker only.
+    Exec,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConsoleGrant {
     pub app_id: String,
     pub session: SessionType,
+    /// EXEC only: the command to run. Empty means "probe a shell" — see
+    /// `docker::exec`. Ignored for LOGS/ATTACH.
+    pub command: Vec<String>,
 }
 
 struct Entry {
@@ -39,7 +44,7 @@ pub struct ConsoleTokens {
 impl ConsoleTokens {
     /// Issue a token for one console session. Returns `(token, expires_at)`
     /// where `expires_at` is Unix seconds (for API clients).
-    pub fn issue(&self, app_id: &str, session: SessionType) -> (String, i64) {
+    pub fn issue(&self, app_id: &str, session: SessionType, command: Vec<String>) -> (String, i64) {
         let token = random_hex(32);
         let expires_at = (SystemTime::now() + TOKEN_TTL)
             .duration_since(UNIX_EPOCH)
@@ -53,6 +58,7 @@ impl ConsoleTokens {
                 grant: ConsoleGrant {
                     app_id: app_id.to_string(),
                     session,
+                    command,
                 },
                 expires: Instant::now() + TOKEN_TTL,
             },
@@ -98,13 +104,26 @@ mod tests {
     #[test]
     fn token_is_single_use() {
         let tokens = ConsoleTokens::default();
-        let (token, expires_at) = tokens.issue("demo", SessionType::Logs);
+        let (token, expires_at) = tokens.issue("demo", SessionType::Logs, Vec::new());
         assert_eq!(token.len(), 64);
         assert!(expires_at > 0);
         let grant = tokens.consume(&token).expect("first use works");
         assert_eq!(grant.app_id, "demo");
         assert_eq!(grant.session, SessionType::Logs);
         assert!(tokens.consume(&token).is_none(), "second use must fail");
+    }
+
+    #[test]
+    fn exec_grant_carries_its_command() {
+        let tokens = ConsoleTokens::default();
+        let (token, _) = tokens.issue(
+            "demo",
+            SessionType::Exec,
+            vec!["/bin/sh".into(), "-c".into(), "ls".into()],
+        );
+        let grant = tokens.consume(&token).expect("first use works");
+        assert_eq!(grant.session, SessionType::Exec);
+        assert_eq!(grant.command, vec!["/bin/sh", "-c", "ls"]);
     }
 
     #[test]

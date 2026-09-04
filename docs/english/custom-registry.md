@@ -80,6 +80,15 @@ asc search example-web
 - The registry must be publicly readable over HTTPS. Use [registry schemas](https://github.com/AdminServiceCloud/registry/tree/main/schema) to validate JSON before publishing.
 - `sudo asc source add` creates a system source for every server user; without sudo it creates a source only for the current user.
 
+### Platform-managed sources (DMN-083)
+
+`SourceService` is the API equivalent of `sudo asc source add/remove` — how the AdminService.Cloud platform pushes an organization's registries onto a connected node without SSH access:
+
+- `ListSources` returns the **system-scope** list only (`/etc/asc/sources.toml`); a node's own `~/.config/asc/sources.toml` per-user sources are invisible to this API and stay under CLI control.
+- `ReplaceSources` is an **idempotent full replace**, not incremental add/remove calls: the request carries the organization's entire desired source list, and the daemon's system list becomes exactly that — including deletions. This matters once a node is platform-managed: **a source added by hand with `sudo asc source add` on that node will be removed by the next `ReplaceSources` push** if it is not also present in the platform's own registry list. Validation is the same as `asc source add` (only `https://`/`file://` URLs, the reserved name `git` rejected), plus a check that names are not repeated within one request.
+- Both RPCs require only that the caller holds a valid API bearer token (the same trust level as `RemoveApp`/`RebootSystem`) — the daemon has no concept of organizations or projects, so per-registry authorization happens one layer up, in the platform's own facade.
+- Advertised via `GetStatus`'s `capabilities` (DMN-076) as `"sources"` — a platform build talking to an older daemon sees the capability missing and skips the push rather than hitting `UNIMPLEMENTED`.
+
 ## 🔗 Related tasks
 
-DMN-003, REG-001, REG-003, DMN-057 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-003, DMN-057, DMN-076, DMN-083, REG-001, REG-003, REG-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

@@ -41,7 +41,7 @@ use tokens::TokenStore;
 /// discovering it by hitting `UNIMPLEMENTED`. Append a value here in the same
 /// change that ships the matching capability; never remove or rename a value
 /// once released — older platform builds may still be checking for it.
-pub const CAPABILITIES: &[&str] = &[];
+pub const CAPABILITIES: &[&str] = &["sources", "credentials"];
 
 /// Shared state behind both transports.
 pub struct ApiState {
@@ -493,6 +493,79 @@ impl ApiState {
         self.blocking(move |s| s.manager.get_authorized(&ctx, &id))
             .await?;
         Ok(self.console_tokens.issue(&app_id, session, command))
+    }
+
+    // ── Registry sources & credentials (DMN-083/084) — pushed by the
+    // platform, see docs/custom-registry.md and docs/package-manager.md.
+    // Every call below acts on Scope::System: the daemon process itself is
+    // always root, so unlike AppManager there is no per-caller-uid
+    // branching to do here.
+
+    pub async fn list_sources(self: &Arc<Self>) -> Result<Vec<pkg::sources::Source>> {
+        self.blocking(|_s| {
+            let list = pkg::sources::SourceList::load_with(pkg::sources::Scope::System)?;
+            Ok(list.list().into_iter().map(|(s, _)| s.clone()).collect())
+        })
+        .await
+    }
+
+    pub async fn replace_sources(
+        self: &Arc<Self>,
+        sources: Vec<pkg::sources::Source>,
+    ) -> Result<Vec<pkg::sources::Source>> {
+        self.blocking(move |_s| {
+            let mut list = pkg::sources::SourceList::load_with(pkg::sources::Scope::System)?;
+            list.replace_all(sources)?;
+            list.save()?;
+            Ok(list.list().into_iter().map(|(s, _)| s.clone()).collect())
+        })
+        .await
+    }
+
+    pub async fn list_credentials(self: &Arc<Self>) -> Result<Vec<pkg::auth::Credential>> {
+        self.blocking(|_s| {
+            let auth = pkg::auth::GitAuth::load_with(pkg::sources::Scope::System)?;
+            Ok(auth.list().into_iter().map(|(c, _)| c.clone()).collect())
+        })
+        .await
+    }
+
+    pub async fn upsert_credential(
+        self: &Arc<Self>,
+        kind: pkg::auth::Kind,
+        target: String,
+        token: String,
+        username: Option<String>,
+        app: Option<String>,
+    ) -> Result<pkg::auth::Credential> {
+        self.blocking(move |_s| {
+            let mut auth = pkg::auth::GitAuth::load_with(pkg::sources::Scope::System)?;
+            let credential = auth
+                .add(
+                    kind,
+                    &target,
+                    pkg::auth::Method::Token { token },
+                    username,
+                    app,
+                )?
+                .clone();
+            auth.save()?;
+            Ok(credential)
+        })
+        .await
+    }
+
+    pub async fn remove_credential(
+        self: &Arc<Self>,
+        kind: Option<pkg::auth::Kind>,
+        target: String,
+    ) -> Result<()> {
+        self.blocking(move |_s| {
+            let mut auth = pkg::auth::GitAuth::load_with(pkg::sources::Scope::System)?;
+            auth.remove(kind, &target)?;
+            auth.save()
+        })
+        .await
     }
 
     /// Request a whole-host reboot after the API response has left the

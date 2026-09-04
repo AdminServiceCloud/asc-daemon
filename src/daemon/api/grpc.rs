@@ -14,12 +14,15 @@ use super::tokens;
 use super::{ApiState, proto};
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::files;
+use crate::daemon::pkg;
 use crate::daemon::pkg::InstallOutcome;
 
 use pb::app_service_server::{AppService, AppServiceServer};
+use pb::credential_service_server::{CredentialService, CredentialServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
 use pb::file_service_server::{FileService, FileServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
+use pb::source_service_server::{SourceService, SourceServiceServer};
 use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
 
@@ -30,6 +33,8 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(SystemServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(MonitorServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(TokenServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(SourceServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(CredentialServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(FileServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
@@ -74,6 +79,12 @@ fn to_status(err: anyhow::Error) -> Status {
     }
     if msg.contains("not found") || msg.contains("не найдено") {
         Status::not_found(msg)
+    } else if msg.contains("unsupported")
+        || msg.contains("reserved")
+        || msg.contains("duplicate")
+        || msg.contains("cannot derive")
+    {
+        Status::invalid_argument(msg)
     } else {
         Status::internal(msg)
     }
@@ -508,6 +519,119 @@ impl AppService for Grpc {
             token,
             expires_at,
         }))
+    }
+}
+
+// ── Registry sources & credentials (DMN-083/084) ──
+
+fn source_to_pb(s: &pkg::sources::Source) -> pb::Source {
+    pb::Source {
+        name: s.name.clone(),
+        url: s.url.clone(),
+    }
+}
+
+fn source_from_pb(s: pb::Source) -> pkg::sources::Source {
+    pkg::sources::Source {
+        name: s.name,
+        url: s.url,
+    }
+}
+
+fn credential_kind_to_pb(kind: pkg::auth::Kind) -> pb::CredentialKind {
+    match kind {
+        pkg::auth::Kind::Repo => pb::CredentialKind::Repo,
+        pkg::auth::Kind::Registry => pb::CredentialKind::Registry,
+    }
+}
+
+fn credential_kind_from_pb(value: i32) -> Result<pkg::auth::Kind, Status> {
+    match pb::CredentialKind::try_from(value) {
+        Ok(pb::CredentialKind::Repo) => Ok(pkg::auth::Kind::Repo),
+        Ok(pb::CredentialKind::Registry) => Ok(pkg::auth::Kind::Registry),
+        _ => Err(Status::invalid_argument("kind must be REPO or REGISTRY")),
+    }
+}
+
+fn credential_to_summary(c: &pkg::auth::Credential) -> pb::CredentialSummary {
+    pb::CredentialSummary {
+        kind: credential_kind_to_pb(c.kind) as i32,
+        pattern: c.pattern.clone(),
+        username: c.username.clone(),
+        app: c.app.clone(),
+        method_label: c.method.label(),
+        has_secret: matches!(c.method, pkg::auth::Method::Token { .. }),
+    }
+}
+
+#[tonic::async_trait]
+impl SourceService for Grpc {
+    async fn list_sources(
+        &self,
+        _request: Request<pb::ListSourcesRequest>,
+    ) -> Result<Response<pb::ListSourcesResponse>, Status> {
+        let sources = self.0.list_sources().await.map_err(to_status)?;
+        Ok(Response::new(pb::ListSourcesResponse {
+            sources: sources.iter().map(source_to_pb).collect(),
+        }))
+    }
+
+    async fn replace_sources(
+        &self,
+        request: Request<pb::ReplaceSourcesRequest>,
+    ) -> Result<Response<pb::ReplaceSourcesResponse>, Status> {
+        let sources = request
+            .into_inner()
+            .sources
+            .into_iter()
+            .map(source_from_pb)
+            .collect();
+        let sources = self.0.replace_sources(sources).await.map_err(to_status)?;
+        Ok(Response::new(pb::ReplaceSourcesResponse {
+            sources: sources.iter().map(source_to_pb).collect(),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl CredentialService for Grpc {
+    async fn list_credentials(
+        &self,
+        _request: Request<pb::ListCredentialsRequest>,
+    ) -> Result<Response<pb::ListCredentialsResponse>, Status> {
+        let credentials = self.0.list_credentials().await.map_err(to_status)?;
+        Ok(Response::new(pb::ListCredentialsResponse {
+            credentials: credentials.iter().map(credential_to_summary).collect(),
+        }))
+    }
+
+    async fn upsert_credential(
+        &self,
+        request: Request<pb::UpsertCredentialRequest>,
+    ) -> Result<Response<pb::UpsertCredentialResponse>, Status> {
+        let req = request.into_inner();
+        let kind = credential_kind_from_pb(req.kind)?;
+        let credential = self
+            .0
+            .upsert_credential(kind, req.target, req.token, req.username, req.app)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::UpsertCredentialResponse {
+            credential: Some(credential_to_summary(&credential)),
+        }))
+    }
+
+    async fn remove_credential(
+        &self,
+        request: Request<pb::RemoveCredentialRequest>,
+    ) -> Result<Response<pb::RemoveCredentialResponse>, Status> {
+        let req = request.into_inner();
+        let kind = req.kind.map(credential_kind_from_pb).transpose()?;
+        self.0
+            .remove_credential(kind, req.target)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RemoveCredentialResponse {}))
     }
 }
 

@@ -189,6 +189,44 @@ impl SourceList {
         Ok(target.last().expect("just pushed"))
     }
 
+    /// Idempotent full replace of the editable list (DMN-083): `sources`
+    /// becomes the entire system-scope list in one atomic swap — deletions
+    /// included — so a platform retry after a dropped connection can never
+    /// double- or partially apply a desired state. Per-entry validation
+    /// mirrors `add` (`https://`/`file://` prefix, the reserved "git" name);
+    /// duplicate names *within the incoming batch* are also rejected, since
+    /// there is no pre-existing list to check one entry against at a time
+    /// the way `add` does.
+    pub fn replace_all(&mut self, sources: Vec<Source>) -> Result<&[Source]> {
+        let mut seen = std::collections::HashSet::new();
+        for s in &sources {
+            if !s.url.starts_with("https://") && !s.url.starts_with("file://") {
+                bail!(
+                    "unsupported source url '{}': use https:// or file://",
+                    s.url
+                );
+            }
+            if s.name == "git" {
+                bail!("'git' is a reserved source name");
+            }
+            if !seen.insert(s.name.clone()) {
+                bail!("duplicate source name '{}' in the replacement list", s.name);
+            }
+        }
+        let target = match self.scope {
+            Scope::System => &mut self.system,
+            Scope::User => &mut self.user,
+        };
+        *target = sources
+            .into_iter()
+            .map(|s| Source {
+                name: s.name,
+                url: s.url.trim_end_matches('/').to_string(),
+            })
+            .collect();
+        Ok(target.as_slice())
+    }
+
     /// Remove a source from the editable list. Pointing a regular user at a
     /// system source produces a dedicated error instead of "not found".
     pub fn remove(&mut self, name: &str) -> Result<()> {
@@ -325,6 +363,72 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn replace_all_is_idempotent() {
+        let mut l = list(&[], &[], Scope::System);
+        let batch = vec![
+            Source {
+                name: "acme".into(),
+                url: "https://acme.example.com".into(),
+            },
+            Source {
+                name: "corp".into(),
+                url: "https://corp.example.com".into(),
+            },
+        ];
+        l.replace_all(batch.clone()).unwrap();
+        let first: Vec<String> = l.list().iter().map(|(s, _)| s.name.clone()).collect();
+        l.replace_all(batch).unwrap();
+        let second: Vec<String> = l.list().iter().map(|(s, _)| s.name.clone()).collect();
+        assert_eq!(first, second);
+        assert_eq!(second, vec!["acme".to_string(), "corp".to_string()]);
+    }
+
+    #[test]
+    fn replace_all_rejects_batch_duplicates() {
+        let mut l = list(&[], &[], Scope::System);
+        let err = l
+            .replace_all(vec![
+                Source {
+                    name: "acme".into(),
+                    url: "https://a.example.com".into(),
+                },
+                Source {
+                    name: "acme".into(),
+                    url: "https://b.example.com".into(),
+                },
+            ])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn replace_all_clears_when_empty() {
+        let mut l = list(&[("official", "https://a")], &[], Scope::System);
+        l.replace_all(Vec::new()).unwrap();
+        assert!(l.list().is_empty());
+    }
+
+    #[test]
+    fn replace_all_validates_urls_and_reserved_name() {
+        let mut l = list(&[], &[], Scope::System);
+        assert!(
+            l.replace_all(vec![Source {
+                name: "x".into(),
+                url: "ftp://nope".into()
+            }])
+            .is_err()
+        );
+        assert!(
+            l.replace_all(vec![Source {
+                name: "git".into(),
+                url: "https://x".into()
+            }])
+            .is_err()
+        );
     }
 
     #[test]

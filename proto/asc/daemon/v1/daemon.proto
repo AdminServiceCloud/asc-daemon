@@ -246,6 +246,104 @@ message IssueConsoleTokenResponse {
   int64 expires_at = 2;
 }
 
+// Registry sources pushed by the platform (DMN-083, REG-005): the
+// organization-level source of truth for an org's registries lives on the
+// platform; this service is how it lands in this node's own system-scope
+// sources.toml. Every RPC here operates on Scope::System only — the
+// platform never touches a Linux user's own ~/.config/asc/sources.toml,
+// which stays under `asc source` CLI control.
+service SourceService {
+  rpc ListSources(ListSourcesRequest) returns (ListSourcesResponse);
+  // Idempotent full replace of the system source list (see
+  // SourceList::replace_all): `sources` becomes the entire list, deletions
+  // included. Chosen over incremental add/remove RPCs because the platform
+  // always knows its whole desired state and a partial-apply retry after a
+  // dropped connection must not be possible.
+  rpc ReplaceSources(ReplaceSourcesRequest) returns (ReplaceSourcesResponse);
+}
+
+message Source {
+  string name = 1;
+  string url = 2;
+}
+
+message ListSourcesRequest {}
+
+message ListSourcesResponse {
+  // System sources only, priority order; user-scope sources are invisible
+  // here by design.
+  repeated Source sources = 1;
+}
+
+message ReplaceSourcesRequest {
+  // Complete desired system source list; empty clears every system source
+  // (falls back to the synthesized "official" default).
+  repeated Source sources = 1;
+}
+
+message ReplaceSourcesResponse {
+  repeated Source sources = 1;
+}
+
+// Credential management (DMN-084): token credentials only. SSH-key
+// credentials are never exposed here — a private key cannot leave this
+// host, and stays exclusively under `asc auth add --ssh-key` on the node.
+// Unlike SourceService, this is targeted upsert/remove, not a full
+// replace: /etc/asc/auth.json can carry Kind::Registry (docker image
+// pull) credentials an operator added by hand for reasons unrelated to
+// marketplace registries, and a bulk replace would stomp them.
+service CredentialService {
+  rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
+  // Upsert-by-(kind, pattern, app) — identical to GitAuth::add's existing
+  // semantics; calling it again with the same triple replaces the token.
+  rpc UpsertCredential(UpsertCredentialRequest) returns (UpsertCredentialResponse);
+  rpc RemoveCredential(RemoveCredentialRequest) returns (RemoveCredentialResponse);
+}
+
+enum CredentialKind {
+  CREDENTIAL_KIND_UNSPECIFIED = 0;
+  CREDENTIAL_KIND_REPO = 1;
+  CREDENTIAL_KIND_REGISTRY = 2;
+}
+
+// Never carries the secret — method_label mirrors Method::label() ("token"
+// or "ssh-key <path>"), has_secret says whether a token is configured.
+message CredentialSummary {
+  CredentialKind kind = 1;
+  string pattern = 2;
+  optional string username = 3;
+  optional string app = 4;
+  string method_label = 5;
+  bool has_secret = 6;
+}
+
+message ListCredentialsRequest {}
+
+message ListCredentialsResponse {
+  repeated CredentialSummary credentials = 1;
+}
+
+message UpsertCredentialRequest {
+  CredentialKind kind = 1;
+  // Host/prefix, or a full git URL to derive it from (GitAuth::normalize).
+  string target = 2;
+  // Token auth only — this RPC cannot set an ssh-key credential.
+  string token = 3;
+  optional string username = 4;
+  optional string app = 5;
+}
+
+message UpsertCredentialResponse {
+  CredentialSummary credential = 1;
+}
+
+message RemoveCredentialRequest {
+  optional CredentialKind kind = 1;
+  string target = 2;
+}
+
+message RemoveCredentialResponse {}
+
 // System monitoring (DMN-006). The daemon samples metrics in the background
 // (config `[monitor]`, default every 100ms — DMN-072) into an in-memory ring
 // buffer; GetSystemMetrics/GetMetricsHistory read from that buffer, while

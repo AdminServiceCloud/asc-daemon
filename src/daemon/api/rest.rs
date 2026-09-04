@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,7 @@ use super::console::SessionType;
 use super::tokens;
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::files;
+use crate::daemon::pkg;
 use crate::daemon::pkg::InstallOutcome;
 
 pub fn router(state: Arc<ApiState>) -> Router {
@@ -48,6 +49,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(app_settings).put(set_app_settings),
         )
         .route("/v1/apps/{id}/console-token", post(console_token))
+        // Registry sources & credentials (DMN-083/084), pushed by the
+        // platform — see docs/custom-registry.md, docs/package-manager.md.
+        .route("/v1/sources", get(list_sources).put(replace_sources))
+        .route(
+            "/v1/credentials",
+            get(list_credentials).post(upsert_credential),
+        )
+        .route("/v1/credentials/{pattern}", delete(remove_credential))
         // API tokens (DMN-065/DMN-066). Mounted here, so the CLI reaches them
         // over the unix socket too — `asc api token …` needs no bearer.
         .route("/v1/token", get(token_status))
@@ -773,6 +782,101 @@ async fn console_token(
         .issue_console_token(ctx, id, session, body.command)
         .await?;
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
+}
+
+// ── Registry sources & credentials (DMN-083/084) ──
+
+async fn list_sources(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
+    let sources = state.list_sources().await?;
+    Ok(Json(serde_json::json!({ "sources": sources })).into_response())
+}
+
+#[derive(Deserialize)]
+struct ReplaceSourcesBody {
+    sources: Vec<pkg::sources::Source>,
+}
+
+async fn replace_sources(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<ReplaceSourcesBody>,
+) -> Result<Response, ApiError> {
+    let sources = state.replace_sources(body.sources).await?;
+    Ok(Json(serde_json::json!({ "sources": sources })).into_response())
+}
+
+/// Credential shape safe to serialize back to a caller — never the secret
+/// itself, mirroring `CredentialSummary` in the gRPC contract.
+#[derive(Serialize)]
+struct CredentialJson {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    pattern: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app: Option<String>,
+    method: String,
+    has_secret: bool,
+}
+
+fn credential_to_json(c: &pkg::auth::Credential) -> CredentialJson {
+    CredentialJson {
+        kind: c.kind.label(),
+        pattern: c.pattern.clone(),
+        username: c.username.clone(),
+        app: c.app.clone(),
+        method: c.method.label(),
+        has_secret: matches!(c.method, pkg::auth::Method::Token { .. }),
+    }
+}
+
+async fn list_credentials(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
+    let credentials = state.list_credentials().await?;
+    let credentials: Vec<CredentialJson> = credentials.iter().map(credential_to_json).collect();
+    Ok(Json(serde_json::json!({ "credentials": credentials })).into_response())
+}
+
+#[derive(Deserialize)]
+struct UpsertCredentialBody {
+    #[serde(rename = "type", default)]
+    kind: String,
+    target: String,
+    token: String,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    app: Option<String>,
+}
+
+async fn upsert_credential(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<UpsertCredentialBody>,
+) -> Result<Response, ApiError> {
+    let kind = pkg::auth::Kind::parse(&body.kind)?;
+    let credential = state
+        .upsert_credential(kind, body.target, body.token, body.username, body.app)
+        .await?;
+    Ok(Json(serde_json::json!({ "credential": credential_to_json(&credential) })).into_response())
+}
+
+#[derive(Deserialize)]
+struct RemoveCredentialQuery {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+async fn remove_credential(
+    State(state): State<Arc<ApiState>>,
+    Path(pattern): Path<String>,
+    Query(query): Query<RemoveCredentialQuery>,
+) -> Result<Response, ApiError> {
+    let kind = query
+        .kind
+        .as_deref()
+        .map(pkg::auth::Kind::parse)
+        .transpose()?;
+    state.remove_credential(kind, pattern).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ── API tokens (DMN-065, DMN-066 — see docs/security-tokens.md) ──

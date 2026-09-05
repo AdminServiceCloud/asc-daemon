@@ -437,6 +437,9 @@ enum AppAction {
         /// Number of trailing lines
         #[arg(short = 'n', long, default_value_t = 100)]
         tail: usize,
+        /// Prefix each line with its timestamp (DMN-088)
+        #[arg(short = 't', long)]
+        timestamps: bool,
     },
     /// Interactively edit app settings defined in asc.settings.yaml
     Settings {
@@ -1863,8 +1866,12 @@ fn app_cmd_daemon(
             with_spinner(|| daemon.restart(&id))?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
-        AppAction::Logs { id, tail } => {
-            let logs = daemon.logs(&id, tail)?;
+        AppAction::Logs {
+            id,
+            tail,
+            timestamps,
+        } => {
+            let logs = daemon.logs(&id, tail, timestamps)?;
             if logs.trim().is_empty() {
                 println!("{}", t(Msg::NoLogs));
             } else {
@@ -1960,8 +1967,12 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             with_spinner(|| manager.restart(&ctx, &id))?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
-        AppAction::Logs { id, tail } => {
-            let logs = manager.logs(&ctx, &id, tail)?;
+        AppAction::Logs {
+            id,
+            tail,
+            timestamps,
+        } => {
+            let logs = manager.logs(&ctx, &id, tail, timestamps)?;
             if logs.trim().is_empty() {
                 println!("{}", t(Msg::NoLogs));
             } else {

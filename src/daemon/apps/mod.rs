@@ -298,7 +298,18 @@ impl AppManager {
     /// percentage; memory comes from the second sample. Blocks for the
     /// sampling interval.
     pub fn stats(&self, ctx: &UserContext) -> Result<Vec<AppStats>> {
-        let apps = self.list(ctx)?;
+        self.stats_for(ctx, &[])
+    }
+
+    /// Same as [`Self::stats`], restricted to `ids` (empty means every app
+    /// the caller can see). The filter is applied *before* the sampling
+    /// window runs — asking for one app must not cost the sampling time of
+    /// every app on the node (DMN-080).
+    pub fn stats_for(&self, ctx: &UserContext, ids: &[String]) -> Result<Vec<AppStats>> {
+        let mut apps = self.list(ctx)?;
+        if !ids.is_empty() {
+            apps.retain(|app| ids.iter().any(|id| id == &app.meta.id));
+        }
         let first: Vec<Option<ResourceUsage>> =
             apps.iter().map(|app| self.usage_of(&app.meta)).collect();
         let started = std::time::Instant::now();
@@ -425,10 +436,16 @@ impl AppManager {
         Ok(())
     }
 
-    pub fn logs(&self, ctx: &UserContext, id: &str, tail: usize) -> Result<String> {
+    pub fn logs(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        tail: usize,
+        timestamps: bool,
+    ) -> Result<String> {
         let meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
-        driver::for_runtime(&meta.runtime, &self.config.docker).logs(&meta, &dir, tail)
+        driver::for_runtime(&meta.runtime, &self.config.docker).logs(&meta, &dir, tail, timestamps)
     }
 
     /// Remove the app: release runtime resources, then delete its directory.
@@ -633,6 +650,22 @@ mod tests {
         assert!(stopped.cpu_percent.is_none());
 
         mgr.stop(&user(1000), "sleeper").unwrap();
+    }
+
+    #[test]
+    fn stats_for_filters_before_sampling_not_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install(&mgr, "app-a", 1000);
+        install(&mgr, "app-b", 1000);
+
+        let filtered = mgr.stats_for(&user(1000), &["app-a".to_string()]).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].meta.id, "app-a");
+
+        // Empty selection means every visible app, same as `stats()`.
+        let all = mgr.stats_for(&user(1000), &[]).unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

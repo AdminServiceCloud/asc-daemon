@@ -515,11 +515,32 @@ async fn ports_summary(
 /// Resource consumption per app, like `docker stats --no-stream`. Costs the
 /// sampling interval (~500 ms) per call — the CPU percentage is a delta of
 /// two readings.
+#[derive(Deserialize)]
+struct StatsQuery {
+    /// Comma-separated app ids; empty/absent means every app the caller can
+    /// see (DMN-080). Applied before the sampling window, same as the gRPC
+    /// GetAppStats/StreamAppStats filter.
+    #[serde(default)]
+    ids: Option<String>,
+}
+
 async fn stats(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
+    Query(query): Query<StatsQuery>,
 ) -> Result<Response, ApiError> {
-    let stats = state.stats(ctx).await?;
+    let ids: Vec<String> = query
+        .ids
+        .as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let stats = state.stats_for(ctx, ids).await?;
     Ok(Json(serde_json::json!({
         "apps": stats.iter().map(|s| serde_json::json!({
             "id": s.meta.id,
@@ -695,6 +716,8 @@ async fn restart_app(
 struct LogsQuery {
     #[serde(default)]
     tail: Option<usize>,
+    #[serde(default)]
+    timestamps: bool,
 }
 
 async fn app_logs(
@@ -703,7 +726,9 @@ async fn app_logs(
     Path(id): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
-    let logs = state.logs(ctx, id, query.tail.unwrap_or(100)).await?;
+    let logs = state
+        .logs(ctx, id, query.tail.unwrap_or(100), query.timestamps)
+        .await?;
     Ok(Json(serde_json::json!({ "logs": logs })).into_response())
 }
 

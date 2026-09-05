@@ -117,7 +117,7 @@ fn peer_uid_scopes_app_visibility_without_a_token() {
 
     // Lifecycle authorization: someone else's app does not exist for us.
     if my_uid != 0 {
-        let err = daemon.logs("foreign", 10).unwrap_err();
+        let err = daemon.logs("foreign", 10, false).unwrap_err();
         assert!(
             format!("{err:#}").contains("not found") || format!("{err:#}").contains("не найдено"),
             "foreign apps must be indistinguishable from missing ones, got: {err:#}"

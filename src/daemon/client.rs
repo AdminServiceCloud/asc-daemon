@@ -267,10 +267,10 @@ impl Daemon {
         Ok(())
     }
 
-    pub fn logs(&self, id: &str, tail: usize) -> Result<String> {
+    pub fn logs(&self, id: &str, tail: usize, timestamps: bool) -> Result<String> {
         let json = self.request(
             Method::GET,
-            &format!("/v1/apps/{id}/logs?tail={tail}"),
+            &format!("/v1/apps/{id}/logs?tail={tail}&timestamps={timestamps}"),
             None,
         )?;
         Ok(json["logs"].as_str().unwrap_or_default().to_string())

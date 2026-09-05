@@ -64,6 +64,16 @@ service AppService {
   // (DMN-007). The platform requests it automatically after checking the
   // caller's permissions; short TTL, bound to one app and session type.
   rpc IssueConsoleToken(IssueConsoleTokenRequest) returns (IssueConsoleTokenResponse);
+  // Live resource usage of the requested apps (DMN-080), like `docker stats
+  // --no-stream`: two readings ~500ms apart. `ids` is applied *before* the
+  // sampling window, not after — asking for one app must not cost the
+  // sampling time of every app on the node.
+  rpc GetAppStats(GetAppStatsRequest) returns (GetAppStatsResponse);
+  // Push stream of the same samples (DMN-081), backed by one shared sampler
+  // per requested app set rather than a blocking read per subscriber —
+  // see AppStatsHub. A caller that falls behind the broadcast buffer misses
+  // the oldest queued samples rather than stalling the sampler.
+  rpc StreamAppStats(StreamAppStatsRequest) returns (stream AppStatsSample);
 }
 
 enum AppState {
@@ -208,6 +218,10 @@ message GetAppLogsRequest {
   string id = 1;
   // Number of trailing lines; 0 means the server default (100).
   uint32 tail = 2;
+  // When set, each line is prefixed with an ISO-8601 timestamp and a space
+  // (DMN-088) — RFC3339Nano/UTC for docker apps, journalctl's short-iso for
+  // systemd ones. process apps have no timestamp source and ignore this.
+  bool timestamps = 3;
 }
 
 message GetAppLogsResponse {
@@ -244,6 +258,52 @@ message IssueConsoleTokenResponse {
   string token = 1;
   // Unix seconds when the token expires (~30s TTL, single use).
   int64 expires_at = 2;
+}
+
+message GetAppStatsRequest {
+  // Apps to sample. Empty means every app the caller can see (like `asc
+  // stats` with no argument) — filtering happens here, before the shared
+  // sampling window runs, not by discarding rows from a full-fleet sample.
+  repeated string ids = 1;
+}
+
+message GetAppStatsResponse {
+  repeated AppStatsSample apps = 1;
+}
+
+message StreamAppStatsRequest {
+  // Same semantics as GetAppStatsRequest.ids.
+  repeated string ids = 1;
+  // Minimum seconds between pushed samples. 0 asks for the server default;
+  // the server enforces a floor above 0 regardless (one sampling window
+  // already costs ~500ms).
+  uint32 min_interval_secs = 2;
+}
+
+// One app's resource usage, mirroring `asc stats`/`AppStats` in the daemon.
+// Every optional field is unset (not zero) when the app is stopped or its
+// runtime cannot report that counter — systemd/process apps have no network
+// namespace of their own, so net_* is always unset for them.
+message AppStatsSample {
+  string app_id = 1;
+  // CPU share since the previous internal reading; can exceed 100 on a
+  // multi-core host, like `docker stats`.
+  optional double cpu_percent = 2;
+  optional uint64 memory_bytes = 3;
+  optional uint64 disk_read_bytes = 4;
+  optional uint64 disk_write_bytes = 5;
+  optional uint64 net_rx_bytes = 6;
+  optional uint64 net_tx_bytes = 7;
+  // Current throughput, bytes/sec — the delta of the same two readings the
+  // cumulative counters above and cpu_percent come from.
+  optional double disk_read_rate = 8;
+  optional double disk_write_rate = 9;
+  optional double net_rx_rate = 10;
+  optional double net_tx_rate = 11;
+  // Everything under the app's directory — the same figure GetAppDisk
+  // reports, computed without its image/volume breakdown so it stays cheap.
+  uint64 disk_bytes = 12;
+  optional uint64 quota_disk_bytes = 13;
 }
 
 // Registry sources pushed by the platform (DMN-083, REG-005): the

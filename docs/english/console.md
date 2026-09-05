@@ -36,4 +36,4 @@ The terminal is modern and convenient: xterm.js, **full ANSI color support** and
 
 ## 🔗 Related tasks
 
-DMN-007, FE-006 and DMN-082 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-007, DMN-082, DMN-088, FE-006, FE-061 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

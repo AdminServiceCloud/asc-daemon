@@ -41,7 +41,13 @@ use tokens::TokenStore;
 /// discovering it by hitting `UNIMPLEMENTED`. Append a value here in the same
 /// change that ships the matching capability; never remove or rename a value
 /// once released — older platform builds may still be checking for it.
-pub const CAPABILITIES: &[&str] = &["sources", "credentials", "ssh-credentials"];
+pub const CAPABILITIES: &[&str] = &[
+    "sources",
+    "credentials",
+    "ssh-credentials",
+    "console.exec",
+    "app.stats",
+];
 
 /// Shared state behind both transports.
 pub struct ApiState {
@@ -234,6 +240,18 @@ impl ApiState {
         self.blocking(move |s| s.manager.stats(&ctx)).await
     }
 
+    /// Resource consumption of `ids` only (DMN-080); empty means every app
+    /// the caller can see. See `AppManager::stats_for` for why the filter
+    /// happens before sampling.
+    pub async fn stats_for(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        ids: Vec<String>,
+    ) -> Result<Vec<crate::daemon::apps::AppStats>> {
+        self.blocking(move |s| s.manager.stats_for(&ctx, &ids))
+            .await
+    }
+
     /// Upgrade an app the caller owns (DMN-053): `spec` is its id or custom
     /// name, optionally `@version`. Cloning happens with the daemon's own git
     /// credentials, like an install over this API.
@@ -320,8 +338,9 @@ impl ApiState {
         ctx: UserContext,
         id: String,
         tail: usize,
+        timestamps: bool,
     ) -> Result<String> {
-        self.blocking(move |s| s.manager.logs(&ctx, &id, tail))
+        self.blocking(move |s| s.manager.logs(&ctx, &id, tail, timestamps))
             .await
     }
 

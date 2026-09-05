@@ -60,8 +60,10 @@ pub trait AppDriver {
     /// the runtime cannot report them (e.g. cgroup v1 host).
     fn usage(&self, meta: &AppMeta, dir: &Path) -> Result<Option<ResourceUsage>>;
 
-    /// Last `tail` lines of the app's logs.
-    fn logs(&self, meta: &AppMeta, dir: &Path, tail: usize) -> Result<String>;
+    /// Last `tail` lines of the app's logs. `timestamps` asks for an
+    /// ISO-8601 prefix on each line (DMN-088) — docker and systemd honor it,
+    /// process apps have no timestamp source of their own and ignore it.
+    fn logs(&self, meta: &AppMeta, dir: &Path, tail: usize, timestamps: bool) -> Result<String>;
 
     /// Release runtime resources (container, unit, process). Files under the
     /// app directory are removed by the manager afterwards.

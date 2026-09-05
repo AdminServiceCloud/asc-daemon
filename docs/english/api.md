@@ -71,9 +71,10 @@ recognizes keeps working against a newer daemon.
 | `POST /v1/apps/{id}/upgrade {"version"?}` | — (REST only for now) | Upgrade the app (DMN-003); without `version` — to the repository's newest tag, or the branch it tracks for a direct repository install (DMN-053). The app must be stopped. Answers `{"id", "up_to_date", "from", "to"}` |
 | `GET /v1/disk` | — (REST only for now) | Every visible app's footprint, largest first, plus the capacity of the filesystem holding the app store (DMN-053) |
 | `GET /v1/ports` | — (REST only for now) | Every visible app and the ports it publishes |
-| `GET /v1/stats` | — (REST only for now) | Resource consumption per app (CPU %, memory, disk, network); costs the ~500 ms sampling interval per call |
+| `GET /v1/stats?ids=a,b` | `AppService.GetAppStats` (DMN-080) | Resource consumption per app (CPU %, memory, disk, network); `ids` filters the set **before** sampling, not after — empty means every visible app. Costs the ~500 ms sampling interval per call |
+| — (gRPC only) | `AppService.StreamAppStats` (DMN-081) | The same samples as a push stream; `min_interval_secs` is the minimum gap between frames (the server floors it at ≥1s) |
 | `POST /v1/apps/{id}/start\|stop\|restart` | `AppService.Start/Stop/RestartApp` | Lifecycle |
-| `GET /v1/apps/{id}/logs?tail=N` | `AppService.GetAppLogs` | Log tail |
+| `GET /v1/apps/{id}/logs?tail=N&timestamps=bool` | `AppService.GetAppLogs` | Log tail, optionally with an ISO timestamp on each line (DMN-088) |
 | `GET /v1/apps/{id}/settings` | — (REST only for now) | The app's settings schema (`asc.settings.yaml`, `null` when the package defines none) and the values chosen so far, defaults merged in |
 | `PUT /v1/apps/{id}/settings {"values": {...}}` | — (REST only for now) | Replace the chosen values; keys the app's own schema does not define are rejected. A gRPC counterpart waits on modelling the settings schema in the proto contracts |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Removal including data |

@@ -36,4 +36,4 @@
 
 ## 🔗 Связанные задачи
 
-DMN-007, FE-006 и DMN-082 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-007, DMN-082, DMN-088, FE-006, FE-061 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

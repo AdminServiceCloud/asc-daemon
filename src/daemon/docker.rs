@@ -483,13 +483,19 @@ pub fn volume_mountpoint(cfg: &DockerConfig, name: &str) -> Result<Option<std::p
 }
 
 /// Last `tail` lines of the container's logs (non-follow), stdout+stderr.
-pub fn logs_tail(cfg: &DockerConfig, container: &str, tail: usize) -> Result<String> {
+pub fn logs_tail(
+    cfg: &DockerConfig,
+    container: &str,
+    tail: usize,
+    timestamps: bool,
+) -> Result<String> {
     block_on(async {
         let docker = connect(cfg)?;
         let opts = LogsOptions {
             stdout: true,
             stderr: true,
             follow: false,
+            timestamps,
             tail: tail.to_string(),
             ..Default::default()
         };

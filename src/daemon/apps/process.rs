@@ -187,7 +187,9 @@ impl AppDriver for ProcessDriver {
         }
     }
 
-    fn logs(&self, meta: &AppMeta, dir: &Path, tail: usize) -> Result<String> {
+    fn logs(&self, meta: &AppMeta, dir: &Path, tail: usize, _timestamps: bool) -> Result<String> {
+        // No timestamp source of our own — the file holds exactly what the
+        // app wrote to it (DMN-088).
         let _ = command_of(meta)?;
         match fs::read_to_string(dir.join(LOG_FILE)) {
             Ok(text) => Ok(tail_lines(&text, tail)),

@@ -61,8 +61,8 @@ impl AppDriver for DockerDriver {
         )
     }
 
-    fn logs(&self, meta: &AppMeta, _dir: &Path, tail: usize) -> Result<String> {
-        docker::logs_tail(&self.cfg, container_name(meta)?, tail)
+    fn logs(&self, meta: &AppMeta, _dir: &Path, tail: usize, timestamps: bool) -> Result<String> {
+        docker::logs_tail(&self.cfg, container_name(meta)?, tail, timestamps)
     }
 
     fn remove(&self, meta: &AppMeta, _dir: &Path) -> Result<()> {

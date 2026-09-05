@@ -183,7 +183,13 @@ mod rest {
             .collect();
         assert_eq!(
             capabilities,
-            vec!["sources", "credentials", "ssh-credentials"]
+            vec![
+                "sources",
+                "credentials",
+                "ssh-credentials",
+                "console.exec",
+                "app.stats"
+            ]
         );
 
         let (status, body) = call(&state, "GET", "/v1/apps", Some(TOKEN), None).await;
@@ -561,7 +567,13 @@ mod grpc {
         assert_eq!(status.apps_total, 1);
         assert_eq!(
             status.capabilities,
-            vec!["sources", "credentials", "ssh-credentials"]
+            vec![
+                "sources",
+                "credentials",
+                "ssh-credentials",
+                "console.exec",
+                "app.stats"
+            ]
         );
 
         let mut apps = AppServiceClient::new(channel(addr).await);

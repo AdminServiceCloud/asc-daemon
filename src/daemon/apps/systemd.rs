@@ -107,10 +107,15 @@ impl AppDriver for SystemdAppDriver {
         Ok(cgroup_usage(unit(meta)?))
     }
 
-    fn logs(&self, meta: &AppMeta, _dir: &Path, tail: usize) -> Result<String> {
+    fn logs(&self, meta: &AppMeta, _dir: &Path, tail: usize, timestamps: bool) -> Result<String> {
         let tail = tail.to_string();
+        // -o cat prints the bare message; -o short-iso prefixes an ISO-8601
+        // timestamp (plus host/unit/pid) the same way the live stream does
+        // (console/mod.rs) — kept consistent so one frontend parser covers
+        // both (DMN-088).
+        let format = if timestamps { "short-iso" } else { "cat" };
         let out = Command::new("journalctl")
-            .args(["-u", unit(meta)?, "-n", &tail, "--no-pager", "-o", "cat"])
+            .args(["-u", unit(meta)?, "-n", &tail, "--no-pager", "-o", format])
             .output()
             .context("cannot run journalctl")?;
         if !out.status.success() {

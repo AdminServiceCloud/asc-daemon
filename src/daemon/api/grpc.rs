@@ -479,7 +479,11 @@ impl AppService for Grpc {
         } else {
             req.tail as usize
         };
-        let logs = self.0.logs(ctx, req.id, tail).await.map_err(to_status)?;
+        let logs = self
+            .0
+            .logs(ctx, req.id, tail, req.timestamps)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(pb::GetAppLogsResponse { logs }))
     }
 
@@ -520,6 +524,100 @@ impl AppService for Grpc {
             token,
             expires_at,
         }))
+    }
+
+    async fn get_app_stats(
+        &self,
+        request: Request<pb::GetAppStatsRequest>,
+    ) -> Result<Response<pb::GetAppStatsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let ids = request.into_inner().ids;
+        let apps = self.0.stats_for(ctx, ids).await.map_err(to_status)?;
+        Ok(Response::new(pb::GetAppStatsResponse {
+            apps: apps.iter().map(app_stats_to_pb).collect(),
+        }))
+    }
+
+    type StreamAppStatsStream =
+        Pin<Box<dyn Stream<Item = Result<pb::AppStatsSample, Status>> + Send>>;
+
+    async fn stream_app_stats(
+        &self,
+        request: Request<pb::StreamAppStatsRequest>,
+    ) -> Result<Response<Self::StreamAppStatsStream>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        // A sampling window already costs ~500ms; anything faster than 1s
+        // is not a live stream, it is a busy loop (DMN-081).
+        let min_interval = Duration::from_secs(req.min_interval_secs.max(1) as u64);
+        let state = Arc::clone(&self.0);
+
+        struct StreamState {
+            state: Arc<ApiState>,
+            ctx: UserContext,
+            ids: Vec<String>,
+            min_interval: Duration,
+            queue: std::collections::VecDeque<pb::AppStatsSample>,
+            first: bool,
+        }
+
+        let seed = StreamState {
+            state,
+            ctx,
+            ids: req.ids,
+            min_interval,
+            queue: std::collections::VecDeque::new(),
+            first: true,
+        };
+
+        // Polling, not a shared sampler (unlike StreamSystemMetrics): each
+        // subscriber runs its own `stats_for` on a timer. Simpler than a
+        // fan-out hub, at the cost of one sampling window per subscriber
+        // instead of one per app — acceptable while StreamAppStats has few
+        // concurrent callers; a shared per-app sampler is the natural
+        // follow-up if that stops being true.
+        let stream = futures_util::stream::unfold(seed, |mut s| async move {
+            loop {
+                if let Some(sample) = s.queue.pop_front() {
+                    return Some((Ok(sample), s));
+                }
+                if !s.first {
+                    tokio::time::sleep(s.min_interval).await;
+                }
+                s.first = false;
+                match s.state.stats_for(s.ctx.clone(), s.ids.clone()).await {
+                    Ok(apps) => {
+                        s.queue.extend(apps.iter().map(app_stats_to_pb));
+                        if s.queue.is_empty() {
+                            // Nothing to report this tick (e.g. every
+                            // requested app was removed) — wait and retry
+                            // rather than spinning or ending the stream.
+                            continue;
+                        }
+                    }
+                    Err(err) => return Some((Err(to_status(err)), s)),
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+fn app_stats_to_pb(s: &crate::daemon::apps::AppStats) -> pb::AppStatsSample {
+    pb::AppStatsSample {
+        app_id: s.meta.id.clone(),
+        cpu_percent: s.cpu_percent,
+        memory_bytes: s.memory_bytes,
+        disk_read_bytes: s.disk_read_bytes,
+        disk_write_bytes: s.disk_write_bytes,
+        net_rx_bytes: s.net_rx_bytes,
+        net_tx_bytes: s.net_tx_bytes,
+        disk_read_rate: s.disk_read_rate,
+        disk_write_rate: s.disk_write_rate,
+        net_rx_rate: s.net_rx_rate,
+        net_tx_rate: s.net_tx_rate,
+        disk_bytes: s.disk_bytes,
+        quota_disk_bytes: s.quota_disk_bytes,
     }
 }
 

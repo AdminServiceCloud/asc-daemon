@@ -41,7 +41,7 @@ use tokens::TokenStore;
 /// discovering it by hitting `UNIMPLEMENTED`. Append a value here in the same
 /// change that ships the matching capability; never remove or rename a value
 /// once released — older platform builds may still be checking for it.
-pub const CAPABILITIES: &[&str] = &["sources", "credentials"];
+pub const CAPABILITIES: &[&str] = &["sources", "credentials", "ssh-credentials"];
 
 /// Shared state behind both transports.
 pub struct ApiState {
@@ -495,7 +495,7 @@ impl ApiState {
         Ok(self.console_tokens.issue(&app_id, session, command))
     }
 
-    // ── Registry sources & credentials (DMN-083/084) — pushed by the
+    // ── Registry sources & credentials (DMN-083/084/087) — pushed by the
     // platform, see docs/custom-registry.md and docs/package-manager.md.
     // Every call below acts on Scope::System: the daemon process itself is
     // always root, so unlike AppManager there is no per-caller-uid
@@ -534,21 +534,26 @@ impl ApiState {
         self: &Arc<Self>,
         kind: pkg::auth::Kind,
         target: String,
-        token: String,
+        secret: pkg::auth::CredentialSecret,
         username: Option<String>,
         app: Option<String>,
     ) -> Result<pkg::auth::Credential> {
         self.blocking(move |_s| {
             let mut auth = pkg::auth::GitAuth::load_with(pkg::sources::Scope::System)?;
-            let credential = auth
-                .add(
-                    kind,
-                    &target,
-                    pkg::auth::Method::Token { token },
-                    username,
-                    app,
-                )?
-                .clone();
+            let credential = match secret {
+                pkg::auth::CredentialSecret::Token(token) => auth
+                    .add(
+                        kind,
+                        &target,
+                        pkg::auth::Method::Token { token },
+                        username,
+                        app,
+                    )?
+                    .clone(),
+                pkg::auth::CredentialSecret::SshKeyPem(pem) => auth
+                    .add_ssh_key(kind, &target, &pem, username, app)?
+                    .clone(),
+            };
             auth.save()?;
             Ok(credential)
         })

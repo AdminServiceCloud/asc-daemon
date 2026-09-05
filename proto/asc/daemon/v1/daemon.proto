@@ -285,17 +285,27 @@ message ReplaceSourcesResponse {
   repeated Source sources = 1;
 }
 
-// Credential management (DMN-084): token credentials only. SSH-key
-// credentials are never exposed here — a private key cannot leave this
-// host, and stays exclusively under `asc auth add --ssh-key` on the node.
-// Unlike SourceService, this is targeted upsert/remove, not a full
-// replace: /etc/asc/auth.json can carry Kind::Registry (docker image
-// pull) credentials an operator added by hand for reasons unrelated to
-// marketplace registries, and a bulk replace would stomp them.
+// Credential management (DMN-084/DMN-087). Unlike SourceService, this is
+// targeted upsert/remove, not a full replace: /etc/asc/auth.json can carry
+// Kind::Registry (docker image pull) credentials an operator added by hand
+// for reasons unrelated to marketplace registries, and a bulk replace would
+// stomp them.
+//
+// Two secret shapes: a token, or (DMN-087) raw PEM private-key bytes — the
+// daemon writes the key to a 0600 file it owns under /etc/asc/ssh-keys and
+// registers a Method::SshKey pointing at it, the same shape `asc auth add
+// --ssh-key` produces by hand. The file is created with 0600 from the
+// moment it exists (no readable-then-chmod window) and is removed again
+// when the credential is replaced by something else or removed outright.
+// Advertised as the separate "ssh-credentials" capability (GetStatus) so a
+// platform talking to an older daemon can still push token credentials
+// while skipping ssh-key ones with an explicit per-registry error instead
+// of hitting UNIMPLEMENTED.
 service CredentialService {
   rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
   // Upsert-by-(kind, pattern, app) — identical to GitAuth::add's existing
-  // semantics; calling it again with the same triple replaces the token.
+  // semantics; calling it again with the same triple replaces the secret,
+  // token-for-token or key-for-key alike.
   rpc UpsertCredential(UpsertCredentialRequest) returns (UpsertCredentialResponse);
   rpc RemoveCredential(RemoveCredentialRequest) returns (RemoveCredentialResponse);
 }
@@ -307,7 +317,8 @@ enum CredentialKind {
 }
 
 // Never carries the secret — method_label mirrors Method::label() ("token"
-// or "ssh-key <path>"), has_secret says whether a token is configured.
+// or "ssh-key <path>"), has_secret says whether one is configured (true for
+// either method).
 message CredentialSummary {
   CredentialKind kind = 1;
   string pattern = 2;
@@ -327,8 +338,13 @@ message UpsertCredentialRequest {
   CredentialKind kind = 1;
   // Host/prefix, or a full git URL to derive it from (GitAuth::normalize).
   string target = 2;
-  // Token auth only — this RPC cannot set an ssh-key credential.
-  string token = 3;
+  oneof secret {
+    string token = 3;
+    // PEM-encoded (OpenSSH or PKCS8) private key bytes (DMN-087). The
+    // daemon owns the file it ends up in — see the CredentialService
+    // comment above.
+    string ssh_private_key_pem = 6;
+  }
   optional string username = 4;
   optional string app = 5;
 }

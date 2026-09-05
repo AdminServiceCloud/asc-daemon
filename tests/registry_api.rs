@@ -155,6 +155,9 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
     // Safe: this is the only test in this binary touching ASC_GIT_AUTH.
     unsafe { std::env::set_var("ASC_GIT_AUTH", ws.path().join("auth.json")) };
     unsafe { std::env::set_var("ASC_USER_GIT_AUTH", ws.path().join("user-auth.json")) };
+    // add_ssh_key (DMN-087) would otherwise write under /etc/asc/ssh-keys,
+    // which a non-root test run cannot create.
+    unsafe { std::env::set_var("ASC_SSH_KEY_STORE", ws.path().join("ssh-keys")) };
 
     let (state, _data) = test_state();
     let addr = spawn_server(state).await;
@@ -166,7 +169,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
             pb::UpsertCredentialRequest {
                 kind: pb::CredentialKind::Repo as i32,
                 target: "github.com/acme".into(),
-                token: secret.into(),
+                secret: Some(pb::upsert_credential_request::Secret::Token(secret.into())),
                 username: None,
                 app: None,
             },
@@ -201,7 +204,9 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
             pb::UpsertCredentialRequest {
                 kind: pb::CredentialKind::Repo as i32,
                 target: "github.com/acme".into(),
-                token: replaced_token.into(),
+                secret: Some(pb::upsert_credential_request::Secret::Token(
+                    replaced_token.into(),
+                )),
                 username: Some("me".into()),
                 app: None,
             },
@@ -236,6 +241,59 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
         .into_inner();
     assert!(listed.credentials.is_empty());
 
+    // DMN-087: an ssh-key secret writes a 0600 file this daemon owns and
+    // never leaks the PEM bytes back over the API either.
+    let pem =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nfakefakefake\n-----END OPENSSH PRIVATE KEY-----\n";
+    let created = client
+        .upsert_credential(with_auth(tonic::Request::new(
+            pb::UpsertCredentialRequest {
+                kind: pb::CredentialKind::Repo as i32,
+                target: "gitlab.com/acme".into(),
+                secret: Some(pb::upsert_credential_request::Secret::SshPrivateKeyPem(
+                    pem.into(),
+                )),
+                username: None,
+                app: None,
+            },
+        )))
+        .await
+        .unwrap()
+        .into_inner()
+        .credential
+        .unwrap();
+    assert!(created.has_secret);
+    assert!(created.method_label.starts_with("ssh-key "));
+    let key_path = created.method_label.trim_start_matches("ssh-key ");
+    assert_eq!(std::fs::read_to_string(key_path).unwrap(), pem);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(key_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let listed = client
+        .list_credentials(with_auth(tonic::Request::new(
+            pb::ListCredentialsRequest {},
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!format!("{listed:?}").contains("fakefakefake"));
+
+    // Removing it deletes the key file too, not just the auth.json entry.
+    client
+        .remove_credential(with_auth(tonic::Request::new(
+            pb::RemoveCredentialRequest {
+                kind: Some(pb::CredentialKind::Repo as i32),
+                target: "gitlab.com/acme".into(),
+            },
+        )))
+        .await
+        .unwrap();
+    assert!(!std::path::Path::new(key_path).exists());
+
     unsafe { std::env::remove_var("ASC_GIT_AUTH") };
     unsafe { std::env::remove_var("ASC_USER_GIT_AUTH") };
+    unsafe { std::env::remove_var("ASC_SSH_KEY_STORE") };
 }

@@ -174,14 +174,17 @@ mod rest {
         assert_eq!(body["version"], asc_daemon::VERSION);
         assert_eq!(body["apps_total"], 1);
         // DMN-076: always present so a caller can tell "no capabilities" from
-        // "daemon predates this field"; DMN-083/084 are the first to ship.
+        // "daemon predates this field"; DMN-083/084/087 are the first to ship.
         let capabilities: Vec<&str> = body["capabilities"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(capabilities, vec!["sources", "credentials"]);
+        assert_eq!(
+            capabilities,
+            vec!["sources", "credentials", "ssh-credentials"]
+        );
 
         let (status, body) = call(&state, "GET", "/v1/apps", Some(TOKEN), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -556,7 +559,10 @@ mod grpc {
             .into_inner();
         assert_eq!(status.version, asc_daemon::VERSION);
         assert_eq!(status.apps_total, 1);
-        assert_eq!(status.capabilities, vec!["sources", "credentials"]);
+        assert_eq!(
+            status.capabilities,
+            vec!["sources", "credentials", "ssh-credentials"]
+        );
 
         let mut apps = AppServiceClient::new(channel(addr).await);
         let list = apps

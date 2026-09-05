@@ -83,6 +83,7 @@ fn to_status(err: anyhow::Error) -> Status {
         || msg.contains("reserved")
         || msg.contains("duplicate")
         || msg.contains("cannot derive")
+        || msg.contains("ssh private key")
     {
         Status::invalid_argument(msg)
     } else {
@@ -560,7 +561,9 @@ fn credential_to_summary(c: &pkg::auth::Credential) -> pb::CredentialSummary {
         username: c.username.clone(),
         app: c.app.clone(),
         method_label: c.method.label(),
-        has_secret: matches!(c.method, pkg::auth::Method::Token { .. }),
+        // Every stored Credential has some Method — Token or SshKey — so a
+        // secret is always configured once an entry exists at all.
+        has_secret: true,
     }
 }
 
@@ -611,9 +614,22 @@ impl CredentialService for Grpc {
     ) -> Result<Response<pb::UpsertCredentialResponse>, Status> {
         let req = request.into_inner();
         let kind = credential_kind_from_pb(req.kind)?;
+        let secret = match req.secret {
+            Some(pb::upsert_credential_request::Secret::Token(token)) => {
+                pkg::auth::CredentialSecret::Token(token)
+            }
+            Some(pb::upsert_credential_request::Secret::SshPrivateKeyPem(pem)) => {
+                pkg::auth::CredentialSecret::SshKeyPem(pem.into_bytes())
+            }
+            None => {
+                return Err(Status::invalid_argument(
+                    "token or ssh_private_key_pem is required",
+                ));
+            }
+        };
         let credential = self
             .0
-            .upsert_credential(kind, req.target, req.token, req.username, req.app)
+            .upsert_credential(kind, req.target, secret, req.username, req.app)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::UpsertCredentialResponse {

@@ -27,11 +27,14 @@
 
 use std::fmt;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 use super::sources::Scope;
@@ -41,6 +44,10 @@ use crate::daemon::i18n::{Msg, tf, tf2};
 const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/auth.json";
 /// Pre-DMN-045 TOML store, read-only (migrated on the next write).
 const LEGACY_SYSTEM_PATH: &str = "/etc/asc/git-auth.toml";
+/// Where `add_ssh_key` (DMN-087) writes the private-key files it owns —
+/// separate from `~/.ssh`, which belongs to the user, not to a credential
+/// pushed over the API.
+const DEFAULT_SYSTEM_SSH_KEY_DIR: &str = "/etc/asc/ssh-keys";
 
 /// What a credential authorizes against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -110,6 +117,16 @@ impl Method {
     }
 }
 
+/// What a caller of [`GitAuth::add`]/[`GitAuth::add_ssh_key`] through the API
+/// (DMN-084/DMN-087) supplies — kept separate from [`Method`] because a
+/// caller never supplies a `PathBuf`: where the key file ends up on this
+/// host is [`GitAuth::add_ssh_key`]'s own decision, not the caller's.
+pub enum CredentialSecret {
+    Token(String),
+    /// PEM-encoded (OpenSSH or PKCS8) private key bytes.
+    SshKeyPem(Vec<u8>),
+}
+
 /// JSON store: `{"credentials": [...]}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AuthFile {
@@ -152,6 +169,34 @@ impl GitAuth {
         }
         let home = std::env::var_os("HOME").context("cannot determine home directory ($HOME)")?;
         Ok(PathBuf::from(home).join(".asc/auth.json"))
+    }
+
+    /// Directory `add_ssh_key` writes key files into for the system scope:
+    /// `$ASC_SSH_KEY_STORE` override or `/etc/asc/ssh-keys`.
+    fn system_ssh_key_dir() -> PathBuf {
+        std::env::var_os("ASC_SSH_KEY_STORE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SYSTEM_SSH_KEY_DIR))
+    }
+
+    /// Same, for the user scope: `$ASC_USER_SSH_KEY_STORE` override, or a
+    /// directory next to whichever `auth.json` this instance saves to.
+    fn user_ssh_key_dir(&self) -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os("ASC_USER_SSH_KEY_STORE") {
+            return Ok(PathBuf::from(path));
+        }
+        if let Some(path) = &self.user_file {
+            return Ok(path.with_file_name("ssh-keys"));
+        }
+        Ok(Self::user_path()?.with_file_name("ssh-keys"))
+    }
+
+    /// The key-file directory for whichever scope this instance edits.
+    fn ssh_key_dir(&self) -> Result<PathBuf> {
+        match self.scope {
+            Scope::System => Ok(Self::system_ssh_key_dir()),
+            Scope::User => self.user_ssh_key_dir(),
+        }
     }
 
     /// Pre-DMN-045 TOML paths, consulted only when the JSON store is absent.
@@ -373,6 +418,19 @@ impl GitAuth {
             Scope::System => &mut self.system,
             Scope::User => &mut self.user,
         };
+        // Replacing an ssh-key-backed entry with something else (a token, or
+        // no longer this credential at all) orphans its key file unless the
+        // new method reuses the exact same path — which add_ssh_key's
+        // deterministic naming means it always does when both sides are
+        // ssh-key credentials for the same (kind, pattern, app).
+        if let Some(previous) = list
+            .iter()
+            .find(|c| c.kind == kind && c.pattern == pattern && c.app == app)
+            && let Method::SshKey { key: old_key } = &previous.method
+            && !matches!(&method, Method::SshKey { key } if key == old_key)
+        {
+            cleanup_ssh_key_file(old_key);
+        }
         list.retain(|c| !(c.kind == kind && c.pattern == pattern && c.app == app));
         list.push(Credential {
             kind,
@@ -384,18 +442,56 @@ impl GitAuth {
         Ok(list.last().expect("just pushed"))
     }
 
+    /// Like [`Self::add`], but the secret is raw PEM bytes rather than an
+    /// already-resolved [`Method`] (DMN-087): the key is written to a
+    /// deterministic, 0600 file this store owns — `/etc/asc/ssh-keys` for
+    /// `Scope::System`, alongside `auth.json` for `Scope::User` — and a
+    /// [`Method::SshKey`] pointing at it is registered via [`Self::add`].
+    ///
+    /// The file name is derived only from `(kind, pattern, app)`, so a
+    /// repeat call for the same target overwrites the same file in place
+    /// instead of accumulating orphans, and switching that target to a
+    /// token or removing it cleans the file up (see [`Self::add`] and
+    /// [`Self::remove`]).
+    pub fn add_ssh_key(
+        &mut self,
+        kind: Kind,
+        target: &str,
+        pem: &[u8],
+        username: Option<String>,
+        app: Option<String>,
+    ) -> Result<&Credential> {
+        validate_private_key_pem(pem)?;
+        let pattern = normalize(target);
+        if pattern.is_empty() {
+            bail!("cannot derive a host from '{target}'");
+        }
+        let dir = self.ssh_key_dir()?;
+        let path = dir.join(ssh_key_file_name(kind, &pattern, app.as_deref()));
+        write_ssh_key_file(&dir, &path, pem)?;
+        self.add(kind, target, Method::SshKey { key: path }, username, app)
+    }
+
     /// Remove credentials for a host or prefix. `kind` narrows the removal to
-    /// one type; `None` removes every entry with that pattern.
+    /// one type; `None` removes every entry with that pattern. Also deletes
+    /// the backing key file of any removed ssh-key credential.
     pub fn remove(&mut self, kind: Option<Kind>, target: &str) -> Result<()> {
         let pattern = normalize(target);
         let list = match self.scope {
             Scope::System => &mut self.system,
             Scope::User => &mut self.user,
         };
+        let removes = |c: &Credential| c.pattern == pattern && kind.is_none_or(|k| c.kind == k);
         let before = list.len();
-        list.retain(|c| c.pattern != pattern || kind.is_some_and(|k| c.kind != k));
+        let removed: Vec<Credential> = list.iter().filter(|c| removes(c)).cloned().collect();
+        list.retain(|c| !removes(c));
         if list.len() == before {
             bail!("no credentials for '{pattern}'");
+        }
+        for credential in &removed {
+            if let Method::SshKey { key } = &credential.method {
+                cleanup_ssh_key_file(key);
+            }
         }
         Ok(())
     }
@@ -453,6 +549,80 @@ impl GitAuth {
             }
         }
         best
+    }
+}
+
+/// Rejects anything that does not even look like a PEM private key. This is
+/// deliberately shallow — parsing OpenSSH/PKCS8 key formats is not a
+/// dependency this daemon otherwise needs, and a key that passes this check
+/// but is still malformed surfaces as a normal, recognizable git/ssh error
+/// at clone time, the same as a hand-configured `asc auth add --ssh-key`
+/// pointed at a bad file today.
+fn validate_private_key_pem(pem: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(pem).context("ssh private key must be UTF-8 (PEM-encoded)")?;
+    if !text.contains("PRIVATE KEY") {
+        bail!("ssh private key does not look like PEM (no 'PRIVATE KEY' marker)");
+    }
+    Ok(())
+}
+
+/// Deterministic file name for a `(kind, pattern, app)` credential's key —
+/// stable so a repeat `add_ssh_key` for the same target overwrites the same
+/// file rather than leaking a new one, and the secret itself never appears
+/// in a path an `ls` could see.
+fn ssh_key_file_name(kind: Kind, pattern: &str, app: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(kind.label().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(pattern.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(app.unwrap_or("").as_bytes());
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{hex}.pem")
+}
+
+/// Writes `pem` to `path` with 0600 permissions from the moment the file is
+/// created — not `fs::write` followed by a `set_permissions` chmod, which
+/// leaves the file briefly readable at the process umask before the chmod
+/// lands. `dir` is created first (`0700`) if missing.
+fn write_ssh_key_file(dir: &Path, path: &Path, pem: &[u8]) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("cannot set permissions on {}", dir.display()))?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("cannot create ssh key file {}", path.display()))?;
+    file.write_all(pem)
+        .with_context(|| format!("cannot write ssh key file {}", path.display()))?;
+    // Belt and suspenders for the case the file already existed (truncate
+    // reuses its old mode, `mode()` above only applies on creation).
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("cannot set permissions on {}", path.display()))?;
+    Ok(())
+}
+
+/// Best-effort delete of an ssh-key credential's backing file. Never fails
+/// the caller: the `auth.json` entry is already gone by the time this runs
+/// (see [`GitAuth::add`]/[`GitAuth::remove`]), which is the guarantee that
+/// actually matters — a leftover 0600 file nobody references is untidy, not
+/// a live credential.
+fn cleanup_ssh_key_file(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(key = %path.display(), %error, "could not remove an orphaned ssh key file");
     }
 }
 
@@ -1210,5 +1380,124 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, vec!["id_ed25519", "work_key"]);
+    }
+
+    fn valid_pem() -> &'static [u8] {
+        b"-----BEGIN OPENSSH PRIVATE KEY-----\nfakefakefake\n-----END OPENSSH PRIVATE KEY-----\n"
+    }
+
+    /// Constructed directly (not through `load_with`) so these tests never
+    /// touch process-global env vars, the same reason most tests in this
+    /// file build a `GitAuth` struct literal instead of loading one.
+    fn user_scoped_auth(dir: &Path) -> GitAuth {
+        GitAuth {
+            system: Vec::new(),
+            user: Vec::new(),
+            scope: Scope::User,
+            user_file: Some(dir.join("auth.json")),
+        }
+    }
+
+    #[test]
+    fn add_ssh_key_writes_a_0600_file_and_registers_the_method() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = user_scoped_auth(dir.path());
+        let credential = auth
+            .add_ssh_key(Kind::Repo, "github.com/org/repo", valid_pem(), None, None)
+            .unwrap();
+        let Method::SshKey { key } = &credential.method else {
+            panic!("expected an ssh-key method");
+        };
+        assert!(key.starts_with(dir.path().join("ssh-keys")));
+        assert_eq!(fs::read(key).unwrap(), valid_pem());
+        let mode = fs::metadata(key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "key file must be 0600");
+    }
+
+    #[test]
+    fn add_ssh_key_rejects_malformed_pem() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = user_scoped_auth(dir.path());
+        let err = auth
+            .add_ssh_key(Kind::Repo, "github.com/org", b"not a key", None, None)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("PEM"));
+    }
+
+    #[test]
+    fn repeat_add_ssh_key_overwrites_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = user_scoped_auth(dir.path());
+        let first = auth
+            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None)
+            .unwrap()
+            .clone();
+        let Method::SshKey { key: first_path } = &first.method else {
+            unreachable!()
+        };
+        let first_path = first_path.clone();
+
+        let second_pem =
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\nDIFFERENT\n-----END OPENSSH PRIVATE KEY-----\n";
+        let second = auth
+            .add_ssh_key(Kind::Repo, "github.com/org", second_pem, None, None)
+            .unwrap()
+            .clone();
+        let Method::SshKey { key: second_path } = &second.method else {
+            unreachable!()
+        };
+        assert_eq!(
+            &first_path, second_path,
+            "the same (kind, pattern, app) must reuse the same file"
+        );
+        assert_eq!(fs::read(second_path).unwrap(), second_pem);
+        // Exactly one file in the directory: the first write left no orphan.
+        let entries: Vec<_> = fs::read_dir(first_path.parent().unwrap())
+            .unwrap()
+            .collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn switching_an_ssh_key_credential_to_a_token_removes_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = user_scoped_auth(dir.path());
+        let credential = auth
+            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None)
+            .unwrap()
+            .clone();
+        let Method::SshKey { key } = &credential.method else {
+            unreachable!()
+        };
+        let key = key.clone();
+        assert!(key.is_file());
+
+        auth.add(
+            Kind::Repo,
+            "github.com/org",
+            Method::Token { token: "t".into() },
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!key.exists(), "the orphaned ssh key file must be removed");
+    }
+
+    #[test]
+    fn remove_deletes_the_ssh_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = user_scoped_auth(dir.path());
+        let credential = auth
+            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None)
+            .unwrap()
+            .clone();
+        let Method::SshKey { key } = &credential.method else {
+            unreachable!()
+        };
+        let key = key.clone();
+
+        auth.remove(None, "github.com/org").unwrap();
+        assert!(!key.exists());
     }
 }

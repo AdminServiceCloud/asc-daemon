@@ -826,7 +826,9 @@ fn credential_to_json(c: &pkg::auth::Credential) -> CredentialJson {
         username: c.username.clone(),
         app: c.app.clone(),
         method: c.method.label(),
-        has_secret: matches!(c.method, pkg::auth::Method::Token { .. }),
+        // Every stored Credential has some Method — Token or SshKey — so a
+        // secret is always configured once an entry exists at all.
+        has_secret: true,
     }
 }
 
@@ -836,12 +838,17 @@ async fn list_credentials(State(state): State<Arc<ApiState>>) -> Result<Response
     Ok(Json(serde_json::json!({ "credentials": credentials })).into_response())
 }
 
+/// Exactly one of `token`/`sshPrivateKeyPem` is required — mirrors the
+/// gRPC contract's `oneof secret` (DMN-087).
 #[derive(Deserialize)]
 struct UpsertCredentialBody {
     #[serde(rename = "type", default)]
     kind: String,
     target: String,
-    token: String,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    ssh_private_key_pem: Option<String>,
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
@@ -853,8 +860,18 @@ async fn upsert_credential(
     Json(body): Json<UpsertCredentialBody>,
 ) -> Result<Response, ApiError> {
     let kind = pkg::auth::Kind::parse(&body.kind)?;
+    let secret = match (body.token, body.ssh_private_key_pem) {
+        (Some(token), None) => pkg::auth::CredentialSecret::Token(token),
+        (None, Some(pem)) => pkg::auth::CredentialSecret::SshKeyPem(pem.into_bytes()),
+        (None, None) => {
+            return Err(anyhow::anyhow!("token or sshPrivateKeyPem is required").into());
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow::anyhow!("only one of token or sshPrivateKeyPem may be set").into());
+        }
+    };
     let credential = state
-        .upsert_credential(kind, body.target, body.token, body.username, body.app)
+        .upsert_credential(kind, body.target, secret, body.username, body.app)
         .await?;
     Ok(Json(serde_json::json!({ "credential": credential_to_json(&credential) })).into_response())
 }

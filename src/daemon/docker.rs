@@ -232,6 +232,38 @@ pub fn running(cfg: &DockerConfig, container: &str) -> Result<bool> {
     })
 }
 
+/// Unix timestamp of the container's current run, for app uptime (DMN-089).
+/// `None` when the container is missing, stopped, or has never started —
+/// the Engine reports `"0001-01-01T00:00:00Z"` (Go's zero `time.Time`) for
+/// the last case rather than omitting the field.
+pub fn started_at(cfg: &DockerConfig, container: &str) -> Result<Option<i64>> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_container(container, None).await {
+            Ok(info) => {
+                let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+                if !running {
+                    return Ok(None);
+                }
+                let Some(raw) = info.state.and_then(|s| s.started_at) else {
+                    return Ok(None);
+                };
+                match OffsetDateTime::parse(&raw, &Rfc3339) {
+                    Ok(parsed) if parsed.unix_timestamp() > 0 => Ok(Some(parsed.unix_timestamp())),
+                    // Zero value or unparseable — not started, or an Engine
+                    // version whose format this doesn't expect.
+                    _ => Ok(None),
+                }
+            }
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
 /// The parts of a container's configuration the daemon manages, read back
 /// from inspect for settings-drift detection (see `pkg::refresh`).
 #[derive(Debug)]

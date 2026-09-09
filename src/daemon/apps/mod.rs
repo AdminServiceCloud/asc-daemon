@@ -164,6 +164,22 @@ pub struct AppStats {
     pub disk_bytes: u64,
     /// `meta.quota.disk_bytes`, if the app has a disk quota set.
     pub quota_disk_bytes: Option<u64>,
+    /// Seconds since the app's current run started (DMN-089). `None` when
+    /// stopped or the runtime cannot report a start time.
+    pub uptime_secs: Option<u64>,
+}
+
+/// Seconds between `started_at` (unix time) and now; `None` when the
+/// runtime did not report a start time. Never negative — a clock that moved
+/// backwards between the sample and this call reads as just-started rather
+/// than underflowing.
+fn uptime_from(started_at: Option<i64>) -> Option<u64> {
+    let started_at = started_at?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(now.saturating_sub(started_at).max(0) as u64)
 }
 
 /// CPU percentage from two cumulative readings over a wall-clock interval.
@@ -329,6 +345,7 @@ impl AppManager {
                 .map(|dir| disk::dir_size(&dir))
                 .unwrap_or(0);
             let quota_disk_bytes = app.meta.quota.as_ref().and_then(|q| q.disk_bytes);
+            let uptime_secs = uptime_from(second.as_ref().and_then(|u| u.started_at));
             let disk_read_bytes = second.as_ref().and_then(|u| u.disk_read_bytes);
             let disk_write_bytes = second.as_ref().and_then(|u| u.disk_write_bytes);
             let net_rx_bytes = second.as_ref().and_then(|u| u.net_rx_bytes);
@@ -367,6 +384,7 @@ impl AppManager {
                 net_tx_rate,
                 disk_bytes,
                 quota_disk_bytes,
+                uptime_secs,
             });
         }
         Ok(result)
@@ -580,6 +598,7 @@ mod tests {
             disk_write_bytes: None,
             net_rx_bytes: None,
             net_tx_bytes: None,
+            started_at: None,
         };
         let b = ResourceUsage {
             cpu_time_micros: 1_250_000,
@@ -588,12 +607,29 @@ mod tests {
             disk_write_bytes: None,
             net_rx_bytes: None,
             net_tx_bytes: None,
+            started_at: None,
         };
         // 250ms of CPU over 500ms of wall clock = 50%.
         assert!((cpu_percent(&a, &b, 500_000) - 50.0).abs() < 1e-9);
         // Counter went backwards (restart) → 0, not a negative percentage.
         assert_eq!(cpu_percent(&b, &a, 500_000), 0.0);
         assert_eq!(cpu_percent(&a, &b, 0), 0.0);
+    }
+
+    #[test]
+    fn uptime_from_none_when_no_start_time() {
+        assert_eq!(uptime_from(None), None);
+    }
+
+    #[test]
+    fn uptime_from_computes_seconds_since_start() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(uptime_from(Some(now - 90)), Some(90));
+        // A start time in the future (clock skew) reads as just-started.
+        assert_eq!(uptime_from(Some(now + 90)), Some(0));
     }
 
     #[test]

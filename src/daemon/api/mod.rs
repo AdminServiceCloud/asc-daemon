@@ -47,6 +47,8 @@ pub const CAPABILITIES: &[&str] = &[
     "ssh-credentials",
     "console.exec",
     "app.stats",
+    "app.ports",
+    "app.uptime",
 ];
 
 /// Shared state behind both transports.

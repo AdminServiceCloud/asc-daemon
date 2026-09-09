@@ -601,6 +601,28 @@ impl AppService for Grpc {
         });
         Ok(Response::new(Box::pin(stream)))
     }
+
+    async fn list_app_ports(
+        &self,
+        request: Request<pb::ListAppPortsRequest>,
+    ) -> Result<Response<pb::ListAppPortsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let (_meta, ports) = self
+            .0
+            .app_ports(ctx, request.into_inner().id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListAppPortsResponse {
+            ports: ports
+                .into_iter()
+                .map(|p| pb::PublishedPort {
+                    host: p.host as u32,
+                    container: p.container as u32,
+                    protocol: port_protocol_to_pb(p.protocol) as i32,
+                })
+                .collect(),
+        }))
+    }
 }
 
 fn app_stats_to_pb(s: &crate::daemon::apps::AppStats) -> pb::AppStatsSample {
@@ -618,6 +640,15 @@ fn app_stats_to_pb(s: &crate::daemon::apps::AppStats) -> pb::AppStatsSample {
         net_tx_rate: s.net_tx_rate,
         disk_bytes: s.disk_bytes,
         quota_disk_bytes: s.quota_disk_bytes,
+        uptime_secs: s.uptime_secs,
+    }
+}
+
+fn port_protocol_to_pb(p: crate::daemon::docker::PortProtocol) -> pb::PortProtocol {
+    match p {
+        crate::daemon::docker::PortProtocol::Tcp => pb::PortProtocol::Tcp,
+        crate::daemon::docker::PortProtocol::Udp => pb::PortProtocol::Udp,
+        crate::daemon::docker::PortProtocol::Both => pb::PortProtocol::Both,
     }
 }
 

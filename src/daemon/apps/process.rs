@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use super::driver::{AppDriver, ResourceUsage, RuntimeState, tail_lines};
+use super::driver::{AppDriver, ResourceUsage, RuntimeState, boot_time_unix, tail_lines};
 use super::meta::{AppMeta, Runtime};
 
 const PID_FILE: &str = "app.pid";
@@ -79,6 +79,15 @@ fn parse_proc_statm_rss_bytes(statm: &str, page_size: u64) -> Option<u64> {
     Some(pages * page_size)
 }
 
+/// Field 22 (`starttime`) of `/proc/<pid>/stat`: clock ticks since boot when
+/// the process started. Same comm-skipping approach as
+/// `parse_proc_stat_cpu_micros` — field 22 is index 19 once the leading
+/// pid/`(comm)` pair is stripped.
+fn parse_proc_stat_starttime_ticks(stat: &str) -> Option<u64> {
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// `read_bytes`/`write_bytes` of `/proc/<pid>/io` — actual bytes fetched
 /// from/handed off to the storage layer, not `rchar`/`wchar` (which also
 /// count page-cache hits). Either may be missing if the kernel lacks
@@ -110,6 +119,9 @@ fn usage_of_pid(pid: u32) -> Option<ResourceUsage> {
         .ok()
         .map(|raw| parse_proc_io_bytes(&raw))
         .unwrap_or((None, None));
+    let started_at = parse_proc_stat_starttime_ticks(&stat)
+        .zip(boot_time_unix())
+        .map(|(ticks_since_boot, boot)| boot + (ticks_since_boot / ticks.max(1)) as i64);
     Some(ResourceUsage {
         cpu_time_micros: parse_proc_stat_cpu_micros(&stat, ticks)?,
         memory_bytes: parse_proc_statm_rss_bytes(&statm, page)?,
@@ -117,6 +129,7 @@ fn usage_of_pid(pid: u32) -> Option<ResourceUsage> {
         disk_write_bytes,
         net_rx_bytes: None,
         net_tx_bytes: None,
+        started_at,
     })
 }
 
@@ -234,5 +247,12 @@ mod tests {
                     read_bytes: 4096\nwrite_bytes: 8192\ncancelled_write_bytes: 0\n";
         assert_eq!(parse_proc_io_bytes(raw), (Some(4096), Some(8192)));
         assert_eq!(parse_proc_io_bytes(""), (None, None));
+    }
+
+    #[test]
+    fn proc_stat_starttime_survives_parens_in_comm() {
+        let stat = "1234 ((a b) c)) S 1 1234 1234 0 -1 4194304 500 0 0 0 300 100 0 0 20 0 1 0 100 1000000 200 18446744073709551615";
+        assert_eq!(parse_proc_stat_starttime_ticks(stat), Some(100));
+        assert_eq!(parse_proc_stat_starttime_ticks("garbage"), None);
     }
 }

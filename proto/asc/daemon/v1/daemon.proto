@@ -74,6 +74,11 @@ service AppService {
   // see AppStatsHub. A caller that falls behind the broadcast buffer misses
   // the oldest queued samples rather than stalling the sampler.
   rpc StreamAppStats(StreamAppStatsRequest) returns (stream AppStatsSample);
+  // Published ports of one app (DMN-079), including the host↔container
+  // remap and protocol. Resolved from the app's package manifest, so it
+  // works even while the app is stopped — docker-only; other runtimes
+  // return an empty list.
+  rpc ListAppPorts(ListAppPortsRequest) returns (ListAppPortsResponse);
 }
 
 enum AppState {
@@ -304,6 +309,33 @@ message AppStatsSample {
   // reports, computed without its image/volume breakdown so it stays cheap.
   uint64 disk_bytes = 12;
   optional uint64 quota_disk_bytes = 13;
+  // Seconds since the app's current run started (DMN-089). Unset when
+  // stopped or the runtime cannot report a start time.
+  optional uint64 uptime_secs = 14;
+}
+
+enum PortProtocol {
+  PORT_PROTOCOL_UNSPECIFIED = 0;
+  PORT_PROTOCOL_TCP = 1;
+  PORT_PROTOCOL_UDP = 2;
+  // Both TCP and UDP, forwarded on the same port.
+  PORT_PROTOCOL_BOTH = 3;
+}
+
+// One published port, host↔container remap included — `host == container`
+// for a port published straight through.
+message PublishedPort {
+  uint32 host = 1;
+  uint32 container = 2;
+  PortProtocol protocol = 3;
+}
+
+message ListAppPortsRequest {
+  string id = 1;
+}
+
+message ListAppPortsResponse {
+  repeated PublishedPort ports = 1;
 }
 
 // Registry sources pushed by the platform (DMN-083, REG-005): the

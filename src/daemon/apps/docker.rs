@@ -49,16 +49,20 @@ impl AppDriver for DockerDriver {
     }
 
     fn usage(&self, meta: &AppMeta, _dir: &Path) -> Result<Option<ResourceUsage>> {
-        Ok(
-            docker::stats_usage(&self.cfg, container_name(meta)?)?.map(|u| ResourceUsage {
-                cpu_time_micros: u.cpu_time_micros,
-                memory_bytes: u.memory_bytes,
-                disk_read_bytes: u.disk_read_bytes,
-                disk_write_bytes: u.disk_write_bytes,
-                net_rx_bytes: u.net_rx_bytes,
-                net_tx_bytes: u.net_tx_bytes,
-            }),
-        )
+        let name = container_name(meta)?;
+        let Some(u) = docker::stats_usage(&self.cfg, name)? else {
+            return Ok(None);
+        };
+        let started_at = docker::started_at(&self.cfg, name)?;
+        Ok(Some(ResourceUsage {
+            cpu_time_micros: u.cpu_time_micros,
+            memory_bytes: u.memory_bytes,
+            disk_read_bytes: u.disk_read_bytes,
+            disk_write_bytes: u.disk_write_bytes,
+            net_rx_bytes: u.net_rx_bytes,
+            net_tx_bytes: u.net_tx_bytes,
+            started_at,
+        }))
     }
 
     fn logs(&self, meta: &AppMeta, _dir: &Path, tail: usize, timestamps: bool) -> Result<String> {

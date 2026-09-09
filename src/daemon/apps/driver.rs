@@ -41,6 +41,9 @@ pub struct ResourceUsage {
     pub net_rx_bytes: Option<u64>,
     /// Bytes sent over the network since the app started; see `net_rx_bytes`.
     pub net_tx_bytes: Option<u64>,
+    /// Unix timestamp the app's current run started (DMN-089). `None` when
+    /// the runtime cannot report a start time for this app.
+    pub started_at: Option<i64>,
 }
 
 /// Lifecycle operations every runtime kind must support.
@@ -80,6 +83,20 @@ pub fn for_runtime(runtime: &Runtime, docker: &DockerConfig) -> Box<dyn AppDrive
     }
 }
 
+/// The `btime` line of `/proc/stat`: unix time the system booted. The
+/// reference point both the process driver's `starttime` (clock ticks since
+/// boot) and the systemd driver's `ActiveEnterTimestampMonotonic`
+/// (microseconds since boot) are measured against (DMN-089).
+pub(super) fn parse_proc_stat_btime(stat: &str) -> Option<i64> {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("btime "))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+pub(super) fn boot_time_unix() -> Option<i64> {
+    parse_proc_stat_btime(&std::fs::read_to_string("/proc/stat").ok()?)
+}
+
 /// Last `n` lines of a text buffer (used by file- and CLI-based log sources).
 pub fn tail_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -96,5 +113,12 @@ mod tests {
         assert_eq!(tail_lines("a\nb\nc\n", 2), "b\nc");
         assert_eq!(tail_lines("a", 5), "a");
         assert_eq!(tail_lines("", 5), "");
+    }
+
+    #[test]
+    fn boot_time_parses_btime_line() {
+        let stat = "cpu  100 200 300\nbtime 1700000000\nprocesses 42\n";
+        assert_eq!(parse_proc_stat_btime(stat), Some(1_700_000_000));
+        assert_eq!(parse_proc_stat_btime("cpu 1 2 3\n"), None);
     }
 }

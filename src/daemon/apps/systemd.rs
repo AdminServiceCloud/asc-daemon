@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::driver::{AppDriver, ResourceUsage, RuntimeState};
+use super::driver::{AppDriver, ResourceUsage, RuntimeState, boot_time_unix};
 use super::meta::{AppMeta, Runtime};
 use crate::daemon::service::systemd::systemctl;
 
@@ -59,7 +59,35 @@ fn cgroup_usage(unit: &str) -> Option<ResourceUsage> {
         disk_write_bytes,
         net_rx_bytes: None,
         net_tx_bytes: None,
+        started_at: active_enter_unix(unit),
     })
+}
+
+/// Unix time the unit entered its current active run (DMN-089): reads
+/// `ActiveEnterTimestampMonotonic` (microseconds since boot, `%llu` —
+/// unlike `ActiveEnterTimestamp`, this needs no locale-dependent date
+/// parsing) and anchors it to `/proc/stat`'s `btime`, the same reference
+/// point the process driver's `/proc/<pid>/stat` `starttime` uses.
+fn active_enter_unix(unit: &str) -> Option<i64> {
+    let out = Command::new("systemctl")
+        .args([
+            "show",
+            "-p",
+            "ActiveEnterTimestampMonotonic",
+            "--value",
+            unit,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let usec_since_boot: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    // systemd reports 0 for a unit that has never been active.
+    if usec_since_boot == 0 {
+        return None;
+    }
+    Some(boot_time_unix()? + (usec_since_boot / 1_000_000) as i64)
 }
 
 /// systemd unit name for an app id.

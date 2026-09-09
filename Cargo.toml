@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -33,6 +33,10 @@ anyhow = "1"
 # unreachable here (we only ever `connect_with_unix`), so it stays inert.
 # `time` is its own hard requirement for the session's OAuth code path.
 bollard = { version = "0.21", default-features = false, features = ["pipe", "buildkit_providerless", "time"] }
+# Parses the RFC3339 `StartedAt` string bollard hands back from container
+# inspect into a unix timestamp for app uptime (DMN-089); already in the
+# dependency graph transitively through bollard itself.
+time = { version = "0.3", default-features = false, features = ["parsing"] }
 # Tar build context bytes for the Docker image build (DMN-050) into a bollard body.
 bytes = "1"
 clap = { version = "4", features = ["derive"] }

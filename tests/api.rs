@@ -188,7 +188,9 @@ mod rest {
                 "credentials",
                 "ssh-credentials",
                 "console.exec",
-                "app.stats"
+                "app.stats",
+                "app.ports",
+                "app.uptime"
             ]
         );
 
@@ -572,7 +574,9 @@ mod grpc {
                 "credentials",
                 "ssh-credentials",
                 "console.exec",
-                "app.stats"
+                "app.stats",
+                "app.ports",
+                "app.uptime"
             ]
         );
 

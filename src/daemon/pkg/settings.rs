@@ -397,6 +397,17 @@ fn valid_key(key: &str) -> bool {
     ok_first && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// POSIX-ish environment variable name pattern `^[A-Za-z_][A-Za-z0-9_]*$`,
+/// matching the platform's own env-group key validation, without a regex
+/// dependency.
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let ok_first = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    ok_first && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl SettingDef {
     /// Transport(s) a `type: ports` setting publishes on; `tcp` when unset.
     pub fn port_protocol(&self) -> PortProtocol {
@@ -648,6 +659,12 @@ impl SettingValues {
     pub const QUOTA_KEY: &'static str = "$quota";
     pub const START_COMMAND_KEY: &'static str = "$start_command";
     pub const BACKUP_KEY: &'static str = "$backup";
+    /// Extra environment variables delivered by the platform's connected
+    /// Environment groups (BE-010) — arbitrary `name: value` pairs the
+    /// package's own asc.settings.yaml does not declare with `env:`. Rides
+    /// the same settings.json → apply_settings/reconcile pipeline as every
+    /// other setting; see [`SettingValues::extra_env`].
+    pub const ENV_KEY: &'static str = "$env";
 
     /// The user's start-command override (the `start_command` editor
     /// category); wins over the package's `start_command`.
@@ -676,6 +693,23 @@ impl SettingValues {
             .context("invalid $backup override in settings.json")
     }
 
+    /// Extra `(name, value)` pairs from connected Environment groups
+    /// (BE-010, platform-side), under the `$env` reserved key. Sorted by
+    /// name for deterministic output.
+    pub fn extra_env(&self) -> Result<Vec<(String, String)>> {
+        let Some(value) = self.get(Self::ENV_KEY) else {
+            return Ok(Vec::new());
+        };
+        let map: std::collections::BTreeMap<String, String> = serde_json::from_value(value.clone())
+            .context("invalid $env override in settings.json")?;
+        for name in map.keys() {
+            if !valid_env_name(name) {
+                bail!("invalid $env variable name '{name}': use [A-Za-z_][A-Za-z0-9_]*");
+            }
+        }
+        Ok(map.into_iter().collect())
+    }
+
     /// The chosen values as they are stored, for a client that edits them
     /// out of process (the CLI over the daemon socket, DMN-043).
     pub fn as_map(&self) -> &serde_json::Map<String, serde_json::Value> {
@@ -695,7 +729,7 @@ impl SettingValues {
     pub fn validate_against(&self, defs: &[SettingDef]) -> Result<()> {
         for key in self.map.keys() {
             match key.as_str() {
-                Self::QUOTA_KEY | Self::START_COMMAND_KEY | Self::BACKUP_KEY => {}
+                Self::QUOTA_KEY | Self::START_COMMAND_KEY | Self::BACKUP_KEY | Self::ENV_KEY => {}
                 key if defs.iter().any(|d| d.key == key) => {}
                 other => bail!("unknown setting '{other}' for this app"),
             }
@@ -725,6 +759,7 @@ impl SettingValues {
         }
         self.quota_override()?;
         self.backup_policy()?;
+        self.extra_env()?;
         Ok(())
     }
 
@@ -1203,6 +1238,36 @@ settings:
         assert!(!valid_key(SettingValues::QUOTA_KEY));
         assert!(!valid_key(SettingValues::START_COMMAND_KEY));
         assert!(!valid_key(SettingValues::BACKUP_KEY));
+        assert!(!valid_key(SettingValues::ENV_KEY));
+    }
+
+    #[test]
+    fn extra_env_parses_and_validates() {
+        let mut values = SettingValues::default();
+        assert_eq!(values.extra_env().unwrap(), Vec::new());
+        values.set(
+            SettingValues::ENV_KEY,
+            serde_json::json!({ "BOT_TOKEN": "abc", "TZ": "Europe/Moscow" }),
+        );
+        assert_eq!(
+            values.extra_env().unwrap(),
+            [
+                ("BOT_TOKEN".to_string(), "abc".to_string()),
+                ("TZ".to_string(), "Europe/Moscow".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_env_rejects_bad_variable_names() {
+        let mut values = SettingValues::default();
+        values.set(
+            SettingValues::ENV_KEY,
+            serde_json::json!({ "not-a-valid-name": "x" }),
+        );
+        assert!(values.extra_env().is_err());
+        let defs: [SettingDef; 0] = [];
+        assert!(values.validate_against(&defs).is_err());
     }
 
     #[test]

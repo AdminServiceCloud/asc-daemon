@@ -1270,7 +1270,7 @@ pub(crate) fn runtime_inputs(
     let mut values = SettingValues::load(config_dir)?;
     let Some(settings) = settings else {
         return Ok(RuntimeInputs {
-            env: Vec::new(),
+            env: values.extra_env()?,
             ports: Vec::new(),
             volumes: Vec::new(),
             start_command: values.start_command_override().map(str::to_string),
@@ -1349,8 +1349,19 @@ pub(crate) fn runtime_inputs(
         .start_command_override()
         .map(str::to_string)
         .or_else(|| settings.start_command.clone());
+    // A package-declared `env:` setting wins over a same-named `$env` entry
+    // from a connected Environment group (BE-010 on the platform side): the
+    // user configured that value explicitly in the app's own settings UI, a
+    // more specific and deliberate choice than an org/project-wide default.
+    let mut env = values.env_pairs(&settings.settings);
+    let declared: std::collections::HashSet<String> = env.iter().map(|(k, _)| k.clone()).collect();
+    for (name, value) in values.extra_env()? {
+        if !declared.contains(&name) {
+            env.push((name, value));
+        }
+    }
     Ok(RuntimeInputs {
-        env: values.env_pairs(&settings.settings),
+        env,
         ports,
         volumes,
         start_command,
@@ -1903,6 +1914,46 @@ mod tests {
         let inputs = runtime_inputs(None, dir.path()).unwrap();
         assert!(inputs.env.is_empty() && inputs.ports.is_empty() && inputs.volumes.is_empty());
         assert_eq!(inputs.start_command.as_deref(), Some("./cs2 -override"));
+    }
+
+    #[test]
+    fn extra_env_from_connected_groups_fills_gaps_but_not_declared_values() {
+        use super::super::settings::SettingValues;
+        let settings: SettingsFile = serde_yaml::from_str(
+            "settings:\n  - { key: map, type: enum, values: [de_dust2, de_mirage], default: de_dust2, env: CS2_STARTMAP }\n",
+        )
+        .unwrap();
+        settings.validate().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut values = SettingValues::load(dir.path()).unwrap();
+        values.set(
+            SettingValues::ENV_KEY,
+            serde_json::json!({ "CS2_STARTMAP": "de_mirage", "BOT_TOKEN": "abc" }),
+        );
+        values.save(dir.path()).unwrap();
+
+        // The package's own declared env wins over a same-named $env entry;
+        // an extra key with no matching setting still reaches the env.
+        let inputs = runtime_inputs(Some(&settings), dir.path()).unwrap();
+        assert_eq!(
+            inputs.env,
+            [
+                ("CS2_STARTMAP".to_string(), "de_dust2".to_string()),
+                ("BOT_TOKEN".to_string(), "abc".to_string()),
+            ]
+        );
+
+        // No settings file at all — every $env entry reaches the env
+        // (sorted by name, since there is no package env: to defer to).
+        let inputs = runtime_inputs(None, dir.path()).unwrap();
+        assert_eq!(
+            inputs.env,
+            [
+                ("BOT_TOKEN".to_string(), "abc".to_string()),
+                ("CS2_STARTMAP".to_string(), "de_mirage".to_string()),
+            ]
+        );
     }
 
     #[test]

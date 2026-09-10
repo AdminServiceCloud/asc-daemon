@@ -27,7 +27,7 @@ use axum::response::Response;
 use tracing::{debug, info, warn};
 
 use crate::daemon::apps::meta::AppMeta;
-use crate::daemon::apps::{AppManager, AppStatus, Outcome, UserContext};
+use crate::daemon::apps::{AppManager, AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::config::Config;
 use crate::daemon::files;
 use crate::daemon::monitor::Monitor;
@@ -461,20 +461,30 @@ impl ApiState {
 
     /// Replace an app's chosen values, validated against its own schema.
     /// The runtime picks them up on the next (re)start, exactly as it does
-    /// after an in-process edit.
+    /// after an in-process edit. Returns whether the app is currently
+    /// running with a live configuration that would now drift from these
+    /// values — the caller (DMN-078's `SetAppSettings`) surfaces this as
+    /// "restart required"; a stopped app always answers `false`, since its
+    /// values simply apply cleanly on the next start.
     pub async fn set_app_settings(
         self: &Arc<Self>,
         ctx: UserContext,
         id: String,
         values: pkg::settings::SettingValues,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.blocking(move |s| {
             let (file, _, config_dir) = s.settings_of(&ctx, &id)?;
             let defs = file.as_ref().map(|f| f.settings.as_slice()).unwrap_or(&[]);
             values.validate_against(defs)?;
             std::fs::create_dir_all(&config_dir)
                 .with_context(|| format!("cannot create directory {}", config_dir.display()))?;
-            values.save(&config_dir)
+            values.save(&config_dir)?;
+            let status = s.manager.status(&ctx, &id)?;
+            if status.state != RuntimeState::Running {
+                return Ok(false);
+            }
+            let app_dir = s.manager.store().app_dir(&status.meta.id)?;
+            crate::daemon::pkg::refresh::would_require_restart(&s.config, &status.meta, &app_dir)
         })
         .await
     }

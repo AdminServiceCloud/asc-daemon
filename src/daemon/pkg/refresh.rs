@@ -73,6 +73,29 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
     Ok(true)
 }
 
+/// Whether the current settings.json, applied to a *running* Docker app,
+/// would drift from the live container — i.e. whether a settings write
+/// (DMN-078's `SetAppSettings`) should report `restart_required`. Does not
+/// touch the container; the caller is expected to only call this while the
+/// app is running (a stopped app's changes simply apply on the next start,
+/// no separate restart needed). Non-Docker runtimes and a missing container
+/// always answer `false` — the same cases [`apply_settings`] treats as
+/// nothing to compare against.
+pub fn would_require_restart(config: &Config, meta: &AppMeta, app_dir: &Path) -> Result<bool> {
+    let Runtime::Docker {
+        container,
+        image_source,
+    } = &meta.runtime
+    else {
+        return Ok(false);
+    };
+    let Some(actual) = docker::container_applied(&config.docker, container)? else {
+        return Ok(false);
+    };
+    let desired = Desired::load(config, meta, app_dir, *image_source)?;
+    Ok(!desired.matches(&actual))
+}
+
 /// Everything a recreate needs plus the comparable desired configuration,
 /// loaded from the installed app's repository and settings.
 struct Desired {

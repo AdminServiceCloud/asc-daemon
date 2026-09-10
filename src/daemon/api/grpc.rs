@@ -626,6 +626,47 @@ impl AppService for Grpc {
                 .collect(),
         }))
     }
+
+    async fn get_app_settings(
+        &self,
+        request: Request<pb::GetAppSettingsRequest>,
+    ) -> Result<Response<pb::GetAppSettingsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let (file, values) = self
+            .0
+            .app_settings(ctx, request.into_inner().id)
+            .await
+            .map_err(to_status)?;
+        let settings_json = file
+            .map(|f| serde_json::to_string(&f))
+            .transpose()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let values_json =
+            serde_json::to_string(values.as_map()).map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(pb::GetAppSettingsResponse {
+            settings_json,
+            values_json,
+        }))
+    }
+
+    async fn set_app_settings(
+        &self,
+        request: Request<pb::SetAppSettingsRequest>,
+    ) -> Result<Response<pb::SetAppSettingsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&req.values_json)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let restart_required = self
+            .0
+            .set_app_settings(ctx, req.id, pkg::settings::SettingValues::from_map(map))
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SetAppSettingsResponse {
+            restart_required,
+        }))
+    }
 }
 
 fn app_stats_to_pb(s: &crate::daemon::apps::AppStats) -> pb::AppStatsSample {

@@ -79,6 +79,15 @@ service AppService {
   // works even while the app is stopped — docker-only; other runtimes
   // return an empty list.
   rpc ListAppPorts(ListAppPortsRequest) returns (ListAppPortsResponse);
+  // Settings schema and chosen values (DMN-078/DMN-043): what a settings
+  // editor needs to render the same form `asc app settings` does.
+  // values_json is a JSON object string, not google.protobuf.Struct — Struct
+  // encodes every number as double and would turn a port 8080 into 8080.0
+  // (see asc-platform/docs/features/app-settings.md).
+  rpc GetAppSettings(GetAppSettingsRequest) returns (GetAppSettingsResponse);
+  // Full-map replacement, same contract as PUT /v1/apps/{id}/settings: a key
+  // absent from values_json resets to the package default.
+  rpc SetAppSettings(SetAppSettingsRequest) returns (SetAppSettingsResponse);
 }
 
 enum AppState {
@@ -341,6 +350,33 @@ message ListAppPortsRequest {
 
 message ListAppPortsResponse {
   repeated PublishedPort ports = 1;
+}
+
+message GetAppSettingsRequest {
+  string id = 1;
+}
+
+message GetAppSettingsResponse {
+  // JSON-encoded SettingsFile (asc.settings.yaml); absent when the package
+  // declares no settings.
+  optional string settings_json = 1;
+  // JSON object of the chosen values (defaults merged in), unmasked — the
+  // daemon has no notion of "who is asking"; masking secrets on read is the
+  // platform's nodeservice's job.
+  string values_json = 2;
+}
+
+message SetAppSettingsRequest {
+  string id = 1;
+  string values_json = 2;
+}
+
+message SetAppSettingsResponse {
+  // True when the app is currently running and its live container
+  // configuration would now drift from these values — the caller should
+  // offer a restart. False when the app is stopped (values simply apply on
+  // the next start) or nothing changed.
+  bool restart_required = 1;
 }
 
 // Registry sources pushed by the platform (DMN-083, REG-005): the

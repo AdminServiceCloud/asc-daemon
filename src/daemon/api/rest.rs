@@ -778,8 +778,8 @@ async fn set_app_settings(
     Json(body): Json<SettingsBody>,
 ) -> Result<Response, ApiError> {
     let values = crate::daemon::pkg::settings::SettingValues::from_map(body.values);
-    state.set_app_settings(ctx, id, values).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    let restart_required = state.set_app_settings(ctx, id, values).await?;
+    Ok(Json(serde_json::json!({ "restartRequired": restart_required })).into_response())
 }
 
 #[derive(Deserialize)]

@@ -22,7 +22,7 @@ use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
 use crate::daemon::i18n::{Msg, t, tf, tf2, tf3};
-use crate::daemon::progress::{self, PhaseBar};
+use crate::daemon::progress::{self, InstallReporter, PhaseBar};
 
 #[derive(Debug)]
 pub struct InstallReport {
@@ -208,6 +208,7 @@ pub fn install(
     custom_name: Option<&str>,
     license_ack: bool,
     image_choice: Option<ImageSource>,
+    report: Option<&dyn InstallReporter>,
 ) -> Result<InstallOutcome> {
     let (package_spec, version_spec) = parse_spec(spec);
     let (package, stack_app) = match package_spec.split_once('/') {
@@ -236,6 +237,7 @@ pub fn install(
         custom_name,
         license_ack,
         image_choice,
+        report,
     };
     if resolved.entry.package_type == "stack" {
         return install_stack(config, ctx, &resolved, package, stack_app, opts);
@@ -286,6 +288,9 @@ struct InstallOpts<'a> {
     /// Image source when the manifest offers both `image` and `image-build`
     /// (DMN-050); `None` raises [`ImageChoiceRequired`] for such a manifest.
     image_choice: Option<ImageSource>,
+    /// Where to send progress lines as the install runs (DMN-090); `None`
+    /// for a local `asc install` (its progress is the terminal bars instead).
+    report: Option<&'a dyn InstallReporter>,
 }
 
 /// Validate a user-chosen app name (DMN-024): printable, sane length, and
@@ -332,7 +337,13 @@ fn install_stack(
         path: probe_dir.clone(),
         armed: true,
     };
-    clone_repository(&resolved.entry.source.git, opts.version, &probe_dir, ctx)?;
+    clone_repository(
+        &resolved.entry.source.git,
+        opts.version,
+        &probe_dir,
+        ctx,
+        opts.report,
+    )?;
     let stack_root = manifest_dir(&probe_dir, resolved.entry.source.path.as_deref())?;
     // One repository = one license: consent is asked once for the stack.
     require_license_ack(resolved, package, &stack_root, &probe_dir, opts.license_ack)?;
@@ -421,7 +432,13 @@ fn install_one(
     };
 
     let repo_dir = app_dir.join("repository");
-    let cloned_tag = clone_repository(&resolved.entry.source.git, opts.version, &repo_dir, ctx)?;
+    let cloned_tag = clone_repository(
+        &resolved.entry.source.git,
+        opts.version,
+        &repo_dir,
+        ctx,
+        opts.report,
+    )?;
 
     let (manifest_dir, _) =
         locate_manifest(&repo_dir, resolved.entry.source.path.as_deref(), stack_app)?;
@@ -463,6 +480,7 @@ fn install_one(
         quota.as_ref(),
         settings.as_ref(),
         opts.image_choice,
+        opts.report,
     )?;
 
     let effective_version = cloned_tag.unwrap_or_else(|| manifest.version.clone());
@@ -571,6 +589,7 @@ pub fn install_from_git(
     custom_name: Option<&str>,
     license_ack: bool,
     image_choice: Option<ImageSource>,
+    report: Option<&dyn InstallReporter>,
 ) -> Result<InstallReport> {
     if let Some(name) = custom_name {
         validate_custom_name(config, ctx, name)?;
@@ -592,7 +611,7 @@ pub fn install_from_git(
         Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(r),
         None => None,
     };
-    git_clone(url, checkout, &repo_dir, ctx)?;
+    git_clone(url, checkout, &repo_dir, ctx, report)?;
 
     // No monorepo `path` for a direct install: the manifest is the
     // repository root.
@@ -637,6 +656,7 @@ pub fn install_from_git(
         quota.as_ref(),
         settings.as_ref(),
         image_choice,
+        report,
     )?;
 
     let effective_version = checkout
@@ -872,6 +892,7 @@ fn build_app_image(
     docker_cfg: &DockerConfig,
     manifest_dir: &Path,
     id: &str,
+    report: Option<&dyn InstallReporter>,
 ) -> Result<String> {
     let build = manifest
         .runtime
@@ -892,6 +913,7 @@ fn build_app_image(
             tag: &tag,
             args: &build.args,
         },
+        report,
     )?;
     Ok(tag)
 }
@@ -939,13 +961,14 @@ pub(super) fn clone_repository(
     version: Option<&str>,
     dest: &Path,
     ctx: &UserContext,
+    report: Option<&dyn InstallReporter>,
 ) -> Result<Option<String>> {
     match version {
         Some(tag) => {
             let candidates = [tag.to_string(), format!("v{tag}")];
             let mut last_err = String::new();
             for candidate in &candidates {
-                match git_clone(git_url, Some(candidate), dest, ctx) {
+                match git_clone(git_url, Some(candidate), dest, ctx, report) {
                     Ok(()) => return Ok(Some(candidate.clone())),
                     Err(err) => {
                         // A failed clone may leave a partial directory behind.
@@ -962,7 +985,7 @@ pub(super) fn clone_repository(
             bail!("cannot clone {git_url} at tag '{tag}' (also tried 'v{tag}'): {last_err}")
         }
         None => {
-            git_clone(git_url, None, dest, ctx)?;
+            git_clone(git_url, None, dest, ctx, report)?;
             Ok(None)
         }
     }
@@ -973,7 +996,13 @@ pub(super) fn clone_repository(
 /// output once stderr isn't a tty (which it never is here, piped for
 /// capture), so `--progress` forces it back on and [`read_progress_lines`]
 /// parses the `\r`-delimited status line as it streams in.
-fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path, ctx: &UserContext) -> Result<()> {
+fn git_clone(
+    git_url: &str,
+    tag: Option<&str>,
+    dest: &Path,
+    ctx: &UserContext,
+    report: Option<&dyn InstallReporter>,
+) -> Result<()> {
     // Credentials for private repositories (DMN-003), looked up in the
     // stores the *calling* user can reach (DMN-062) — the daemon runs as
     // root, so its own store is not where `asc auth add` put them. An
@@ -1016,9 +1045,15 @@ fn git_clone(git_url: &str, tag: Option<&str>, dest: &Path, ctx: &UserContext) -
     // first avoids the classic pipe-fills-up-then-deadlock ordering bug.
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let bar = progress::interactive().then(PhaseBar::new);
+    if let Some(report) = report {
+        report.line(&format!("$ git clone {}", args.join(" ")));
+    }
     let captured = read_progress_lines(&mut stderr, |line| {
         if let (Some(bar), Some((phase, pct))) = (&bar, progress::parse_git_progress(line)) {
             bar.update(phase, pct);
+        }
+        if let Some(report) = report {
+            report.line(line);
         }
     });
     if let Some(bar) = bar {
@@ -1161,6 +1196,7 @@ pub(super) fn provision(
     quota: Option<&Quota>,
     settings: Option<&SettingsFile>,
     image_choice: Option<ImageSource>,
+    report: Option<&dyn InstallReporter>,
 ) -> Result<Runtime> {
     let inputs = runtime_inputs(settings, &app_dir.join("config"))?;
     let start_command = inputs
@@ -1186,6 +1222,7 @@ pub(super) fn provision(
                 quota,
                 start_command,
                 &[Some(id), app_uuid],
+                report,
             )?;
             // Persist the choice only when the manifest offered both, so a
             // later drift-recreate reuses it; single-option apps derive it.
@@ -1420,6 +1457,7 @@ fn docker_create(
     // Identities this app answers to (id and, once it exists, uuid) —
     // credentials bound to either one apply (DMN-045/046).
     app_ids: &[Option<&str>],
+    report: Option<&dyn InstallReporter>,
 ) -> Result<()> {
     // Make the effective image present locally: pull a prebuilt one (so its
     // declared USER is known before bind-mounted volumes are created and can
@@ -1435,11 +1473,11 @@ fn docker_create(
                 .clone()
                 .expect("validated: prebuilt source has an image");
             let auth = registry_auth_for(&image, app_ids);
-            docker::ensure_pulled(docker_cfg, &image, auth.as_ref())?;
+            docker::ensure_pulled(docker_cfg, &image, auth.as_ref(), report)?;
             (image, auth)
         }
         ImageSource::Build => (
-            build_app_image(manifest, docker_cfg, manifest_dir, id)?,
+            build_app_image(manifest, docker_cfg, manifest_dir, id, report)?,
             None,
         ),
     };
@@ -2084,6 +2122,7 @@ mod tests {
             &docker_cfg,
             None,
             Some(&settings),
+            None,
             None,
         )
         .unwrap();

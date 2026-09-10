@@ -144,6 +144,7 @@ pub fn clone_app(
         quota.as_ref(),
         settings.as_ref(),
         image_source,
+        None,
     )?;
 
     let meta = AppMeta {

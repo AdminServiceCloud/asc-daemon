@@ -32,6 +32,7 @@ use crate::daemon::config::Config;
 use crate::daemon::files;
 use crate::daemon::monitor::Monitor;
 use crate::daemon::pkg;
+use crate::daemon::progress;
 
 use console::ConsoleTokens;
 use tokens::TokenStore;
@@ -87,6 +88,14 @@ pub struct AppPortsRow {
     pub name: String,
     pub owner: String,
     pub ports: Vec<crate::daemon::docker::PublishedPort>,
+}
+
+/// One event of [`ApiState::install_stream`]: a progress line, or the
+/// terminal result — the same `Result` the unary [`ApiState::install`]
+/// returns.
+pub enum InstallStreamEvent {
+    Line(String),
+    Done(Result<pkg::InstallOutcome>),
 }
 
 /// Context of bearer-token (TCP) calls: full visibility — the platform
@@ -302,6 +311,7 @@ impl ApiState {
                     name.as_deref(),
                     license_ack,
                     image_choice,
+                    None,
                 )?;
                 return Ok(pkg::InstallOutcome::App(report));
             }
@@ -318,9 +328,94 @@ impl ApiState {
                 name.as_deref(),
                 license_ack,
                 image_choice,
+                None,
             )
         })
         .await
+    }
+
+    /// Streamed sibling of [`Self::install`] (DMN-090): the same install,
+    /// but progress lines arrive as [`InstallStreamEvent::Line`] as they
+    /// happen, ending in one [`InstallStreamEvent::Done`] with the same
+    /// result `install` would have returned. The install runs in the
+    /// background regardless of whether the receiver is still being read —
+    /// dropping it does not cancel the install, the same "finish what was
+    /// started" stance `install` already takes for a caller that goes away
+    /// mid-request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_stream(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        spec: String,
+        source: Option<String>,
+        name: Option<String>,
+        branch: Option<String>,
+        tag: Option<String>,
+        license_ack: bool,
+        image_choice: Option<crate::daemon::apps::ImageSource>,
+    ) -> tokio::sync::mpsc::Receiver<InstallStreamEvent> {
+        // A line per subscriber's outstanding capacity: git/docker can emit
+        // many lines quickly, and blocking the install itself on a slow
+        // reader would defeat the point of streaming rather than waiting.
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        struct ChannelReporter(tokio::sync::mpsc::Sender<InstallStreamEvent>);
+        impl progress::InstallReporter for ChannelReporter {
+            fn line(&self, text: &str) {
+                // Best effort: a full or closed channel (a caller that
+                // stopped reading) must not slow down or panic the install
+                // that is still running.
+                let _ = self
+                    .0
+                    .blocking_send(InstallStreamEvent::Line(text.to_string()));
+            }
+        }
+
+        let state = Arc::clone(self);
+        let result_tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let reporter = ChannelReporter(tx);
+            let outcome = (move || {
+                if pkg::is_git_url(&spec) {
+                    if source.is_some() {
+                        anyhow::bail!("--source has no effect on a direct repository install");
+                    }
+                    let git_ref = match (branch.as_deref(), tag.as_deref()) {
+                        (Some(b), None) => Some(pkg::GitRef::Branch(b)),
+                        (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
+                        (None, None) => None,
+                        (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
+                    };
+                    let report = pkg::install_from_git(
+                        &state.config,
+                        &ctx,
+                        &spec,
+                        git_ref,
+                        name.as_deref(),
+                        license_ack,
+                        image_choice,
+                        Some(&reporter),
+                    )?;
+                    return Ok(pkg::InstallOutcome::App(report));
+                }
+                if branch.is_some() || tag.is_some() {
+                    anyhow::bail!(
+                        "branch and tag are only used for a direct repository install (a git URL as the spec)"
+                    );
+                }
+                pkg::install(
+                    &state.config,
+                    &ctx,
+                    &spec,
+                    source.as_deref(),
+                    name.as_deref(),
+                    license_ack,
+                    image_choice,
+                    Some(&reporter),
+                )
+            })();
+            let _ = result_tx.blocking_send(InstallStreamEvent::Done(outcome));
+        });
+        rx
     }
 
     pub async fn start(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {

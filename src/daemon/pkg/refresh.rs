@@ -65,6 +65,7 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
         desired.quota.as_ref(),
         desired.settings.as_ref(),
         image_source,
+        None,
     )?;
     // Keep meta truthful for `asc app info`: the quota may have been
     // overridden in the settings editor.
@@ -159,7 +160,7 @@ impl Desired {
                         &image,
                         &[Some(meta.id.as_str()), meta.uuid.as_deref()],
                     );
-                    docker::ensure_pulled(&config.docker, &image, auth.as_ref())?;
+                    docker::ensure_pulled(&config.docker, &image, auth.as_ref(), None)?;
                 }
                 docker::image_uid_gid(&config.docker, &image)?
             }

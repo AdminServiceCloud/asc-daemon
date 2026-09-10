@@ -17,6 +17,17 @@ pub fn interactive() -> bool {
     std::io::stderr().is_terminal()
 }
 
+/// Sink for plain-text install progress lines, independent of the
+/// interactive bars above: those render only on a terminal, this runs
+/// whenever a caller wants to watch an install live over the API rather than
+/// wait for the final result (the platform's install dialog, DMN-090).
+/// `Send + Sync` because git clone and docker pull/build report from
+/// whichever thread happens to run them, not always the same one (docker
+/// pull/build bridge into async code via `block_on`).
+pub trait InstallReporter: Send + Sync {
+    fn line(&self, text: &str);
+}
+
 fn bytes_style() -> ProgressStyle {
     ProgressStyle::with_template(
         "{prefix:.bold.dim} [{bar:24.cyan/blue}] {bytes}/{total_bytes} {msg}",

@@ -86,6 +86,7 @@ fn upgrade_follows_the_recorded_repository_url() {
         None,
         true,
         None,
+        None,
     )
     .unwrap();
     let meta = store.get("demo").unwrap().unwrap();
@@ -177,6 +178,7 @@ fn branch_installs_follow_their_branch() {
         None,
         true,
         None,
+        None,
     )
     .unwrap();
     let meta = store.get("demo").unwrap().unwrap();
@@ -248,7 +250,7 @@ fn untagged_repositories_track_their_default_branch() {
     let url = repo.display().to_string().replace('\\', "/");
     let (config, ctx, store) = workspace(ws.path());
 
-    pkg::install_from_git(&config, &ctx, &url, None, None, true, None).unwrap();
+    pkg::install_from_git(&config, &ctx, &url, None, None, true, None, None).unwrap();
     assert_eq!(
         store.get("demo").unwrap().unwrap().version.as_deref(),
         Some("0.1.0"),

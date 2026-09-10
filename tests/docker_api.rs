@@ -201,6 +201,7 @@ fn pull_sends_registry_credentials() {
             username: "statebyte".into(),
             token: "ghp_secret".into(),
         }),
+        None,
     )
     .unwrap();
 

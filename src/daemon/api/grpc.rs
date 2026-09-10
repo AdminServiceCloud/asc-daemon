@@ -331,8 +331,43 @@ impl MonitorService for Grpc {
     }
 }
 
+/// Shared by `install_app` and `install_app_stream`: both end in the same
+/// result shape, one returned directly, the other as the last stream event.
+fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
+    match outcome {
+        InstallOutcome::App(report) => pb::InstallAppResponse {
+            id: report.id,
+            version: report.version,
+            apps: vec![],
+            skipped: vec![],
+        },
+        InstallOutcome::Stack {
+            stack,
+            installed,
+            skipped,
+        } => pb::InstallAppResponse {
+            id: stack,
+            version: installed
+                .first()
+                .map(|r| r.version.clone())
+                .unwrap_or_default(),
+            apps: installed
+                .into_iter()
+                .map(|r| pb::InstalledApp {
+                    id: r.id,
+                    version: r.version,
+                })
+                .collect(),
+            skipped,
+        },
+    }
+}
+
 #[tonic::async_trait]
 impl AppService for Grpc {
+    type InstallAppStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::InstallAppEvent, Status>> + Send>>;
+
     async fn list_apps(
         &self,
         request: Request<pb::ListAppsRequest>,
@@ -399,34 +434,53 @@ impl AppService for Grpc {
             )
             .await
             .map_err(to_status)?;
-        let response = match outcome {
-            InstallOutcome::App(report) => pb::InstallAppResponse {
-                id: report.id,
-                version: report.version,
-                apps: vec![],
-                skipped: vec![],
-            },
-            InstallOutcome::Stack {
-                stack,
-                installed,
-                skipped,
-            } => pb::InstallAppResponse {
-                id: stack,
-                version: installed
-                    .first()
-                    .map(|r| r.version.clone())
-                    .unwrap_or_default(),
-                apps: installed
-                    .into_iter()
-                    .map(|r| pb::InstalledApp {
-                        id: r.id,
-                        version: r.version,
-                    })
-                    .collect(),
-                skipped,
-            },
-        };
-        Ok(Response::new(response))
+        Ok(Response::new(install_outcome_to_pb(outcome)))
+    }
+
+    /// Streamed sibling of `install_app` (DMN-090): the platform's install
+    /// dialog uses this one instead, so an operator watching it sees the
+    /// package clone / image pull / image build happen live rather than a
+    /// spinner that resolves minutes later with no way to tell progress from
+    /// a hang. A disconnect here does not cancel the install — see
+    /// `ApiState::install_stream`.
+    async fn install_app_stream(
+        &self,
+        request: Request<pb::InstallAppRequest>,
+    ) -> Result<Response<Self::InstallAppStreamStream>, Status> {
+        let ctx = ctx_of(&request);
+        let request = request.into_inner();
+        let source = Some(request.source).filter(|s| !s.is_empty());
+        let rx = self.0.install_stream(
+            ctx,
+            request.spec,
+            source,
+            request.name,
+            request.branch,
+            request.tag,
+            request.license_ack,
+            None,
+        );
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(super::InstallStreamEvent::Line(line)) => Some((
+                    Ok(pb::InstallAppEvent {
+                        event: Some(pb::install_app_event::Event::Line(line)),
+                    }),
+                    rx,
+                )),
+                Some(super::InstallStreamEvent::Done(Ok(outcome))) => Some((
+                    Ok(pb::InstallAppEvent {
+                        event: Some(pb::install_app_event::Event::Result(install_outcome_to_pb(
+                            outcome,
+                        ))),
+                    }),
+                    rx,
+                )),
+                Some(super::InstallStreamEvent::Done(Err(err))) => Some((Err(to_status(err)), rx)),
+                None => None,
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn start_app(

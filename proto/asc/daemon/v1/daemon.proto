@@ -54,6 +54,13 @@ service AppService {
   rpc GetAppDisk(GetAppDiskRequest) returns (GetAppDiskResponse);
   // Install from the configured registries: "name" or "name@version".
   rpc InstallApp(InstallAppRequest) returns (InstallAppResponse);
+  // Same install, but as a live progress feed instead of one blocking call
+  // (DMN-090): a text line per step of the package clone / image pull /
+  // image build, ending with the same result InstallApp would have
+  // returned — or, on failure, the stream ends with the same error status.
+  // A disconnected caller does not cancel the install: it keeps running to
+  // completion on the daemon regardless of whether anyone is still watching.
+  rpc InstallAppStream(InstallAppRequest) returns (stream InstallAppEvent);
   rpc StartApp(StartAppRequest) returns (StartAppResponse);
   rpc StopApp(StopAppRequest) returns (StopAppResponse);
   rpc RestartApp(RestartAppRequest) returns (RestartAppResponse);
@@ -203,6 +210,17 @@ message InstallAppResponse {
   repeated InstalledApp apps = 3;
   // Stack installs: apps that were already installed and were skipped.
   repeated string skipped = 4;
+}
+
+// One event of an InstallAppStream call: either one more line of progress
+// text, or the terminal result — the same InstallAppResponse the unary
+// InstallApp call returns. A stream that ends without a `result` event ended
+// in error instead; the gRPC status carries the reason, same as InstallApp.
+message InstallAppEvent {
+  oneof event {
+    string line = 1;
+    InstallAppResponse result = 2;
+  }
 }
 
 message InstalledApp {

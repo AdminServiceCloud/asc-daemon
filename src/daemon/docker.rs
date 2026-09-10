@@ -466,12 +466,17 @@ pub fn image_size(cfg: &DockerConfig, image: &str) -> Result<Option<u64>> {
 /// Lets a caller inspect the image (e.g. [`image_uid_gid`]) before it is
 /// known to exist on the host, without duplicating [`create`]'s own
 /// pull-on-404 handling.
-pub fn ensure_pulled(cfg: &DockerConfig, image: &str, auth: Option<&RegistryAuth>) -> Result<()> {
+pub fn ensure_pulled(
+    cfg: &DockerConfig,
+    image: &str,
+    auth: Option<&RegistryAuth>,
+    report: Option<&dyn progress::InstallReporter>,
+) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
         match docker.inspect_image(image).await {
             Ok(_) => Ok(()),
-            Err(e) if status_of(&e) == Some(404) => pull(&docker, image, auth)
+            Err(e) if status_of(&e) == Some(404) => pull(&docker, image, auth, report)
                 .await
                 .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image))),
             Err(e) => Err(friendly(cfg, e)),
@@ -617,6 +622,7 @@ async fn pull(
     docker: &Docker,
     image: &str,
     auth: Option<&RegistryAuth>,
+    report: Option<&dyn progress::InstallReporter>,
 ) -> std::result::Result<(), BollardError> {
     let (from_image, tag) = image_ref(image);
     let opts = CreateImageOptions {
@@ -625,6 +631,9 @@ async fn pull(
         ..Default::default()
     };
     let mut bars = progress::interactive().then(progress::LayerBars::new);
+    if let Some(report) = report {
+        report.line(&format!("Pulling image {image}"));
+    }
     let mut stream = docker.create_image(Some(opts), None, auth.map(RegistryAuth::to_credentials));
     while let Some(step) = stream.next().await {
         let step = step?;
@@ -649,6 +658,19 @@ async fn pull(
                 bars.header(status);
             } else {
                 bars.update(layer, status, bytes);
+            }
+        }
+        if let Some(report) = report {
+            let line = if layer.is_empty() {
+                status.to_string()
+            } else {
+                let progress = bytes
+                    .map(|(current, total)| format!(" {current}/{total}"))
+                    .unwrap_or_default();
+                format!("{layer}: {status}{progress}")
+            };
+            if !line.trim().is_empty() {
+                report.line(&line);
             }
         }
     }
@@ -688,7 +710,11 @@ pub struct BuildSpec<'a> {
 /// at debug level and, on a terminal, rendered as a `docker build`-style
 /// progress bar per step, regardless of the log level. A build error
 /// surfaces the Engine's own message.
-pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
+pub fn build_image(
+    cfg: &DockerConfig,
+    spec: BuildSpec<'_>,
+    report: Option<&dyn progress::InstallReporter>,
+) -> Result<()> {
     let tar = tar_context(spec.context_dir)?;
     let session = build_session_id();
     // The build's own header: everything needed to tell an empty log apart
@@ -706,6 +732,12 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
         bars = progress::interactive(),
         "image build starting"
     );
+    if let Some(report) = report {
+        report.line(&format!(
+            "Building image {} ({})",
+            spec.tag, spec.dockerfile
+        ));
+    }
     block_on(async {
         let docker = connect(cfg)?;
         let mut builder = BuildImageOptionsBuilder::new()
@@ -777,7 +809,7 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
             match &info.aux {
                 Some(BuildInfoAux::BuildKit(trace)) => {
                     traced += 1;
-                    build_trace(spec.tag, trace, bars.as_mut());
+                    build_trace(spec.tag, trace, bars.as_mut(), report);
                 }
                 // The classic builder's final "here is your image" frame; with
                 // BuildKit it is the only non-trace aux that ever shows up.
@@ -832,7 +864,12 @@ pub fn build_image(cfg: &DockerConfig, spec: BuildSpec<'_>) -> Result<()> {
 /// non-terminal caller (the daemon serving `asc install`, a script) gets. The
 /// noisier half (a step starting, byte counters, the step's own output) stays
 /// at debug, and on a terminal everything is mirrored into the step bars.
-fn build_trace(tag: &str, trace: &StatusResponse, mut bars: Option<&mut progress::BuildBars>) {
+fn build_trace(
+    tag: &str,
+    trace: &StatusResponse,
+    mut bars: Option<&mut progress::BuildBars>,
+    report: Option<&dyn progress::InstallReporter>,
+) {
     for vertex in &trace.vertexes {
         // A vertex is announced before it runs; docker shows nothing for it
         // until it starts, and neither do we.
@@ -840,8 +877,18 @@ fn build_trace(tag: &str, trace: &StatusResponse, mut bars: Option<&mut progress
             continue;
         };
         match &state {
-            progress::StepState::Running => debug!(tag, step = vertex.name, "running"),
-            terminal => info!(tag, step = vertex.name, "{}", terminal.label()),
+            progress::StepState::Running => {
+                debug!(tag, step = vertex.name, "running");
+                if let Some(report) = report {
+                    report.line(&format!("{}: running", vertex.name));
+                }
+            }
+            terminal => {
+                info!(tag, step = vertex.name, "{}", terminal.label());
+                if let Some(report) = report {
+                    report.line(&format!("{}: {}", vertex.name, terminal.label()));
+                }
+            }
         }
         if let Some(bars) = bars.as_mut() {
             bars.step(&vertex.digest, &vertex.name, state);
@@ -994,7 +1041,7 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             // 404 = the image is not on the host: pull it and retry once.
             Err(e) if status_of(&e) == Some(404) => {
                 info!(image = spec.image, "image not found locally, pulling");
-                pull(&docker, spec.image, spec.registry_auth.as_ref())
+                pull(&docker, spec.image, spec.registry_auth.as_ref(), None)
                     .await
                     .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, spec.image)))?;
                 docker

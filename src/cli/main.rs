@@ -853,6 +853,7 @@ fn install_cmd(
                     name,
                     license_ack,
                     image_choice,
+                    None,
                 ) {
                     Ok(outcome) => break outcome,
                     Err(err) if offer_auth_setup(&err) => continue,
@@ -1026,7 +1027,16 @@ fn install_from_git_cmd(
     // Same interactive recoveries as a registry install, minus the source
     // pick (there is only ever one source: the URL itself).
     let report = loop {
-        match pkg::install_from_git(config, &ctx, url, git_ref, name, license_ack, image_choice) {
+        match pkg::install_from_git(
+            config,
+            &ctx,
+            url,
+            git_ref,
+            name,
+            license_ack,
+            image_choice,
+            None,
+        ) {
             Ok(report) => break report,
             Err(err) if offer_auth_setup(&err) => continue,
             Err(err) => {

@@ -622,16 +622,56 @@ impl ApiState {
     // is otherwise world-connectable and authorizes purely by peer uid, a
     // rule this service must not inherit. The TCP transport (platform) is
     // unaffected: `api_context()` above already carries `is_root: true`.
+    //
+    // With `app_id` set, a call is app-scoped instead (DMN-086): the caller
+    // only needs to own the app (`AppManager::get_authorized`, the same
+    // ownership check every other per-app method uses — root included), and
+    // every path is confined to that app's directory and private volumes by
+    // `files::AppScope`, resolved and enforced daemon-side regardless of
+    // what rights the transport itself carries. That confinement is the
+    // whole point: the TCP transport is always full-rights, so a platform
+    // user with `apps.edit` but not `files.edit` must still be unable to
+    // reach anything outside their own app through this path. See
+    // `asc-platform/docs/features/app-file-manager.md`.
+
+    /// Root confinement for one call: `None` (unscoped) requires a root
+    /// context, same as always; `Some(app_id)` requires only that the
+    /// caller owns that app and confines every path the call touches to it.
+    fn app_file_scope(
+        &self,
+        ctx: &UserContext,
+        app_id: &Option<String>,
+    ) -> Result<Option<files::AppScope>> {
+        match app_id {
+            Some(id) => {
+                let meta = self.manager.get_authorized(ctx, id)?;
+                Ok(Some(files::AppScope::for_app(
+                    &self.config,
+                    self.manager.store(),
+                    &meta,
+                )?))
+            }
+            None => {
+                files::require_root(ctx)?;
+                Ok(None)
+            }
+        }
+    }
 
     pub async fn list_directory(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         path: String,
         include_hidden: bool,
     ) -> Result<files::Listing> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
-            Ok(files::list_directory(&path, include_hidden)?)
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::list_directory(
+                &path,
+                include_hidden,
+                scope.as_ref(),
+            )?)
         })
         .await
     }
@@ -639,11 +679,12 @@ impl ApiState {
     pub async fn stat_path(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         path: String,
     ) -> Result<(files::FileEntry, String)> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
-            Ok(files::stat(&path)?)
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::stat(&path, scope.as_ref())?)
         })
         .await
     }
@@ -651,12 +692,13 @@ impl ApiState {
     pub async fn create_directory(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         path: String,
         parents: bool,
     ) -> Result<files::FileEntry> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
-            Ok(files::create_directory(&path, parents)?)
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::create_directory(&path, parents, scope.as_ref())?)
         })
         .await
     }
@@ -664,13 +706,19 @@ impl ApiState {
     pub async fn move_path(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         source: String,
         destination: String,
         overwrite: bool,
     ) -> Result<files::FileEntry> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
-            Ok(files::move_path(&source, &destination, overwrite)?)
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::move_path(
+                &source,
+                &destination,
+                overwrite,
+                scope.as_ref(),
+            )?)
         })
         .await
     }
@@ -678,13 +726,19 @@ impl ApiState {
     pub async fn copy_path(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         source: String,
         destination: String,
         overwrite: bool,
     ) -> Result<(files::FileEntry, u64, u32)> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
-            Ok(files::copy_path(&source, &destination, overwrite)?)
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::copy_path(
+                &source,
+                &destination,
+                overwrite,
+                scope.as_ref(),
+            )?)
         })
         .await
     }
@@ -692,12 +746,13 @@ impl ApiState {
     pub async fn delete_paths(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         paths: Vec<String>,
         recursive: bool,
     ) -> Result<(u32, Vec<(String, String)>)> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
-            Ok(files::delete_paths(&paths, recursive))
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::delete_paths(&paths, recursive, scope.as_ref()))
         })
         .await
     }
@@ -706,18 +761,20 @@ impl ApiState {
     pub async fn create_archive(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         directory: String,
         names: Vec<String>,
         archive_path: String,
         format: files::ArchiveFormat,
     ) -> Result<(files::FileEntry, u64, u32)> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
             Ok(files::create_archive(
                 &directory,
                 &names,
                 &archive_path,
                 format,
+                scope.as_ref(),
             )?)
         })
         .await
@@ -731,14 +788,18 @@ impl ApiState {
     pub async fn open_file_read(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         path: String,
         offset: u64,
     ) -> Result<(u64, tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>)> {
-        files::require_root(&ctx)?;
-        let mut handle =
-            tokio::task::spawn_blocking(move || files::ReadHandle::open(&path, offset))
-                .await
-                .context("file read worker panicked")??;
+        let scope = self
+            .blocking(move |s| s.app_file_scope(&ctx, &app_id))
+            .await?;
+        let mut handle = tokio::task::spawn_blocking(move || {
+            files::ReadHandle::open(&path, offset, scope.as_ref())
+        })
+        .await
+        .context("file read worker panicked")??;
         let size = handle.size;
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         tokio::task::spawn_blocking(move || {
@@ -764,18 +825,20 @@ impl ApiState {
     pub async fn set_file_attributes(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         path: String,
         mode: Option<u32>,
         owner: Option<String>,
         group: Option<String>,
     ) -> Result<files::FileEntry> {
-        self.blocking(move |_| {
-            files::require_root(&ctx)?;
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
             Ok(files::set_attributes(
                 &path,
                 mode,
                 owner.as_deref(),
                 group.as_deref(),
+                scope.as_ref(),
             )?)
         })
         .await
@@ -799,15 +862,19 @@ impl ApiState {
     pub async fn open_file_write(
         self: &Arc<Self>,
         ctx: UserContext,
+        app_id: Option<String>,
         header: files::WriteHeader,
     ) -> Result<(
         tokio::sync::mpsc::Sender<Vec<u8>>,
         tokio::task::JoinHandle<Result<files::FileEntry>>,
     )> {
-        files::require_root(&ctx)?;
-        let mut handle = tokio::task::spawn_blocking(move || files::WriteHandle::open(&header))
-            .await
-            .context("file write worker panicked")??;
+        let scope = self
+            .blocking(move |s| s.app_file_scope(&ctx, &app_id))
+            .await?;
+        let mut handle =
+            tokio::task::spawn_blocking(move || files::WriteHandle::open(&header, scope.as_ref()))
+                .await
+                .context("file write worker panicked")??;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
         let join = tokio::task::spawn_blocking(move || -> Result<files::FileEntry> {
             while let Some(chunk) = rx.blocking_recv() {

@@ -68,7 +68,9 @@ fn to_status(err: anyhow::Error) -> Status {
         return match err {
             F::NotFound(_) => Status::not_found(msg),
             F::Exists(_) => Status::already_exists(msg),
-            F::PermissionDenied(_) | F::Protected(_) => Status::permission_denied(msg),
+            F::PermissionDenied(_) | F::Protected(_) | F::OutsideScope(_) => {
+                Status::permission_denied(msg)
+            }
             F::InvalidPath(_) | F::DestinationInsideSource { .. } => Status::invalid_argument(msg),
             F::UnknownUser(_) | F::UnknownGroup(_) => Status::invalid_argument(msg),
             F::NotADirectory(_) | F::IsADirectory(_) | F::DirectoryNotEmpty(_) => {
@@ -93,6 +95,7 @@ fn to_status(err: anyhow::Error) -> Status {
 
 fn disk_to_pb(usage: &crate::daemon::apps::disk::DiskUsage) -> pb::GetAppDiskResponse {
     pb::GetAppDiskResponse {
+        app_dir: usage.app_dir.clone(),
         app_dir_bytes: usage.app_dir_bytes,
         quota_bytes: usage.quota_bytes,
         image_bytes: usage.image_bytes,
@@ -943,7 +946,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let listing = self
             .0
-            .list_directory(ctx, req.path, req.include_hidden)
+            .list_directory(ctx, req.app_id, req.path, req.include_hidden)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::ListDirectoryResponse {
@@ -959,9 +962,10 @@ impl FileService for Grpc {
         request: Request<pb::StatPathRequest>,
     ) -> Result<Response<pb::StatPathResponse>, Status> {
         let ctx = ctx_of(&request);
+        let req = request.into_inner();
         let (entry, parent) = self
             .0
-            .stat_path(ctx, request.into_inner().path)
+            .stat_path(ctx, req.app_id, req.path)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::StatPathResponse {
@@ -978,7 +982,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let entry = self
             .0
-            .create_directory(ctx, req.path, req.parents)
+            .create_directory(ctx, req.app_id, req.path, req.parents)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::CreateDirectoryResponse {
@@ -994,7 +998,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let entry = self
             .0
-            .move_path(ctx, req.source, req.destination, req.overwrite)
+            .move_path(ctx, req.app_id, req.source, req.destination, req.overwrite)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::MovePathResponse {
@@ -1010,7 +1014,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let (entry, bytes, files) = self
             .0
-            .copy_path(ctx, req.source, req.destination, req.overwrite)
+            .copy_path(ctx, req.app_id, req.source, req.destination, req.overwrite)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::CopyPathResponse {
@@ -1028,7 +1032,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let (deleted, failures) = self
             .0
-            .delete_paths(ctx, req.paths, req.recursive)
+            .delete_paths(ctx, req.app_id, req.paths, req.recursive)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::DeletePathsResponse {
@@ -1049,7 +1053,14 @@ impl FileService for Grpc {
         let format = archive_format_from_pb(req.format)?;
         let (entry, bytes, file_count) = self
             .0
-            .create_archive(ctx, req.directory, req.names, req.archive_path, format)
+            .create_archive(
+                ctx,
+                req.app_id,
+                req.directory,
+                req.names,
+                req.archive_path,
+                format,
+            )
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::CreateArchiveResponse {
@@ -1067,7 +1078,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let (size, rx) = self
             .0
-            .open_file_read(ctx, req.path, req.offset)
+            .open_file_read(ctx, req.app_id, req.path, req.offset)
             .await
             .map_err(to_status)?;
         let stream =
@@ -1094,7 +1105,7 @@ impl FileService for Grpc {
         let req = request.into_inner();
         let entry = self
             .0
-            .set_file_attributes(ctx, req.path, req.mode, req.owner, req.group)
+            .set_file_attributes(ctx, req.app_id, req.path, req.mode, req.owner, req.group)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::SetPathAttributesResponse {
@@ -1145,6 +1156,7 @@ impl FileService for Grpc {
         let header_pb = first
             .header
             .ok_or_else(|| Status::invalid_argument("the first message must carry the header"))?;
+        let app_id = header_pb.app_id.clone();
         let header = files::WriteHeader {
             directory: header_pb.directory,
             name: header_pb.name,
@@ -1153,7 +1165,7 @@ impl FileService for Grpc {
         };
         let (tx, join) = self
             .0
-            .open_file_write(ctx, header)
+            .open_file_write(ctx, app_id, header)
             .await
             .map_err(to_status)?;
         // The first message may also carry a data chunk alongside the header.

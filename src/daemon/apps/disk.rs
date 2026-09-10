@@ -42,6 +42,11 @@ pub struct VolumeUsage {
 /// Disk usage of one installed app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskUsage {
+    /// Absolute path of the app's own directory on this node
+    /// (`<apps_dir>/<id>`). Additive field for DMN-086: the platform cannot
+    /// compute this itself (the daemon's apps-root is never published), and
+    /// an app-scoped file manager needs it as a confinement root.
+    pub app_dir: String,
     /// Everything under the app's directory (repository + data + config +
     /// any private volume folders) — what the quota measures.
     pub app_dir_bytes: u64,
@@ -90,6 +95,7 @@ pub fn usage(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<DiskUs
     };
 
     Ok(DiskUsage {
+        app_dir: app_dir.display().to_string(),
         app_dir_bytes: dir_size(&app_dir),
         quota_bytes: meta.quota.as_ref().and_then(|q| q.disk_bytes),
         image_bytes,
@@ -188,6 +194,42 @@ fn volume_usages(
         out.push(usage);
     }
     out
+}
+
+/// Non-shared volume roots of one app (DMN-086): every volume entry that is
+/// not a Docker named volume, i.e. private to this app rather than
+/// potentially mounted into others too. Used by
+/// [`crate::daemon::files::AppScope`] to confine an app-scoped file manager
+/// to exactly the paths [`app-file-manager.md`](../../../../asc-platform/docs/features/app-file-manager.md)
+/// documents: the app directory and its private volumes.
+///
+/// Deliberately skips Docker entirely, unlike [`volume_usages`]: a named
+/// volume is shared and excluded from the result regardless of whether the
+/// Engine can currently resolve its mountpoint, so there is nothing to ask
+/// it for. That also means this function works — and a file manager stays
+/// usable — even when the Docker daemon itself is unreachable.
+pub fn private_volume_roots(
+    app_dir: &Path,
+    manifest_dir: &Path,
+    manifest: &Manifest,
+) -> Vec<std::path::PathBuf> {
+    let Ok(settings_file) = settings::SettingsFile::load_for(manifest_dir, manifest) else {
+        return Vec::new();
+    };
+    let Ok(inputs) = pkg::runtime_inputs(settings_file.as_ref(), &app_dir.join("config")) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for entry in &inputs.volumes {
+        let Ok(kind) = pkg::classify_volume(entry, app_dir) else {
+            continue;
+        };
+        match kind {
+            pkg::VolumeKind::AppFolder(path) | pkg::VolumeKind::HostPath(path) => roots.push(path),
+            pkg::VolumeKind::Named(_) => {} // shared — excluded
+        }
+    }
+    roots
 }
 
 /// Recursive size of everything under `dir`, in bytes. Symlinks are never

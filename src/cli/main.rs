@@ -3041,7 +3041,7 @@ async fn attach_loop(
     use futures_util::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut attach = docker::attach(cfg, container).await?;
+    let mut attach = docker::attach(cfg, container, false).await?;
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut buf = [0u8; 4096];

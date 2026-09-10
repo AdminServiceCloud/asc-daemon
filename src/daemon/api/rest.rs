@@ -69,7 +69,11 @@ pub fn router(state: Arc<ApiState>) -> Router {
         // Node filesystem access (DMN-070, see docs/files.md). Every handler
         // requires a root caller context (files::require_root, enforced in
         // the service layer) — unlike the rest of this API, a non-root
-        // unix-socket peer is refused here.
+        // unix-socket peer is refused here. With an `app_id` query/body
+        // field the call is app-scoped instead (DMN-086): only app
+        // ownership is required, and the daemon confines every path to that
+        // app's directory and private volumes — see
+        // `ApiState::app_file_scope`.
         .route("/v1/files", get(list_directory))
         .route("/v1/files/stat", get(stat_path))
         .route("/v1/files/directory", post(create_directory))
@@ -184,7 +188,9 @@ impl IntoResponse for ApiError {
             let status = match err {
                 F::NotFound(_) => StatusCode::NOT_FOUND,
                 F::Exists(_) => StatusCode::CONFLICT,
-                F::PermissionDenied(_) | F::Protected(_) => StatusCode::FORBIDDEN,
+                F::PermissionDenied(_) | F::Protected(_) | F::OutsideScope(_) => {
+                    StatusCode::FORBIDDEN
+                }
                 F::InvalidPath(_) | F::DestinationInsideSource { .. } => StatusCode::BAD_REQUEST,
                 F::NotADirectory(_) | F::IsADirectory(_) | F::DirectoryNotEmpty(_) => {
                     StatusCode::CONFLICT
@@ -447,6 +453,7 @@ async fn app_disk(
         // The resolved app: `id` in the path may have been a custom name.
         "id": meta.id,
         "name": meta.display_name(),
+        "app_dir": usage.app_dir,
         "app_dir_bytes": usage.app_dir_bytes,
         "quota_bytes": usage.quota_bytes,
         "image_bytes": usage.image_bytes,
@@ -1088,6 +1095,9 @@ struct ListQuery {
     path: String,
     #[serde(default)]
     hidden: bool,
+    /// App-scoped confinement (DMN-086) — see `ApiState::app_file_scope`.
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn list_directory(
@@ -1095,7 +1105,9 @@ async fn list_directory(
     Extension(ctx): Extension<UserContext>,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    let listing = state.list_directory(ctx, query.path, query.hidden).await?;
+    let listing = state
+        .list_directory(ctx, query.app_id, query.path, query.hidden)
+        .await?;
     Ok(Json(serde_json::json!({
         "path": listing.path,
         "entries": listing.entries.iter().map(file_entry_json).collect::<Vec<_>>(),
@@ -1108,6 +1120,8 @@ async fn list_directory(
 #[derive(Deserialize)]
 struct StatQuery {
     path: String,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn stat_path(
@@ -1115,7 +1129,7 @@ async fn stat_path(
     Extension(ctx): Extension<UserContext>,
     Query(query): Query<StatQuery>,
 ) -> Result<Response, ApiError> {
-    let (entry, parent) = state.stat_path(ctx, query.path).await?;
+    let (entry, parent) = state.stat_path(ctx, query.app_id, query.path).await?;
     Ok(
         Json(serde_json::json!({ "entry": file_entry_json(&entry), "parent": parent }))
             .into_response(),
@@ -1127,6 +1141,8 @@ struct DirectoryBody {
     path: String,
     #[serde(default)]
     parents: bool,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn create_directory(
@@ -1134,7 +1150,9 @@ async fn create_directory(
     Extension(ctx): Extension<UserContext>,
     Json(body): Json<DirectoryBody>,
 ) -> Result<Response, ApiError> {
-    let entry = state.create_directory(ctx, body.path, body.parents).await?;
+    let entry = state
+        .create_directory(ctx, body.app_id, body.path, body.parents)
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({ "entry": file_entry_json(&entry) })),
@@ -1148,6 +1166,8 @@ struct TransformBody {
     destination: String,
     #[serde(default)]
     overwrite: bool,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn move_path(
@@ -1156,7 +1176,13 @@ async fn move_path(
     Json(body): Json<TransformBody>,
 ) -> Result<Response, ApiError> {
     let entry = state
-        .move_path(ctx, body.source, body.destination, body.overwrite)
+        .move_path(
+            ctx,
+            body.app_id,
+            body.source,
+            body.destination,
+            body.overwrite,
+        )
         .await?;
     Ok(Json(serde_json::json!({ "entry": file_entry_json(&entry) })).into_response())
 }
@@ -1167,7 +1193,13 @@ async fn copy_path(
     Json(body): Json<TransformBody>,
 ) -> Result<Response, ApiError> {
     let (entry, bytes, files) = state
-        .copy_path(ctx, body.source, body.destination, body.overwrite)
+        .copy_path(
+            ctx,
+            body.app_id,
+            body.source,
+            body.destination,
+            body.overwrite,
+        )
         .await?;
     Ok(Json(serde_json::json!({
         "entry": file_entry_json(&entry),
@@ -1182,6 +1214,8 @@ struct DeleteBody {
     paths: Vec<String>,
     #[serde(default)]
     recursive: bool,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn delete_paths(
@@ -1189,7 +1223,9 @@ async fn delete_paths(
     Extension(ctx): Extension<UserContext>,
     Json(body): Json<DeleteBody>,
 ) -> Result<Response, ApiError> {
-    let (deleted, failures) = state.delete_paths(ctx, body.paths, body.recursive).await?;
+    let (deleted, failures) = state
+        .delete_paths(ctx, body.app_id, body.paths, body.recursive)
+        .await?;
     Ok(Json(serde_json::json!({
         "deleted": deleted,
         "failures": failures.into_iter().map(|(path, error)| serde_json::json!({
@@ -1207,6 +1243,8 @@ struct ArchiveBody {
     archive_path: String,
     #[serde(default)]
     format: String,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn create_archive(
@@ -1234,7 +1272,14 @@ async fn create_archive(
         }
     };
     let (entry, bytes, file_count) = state
-        .create_archive(ctx, body.directory, body.names, body.archive_path, format)
+        .create_archive(
+            ctx,
+            body.app_id,
+            body.directory,
+            body.names,
+            body.archive_path,
+            format,
+        )
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -1257,6 +1302,8 @@ struct AttributesBody {
     owner: Option<String>,
     #[serde(default)]
     group: Option<String>,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 async fn set_path_attributes(
@@ -1265,7 +1312,14 @@ async fn set_path_attributes(
     Json(body): Json<AttributesBody>,
 ) -> Result<Response, ApiError> {
     let entry = state
-        .set_file_attributes(ctx, body.path, body.mode, body.owner, body.group)
+        .set_file_attributes(
+            ctx,
+            body.app_id,
+            body.path,
+            body.mode,
+            body.owner,
+            body.group,
+        )
         .await?;
     Ok(Json(serde_json::json!({ "entry": file_entry_json(&entry) })).into_response())
 }
@@ -1296,6 +1350,8 @@ struct ContentQuery {
     path: String,
     #[serde(default)]
     offset: u64,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 /// Streams the file straight from the daemon's read worker into the HTTP
@@ -1307,7 +1363,7 @@ async fn read_file_content(
     Query(query): Query<ContentQuery>,
 ) -> Result<Response, ApiError> {
     let (size, rx) = state
-        .open_file_read(ctx, query.path.clone(), query.offset)
+        .open_file_read(ctx, query.app_id.clone(), query.path.clone(), query.offset)
         .await?;
     let remaining = size.saturating_sub(query.offset);
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -1336,6 +1392,8 @@ struct WriteQuery {
     name: String,
     #[serde(default)]
     overwrite: bool,
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 /// Accepts the request body as raw bytes — not multipart: the body *is* the
@@ -1353,7 +1411,7 @@ async fn write_file_content(
         overwrite: query.overwrite,
         mode: None,
     };
-    let (tx, join) = state.open_file_write(ctx, header).await?;
+    let (tx, join) = state.open_file_write(ctx, query.app_id, header).await?;
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| anyhow::anyhow!("error reading upload body: {e}"))?;

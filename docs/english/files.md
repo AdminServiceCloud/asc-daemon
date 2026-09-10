@@ -4,7 +4,7 @@
 
 ## 📌 Description
 
-`FileService` is part of the daemon API (see [📡 api](api.md)) and gives a view into and control over the node's filesystem from the root `/`: list a directory, stat a path, create a directory, move/rename, copy, delete, archive, and stream a file up or down. It is a separate service from `AppService` — it is not tied to any one application and does not replace the [📁 SFTP server](sftp.md), which gives an operator their own SFTP client chrooted to a single application's directory. `FileService` is the API behind the platform's file manager (the "Files" tab on a node's page).
+`FileService` is part of the daemon API (see [📡 api](api.md)) and gives a view into and control over the node's filesystem: list a directory, stat a path, create a directory, move/rename, copy, delete, archive, and stream a file up or down. By default the scope is the whole node from `/` — it is a separate service from `AppService` and does not replace the [📁 SFTP server](sftp.md), which gives an operator their own SFTP client chrooted to a single application's directory. Every method optionally takes an `app_id` (DMN-086) that confines it instead to one app's directory and private volumes — see "App scope" below. `FileService` is the API behind the platform's node-wide file manager (the "Files" tab on a node's page) and, app-scoped, the per-app file manager.
 
 ## 🎯 Scenarios
 
@@ -33,6 +33,16 @@ A path must be absolute, contain no `..`, no NUL bytes, stay within sane length 
 
 **Protected paths** (`/`, `/boot`, `/etc`, `/usr`, `/var`, `/asc`) refuse as the exact target of a destructive operation — a guard rail against a mis-click, not a security boundary: root on the machine can still do the same thing by hand.
 
+### App scope (DMN-086)
+
+Every method above also accepts an optional `app_id`. When set, the call is **app-scoped** instead of node-wide: the caller only needs to own the app (`AppManager::get_authorized` — the same ownership check as every other per-app method, root included) rather than hold a root context, and every path the call touches is confined to that app's own directory (`<apps_dir>/<id>`) plus its private, non-shared volumes (`AppScope`, built from the same volume classification `GetAppDisk` uses — a Docker named volume is excluded, since it may be mounted into other apps too).
+
+Confinement is enforced **daemon-side**, unconditionally — not delegated to the caller. This matters because the TCP transport always presents a full-rights context (the platform checks the calling user's own permission before a request ever reaches the node), so a platform user with `apps.edit` but not `files.edit` must still be structurally unable to reach anything outside their own app through this path. Unlike the unscoped path resolution above, an app-scoped path **is canonicalized**: the deepest already-existing ancestor of the requested path is resolved through every symlink along the way before the containment check runs, so a symlink planted inside the app directory (`data/escape -> /etc`) cannot be used to read or write anything the scope does not cover. A not-yet-existing tail (e.g. a file being created) is appended literally, since nothing there can itself be a symlink yet.
+
+`GetAppDisk`'s response carries the resolved `app_dir` for this purpose — the platform cannot compute `<apps_dir>/<id>` itself, since the daemon's storage root is never published on its own.
+
+See [📁 app-file-manager](../../../asc-platform/docs/features/app-file-manager.md) for the platform-side feature this unblocks.
+
 ### Streaming
 
 `ReadFile` is a server-stream of chunks; `WriteFile` is a client-stream of chunks with a header (`directory`, `name`, `overwrite`, mode) on the first message. Chunk size is **256 KiB**: comfortably under tonic's default 4 MiB decode limit, large enough to avoid drowning in per-syscall and per-HTTP/2-frame overhead.
@@ -57,22 +67,27 @@ Directory listing is capped at **10,000 entries**; past the cap, the response ca
 
 | REST | gRPC | Description |
 |---|---|---|
-| `GET /v1/files?path=&hidden=` | `FileService.ListDirectory` | List a directory; `hidden=true` includes dotfiles |
-| `GET /v1/files/stat?path=` | `FileService.StatPath` | Metadata for one path |
-| `POST /v1/files/directory {"path","parents"}` | `FileService.CreateDirectory` | Create a directory |
-| `POST /v1/files/move {"source","destination","overwrite"}` | `FileService.MovePath` | Move/rename |
-| `POST /v1/files/copy {"source","destination","overwrite"}` | `FileService.CopyPath` | Copy |
-| `POST /v1/files/delete {"paths":[...],"recursive"}` | `FileService.DeletePaths` | Delete; best-effort — one failure does not abort the rest |
-| `POST /v1/files/archive {"directory","names","archive_path","format"}` | `FileService.CreateArchive` | Archive into `tar.gz` |
-| `GET /v1/files/content?path=&offset=` | `FileService.ReadFile` (stream) | Download, resumable via `offset` |
-| `PUT /v1/files/content?path=&name=&overwrite=` | `FileService.WriteFile` (stream) | Upload |
-| `POST /v1/files/attributes {"path","mode"?,"owner"?,"group"?}` | `FileService.SetPathAttributes` | Change mode and/or owner/group (by name) |
-| `GET /v1/files/identities` | `FileService.ListSystemIdentities` | The machine's local users and groups |
+| `GET /v1/files?path=&hidden=&app_id=` | `FileService.ListDirectory` | List a directory; `hidden=true` includes dotfiles |
+| `GET /v1/files/stat?path=&app_id=` | `FileService.StatPath` | Metadata for one path |
+| `POST /v1/files/directory {"path","parents","app_id"?}` | `FileService.CreateDirectory` | Create a directory |
+| `POST /v1/files/move {"source","destination","overwrite","app_id"?}` | `FileService.MovePath` | Move/rename |
+| `POST /v1/files/copy {"source","destination","overwrite","app_id"?}` | `FileService.CopyPath` | Copy |
+| `POST /v1/files/delete {"paths":[...],"recursive","app_id"?}` | `FileService.DeletePaths` | Delete; best-effort — one failure does not abort the rest |
+| `POST /v1/files/archive {"directory","names","archive_path","format","app_id"?}` | `FileService.CreateArchive` | Archive into `tar.gz` |
+| `GET /v1/files/content?path=&offset=&app_id=` | `FileService.ReadFile` (stream) | Download, resumable via `offset` |
+| `PUT /v1/files/content?path=&name=&overwrite=&app_id=` | `FileService.WriteFile` (stream) | Upload |
+| `POST /v1/files/attributes {"path","mode"?,"owner"?,"group"?,"app_id"?}` | `FileService.SetPathAttributes` | Change mode and/or owner/group (by name) |
+| `GET /v1/files/identities` | `FileService.ListSystemIdentities` | The machine's local users and groups — node-wide only, no `app_id` |
+
+`app_id` (query param on REST, field on every gRPC request above) is optional everywhere: unset means the node-wide behavior described earlier in this document; set means app-scoped (see above).
 
 ## 🔗 Related tasks
 
 - DMN-070 — `FileService` implementation in the daemon.
+- DMN-086 — app-scoped `FileService` (`app_id`/`AppScope`), the `app_dir` field on `GetAppDisk`.
 - NODE-012 / BE-011 — nodeservice file RPCs and the platform REST facade that consume this API.
 - FE-008 — the "Files" tab on the node page.
+- BE-022 — the platform-side app file manager this unblocks.
 - [📁 sftp](sftp.md) — a neighboring but separate feature: an operator's own SFTP client, chrooted per application.
-- [📁 file-manager](../../../asc-platform/docs/features/file-manager.md) — the platform-side overview of the feature.
+- [📁 file-manager](../../../asc-platform/docs/features/file-manager.md) — the platform-side overview of the node-wide feature.
+- [📁 app-file-manager](../../../asc-platform/docs/features/app-file-manager.md) — the platform-side overview of the app-scoped feature.

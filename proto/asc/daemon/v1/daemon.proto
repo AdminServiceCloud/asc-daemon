@@ -146,6 +146,11 @@ message GetAppDiskResponse {
   // Custom volumes only — the default private volume is covered by
   // data_bytes.
   repeated AppVolumeUsage volumes = 6;
+  // Absolute path of the app's own directory on this node
+  // (`<apps_dir>/<id>`). Additive field for DMN-086: the platform's
+  // apps-root is never published on its own, and an app-scoped file
+  // manager needs this as a confinement root.
+  string app_dir = 7;
 }
 
 message AppVolumeUsage {
@@ -692,6 +697,14 @@ message GetTokenStatusResponse {
 // tree from "/" is in scope: the platform performs its own per-user
 // authorization before it ever reaches here (see docs/api.md). Symlinks are
 // reported but never traversed — a recursive operation stops at the link.
+//
+// Every request below also accepts an optional app_id (DMN-086): when set,
+// the call is app-scoped instead of node-wide — every path is confined,
+// daemon-side, to that app's directory and private volumes (with symlinks
+// canonicalized so one planted inside the app cannot point back out of it),
+// and the caller only needs to own the app rather than hold the node-wide
+// files.* domain. See docs/files.md and
+// asc-platform/docs/features/app-file-manager.md.
 // Every method requires a root caller context; a non-root unix-socket peer is
 // refused, unlike the rest of this API (see docs/files.md).
 service FileService {
@@ -755,6 +768,10 @@ message ListDirectoryRequest {
   string path = 1;
   // Default false: dotfiles are omitted.
   bool include_hidden = 2;
+  // App-scoped confinement (DMN-086): when set, `path` is confined to this
+  // app's directory and private volumes, canonicalized and enforced
+  // daemon-side — see app_id on FileService's other requests.
+  optional string app_id = 3;
 }
 
 message ListDirectoryResponse {
@@ -770,6 +787,8 @@ message ListDirectoryResponse {
 
 message StatPathRequest {
   string path = 1;
+  // See ListDirectoryRequest.app_id.
+  optional string app_id = 2;
 }
 
 message StatPathResponse {
@@ -780,6 +799,8 @@ message StatPathResponse {
 message CreateDirectoryRequest {
   string path = 1;
   bool parents = 2;
+  // See ListDirectoryRequest.app_id.
+  optional string app_id = 3;
 }
 
 message CreateDirectoryResponse {
@@ -790,6 +811,8 @@ message MovePathRequest {
   string source = 1;
   string destination = 2;
   bool overwrite = 3;
+  // See ListDirectoryRequest.app_id. Confines both source and destination.
+  optional string app_id = 4;
 }
 
 message MovePathResponse {
@@ -800,6 +823,8 @@ message CopyPathRequest {
   string source = 1;
   string destination = 2;
   bool overwrite = 3;
+  // See ListDirectoryRequest.app_id. Confines both source and destination.
+  optional string app_id = 4;
 }
 
 message CopyPathResponse {
@@ -811,6 +836,8 @@ message CopyPathResponse {
 message DeletePathsRequest {
   repeated string paths = 1;
   bool recursive = 2;
+  // See ListDirectoryRequest.app_id. Confines every path.
+  optional string app_id = 3;
 }
 
 // Best-effort per path, like backup pruning: one refusal does not abort the
@@ -841,6 +868,9 @@ message CreateArchiveRequest {
   // Absolute destination for the archive file.
   string archive_path = 3;
   ArchiveFormat format = 4;
+  // See ListDirectoryRequest.app_id. Confines both directory and
+  // archive_path.
+  optional string app_id = 5;
 }
 
 message CreateArchiveResponse {
@@ -853,6 +883,8 @@ message ReadFileRequest {
   string path = 1;
   // Resume from this byte offset; 0 = from the start.
   uint64 offset = 2;
+  // See ListDirectoryRequest.app_id.
+  optional string app_id = 3;
 }
 
 message FileChunk {
@@ -871,6 +903,8 @@ message WriteFileHeader {
   // Default 0644.
   optional uint32 mode = 4;
   optional uint64 expected_size = 5;
+  // See ListDirectoryRequest.app_id. Confines directory.
+  optional string app_id = 6;
 }
 
 message WriteFileRequest {
@@ -893,6 +927,8 @@ message SetPathAttributesRequest {
   // untouched — chown semantics, not "reset to root".
   optional string owner = 3;
   optional string group = 4;
+  // See ListDirectoryRequest.app_id.
+  optional string app_id = 5;
 }
 
 message SetPathAttributesResponse {

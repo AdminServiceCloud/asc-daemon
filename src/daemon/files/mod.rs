@@ -9,6 +9,7 @@
 //! peer uid, a rule this service must not inherit.
 
 pub mod path;
+pub mod scope;
 mod walk;
 
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::daemon::apps::UserContext;
 
 pub use path::SafePath;
+pub use scope::AppScope;
 
 /// Chunk size for `ReadFile`/`WriteFile` streaming: comfortably under
 /// tonic's 4 MiB default decode limit, large enough to amortize per-syscall
@@ -65,6 +67,9 @@ pub enum FileError {
     /// A protected path, a pseudo-root, or (via [`require_root`]) a caller
     /// without a root context.
     Protected(PathBuf),
+    /// Resolved outside every root of the [`AppScope`] the request was
+    /// confined to (DMN-086) — the app-scoped counterpart of `Protected`.
+    OutsideScope(PathBuf),
     /// `chown`'s target user name has no `/etc/passwd` entry.
     UnknownUser(String),
     /// `chown`'s target group name has no `/etc/group` entry.
@@ -112,6 +117,13 @@ impl std::fmt::Display for FileError {
                 source.display()
             ),
             FileError::Protected(p) => write!(f, "path is protected: {}", p.display()),
+            FileError::OutsideScope(p) => {
+                write!(
+                    f,
+                    "path is outside the app's allowed scope: {}",
+                    p.display()
+                )
+            }
             FileError::UnknownUser(name) => write!(f, "unknown user: {name}"),
             FileError::UnknownGroup(name) => write!(f, "unknown group: {name}"),
             FileError::Io(p, err) => write!(f, "{}: {err}", p.display()),
@@ -334,20 +346,35 @@ fn describe_with_cache(path: &Path, cache: &mut NameCache) -> Result<FileEntry> 
     })
 }
 
+/// Resolve `safe` against an optional confinement scope (DMN-086): with a
+/// scope, the real (symlink-resolved) path, checked to fall inside it;
+/// without one, `safe` itself, unchanged — the unscoped node-wide policy
+/// (see [`path`]) of showing a symlink rather than walking through it.
+fn scoped(safe: &SafePath, scope: Option<&AppScope>) -> Result<PathBuf> {
+    match scope {
+        Some(scope) => scope.resolve(safe),
+        None => Ok(safe.as_path().to_path_buf()),
+    }
+}
+
 /// List a directory's entries. Directories first, then by name
 /// case-insensitively; capped at [`MAX_LISTING_ENTRIES`]. An entry that
 /// vanishes or cannot be `lstat`ed between `readdir` and inspection is
 /// skipped rather than failing the whole listing.
-pub fn list_directory(raw_path: &str, include_hidden: bool) -> Result<Listing> {
+pub fn list_directory(
+    raw_path: &str,
+    include_hidden: bool,
+    scope: Option<&AppScope>,
+) -> Result<Listing> {
     let safe = SafePath::parse(raw_path)?;
-    let meta =
-        std::fs::symlink_metadata(safe.as_path()).map_err(|e| FileError::io(safe.as_path(), e))?;
+    let target = scoped(&safe, scope)?;
+    let meta = std::fs::symlink_metadata(&target).map_err(|e| FileError::io(&target, e))?;
     if !meta.is_dir() {
-        return Err(FileError::NotADirectory(safe.as_path().to_path_buf()));
+        return Err(FileError::NotADirectory(target));
     }
     let mut cache = NameCache::new();
     let mut entries = Vec::new();
-    let dir = std::fs::read_dir(safe.as_path()).map_err(|e| FileError::io(safe.as_path(), e))?;
+    let dir = std::fs::read_dir(&target).map_err(|e| FileError::io(&target, e))?;
     for entry in dir {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -377,9 +404,10 @@ pub fn list_directory(raw_path: &str, include_hidden: bool) -> Result<Listing> {
 }
 
 /// Metadata for one path, plus its parent (for a UI's "go up" button).
-pub fn stat(raw_path: &str) -> Result<(FileEntry, String)> {
+pub fn stat(raw_path: &str, scope: Option<&AppScope>) -> Result<(FileEntry, String)> {
     let safe = SafePath::parse(raw_path)?;
-    let entry = describe(safe.as_path())?;
+    let target = scoped(&safe, scope)?;
+    let entry = describe(&target)?;
     let parent = safe
         .parent()
         .map(|p| p.as_path().display().to_string())
@@ -387,76 +415,95 @@ pub fn stat(raw_path: &str) -> Result<(FileEntry, String)> {
     Ok((entry, parent))
 }
 
-pub fn create_directory(raw_path: &str, parents: bool) -> Result<FileEntry> {
+pub fn create_directory(
+    raw_path: &str,
+    parents: bool,
+    scope: Option<&AppScope>,
+) -> Result<FileEntry> {
     let safe = SafePath::parse(raw_path)?;
-    if is_protected(safe.as_path()) {
-        return Err(FileError::Protected(safe.as_path().to_path_buf()));
+    let target = scoped(&safe, scope)?;
+    if is_protected(&target) {
+        return Err(FileError::Protected(target));
     }
     let result = if parents {
-        std::fs::create_dir_all(safe.as_path())
+        std::fs::create_dir_all(&target)
     } else {
-        std::fs::create_dir(safe.as_path())
+        std::fs::create_dir(&target)
     };
-    result.map_err(|e| FileError::io(safe.as_path(), e))?;
-    describe(safe.as_path())
+    result.map_err(|e| FileError::io(&target, e))?;
+    describe(&target)
 }
 
 /// Rename/move `source` to `destination`. A rename is just a move whose
 /// destination shares the source's parent — same function, same rule.
-pub fn move_path(raw_source: &str, raw_destination: &str, overwrite: bool) -> Result<FileEntry> {
+pub fn move_path(
+    raw_source: &str,
+    raw_destination: &str,
+    overwrite: bool,
+    scope: Option<&AppScope>,
+) -> Result<FileEntry> {
     let src = SafePath::parse(raw_source)?;
     let dst = SafePath::parse(raw_destination)?;
-    if is_protected(src.as_path())
-        || is_protected(dst.as_path())
-        || in_pseudo_root(src.as_path())
-        || in_pseudo_root(dst.as_path())
+    let src_target = scoped(&src, scope)?;
+    let dst_target = scoped(&dst, scope)?;
+    if is_protected(&src_target)
+        || is_protected(&dst_target)
+        || in_pseudo_root(&src_target)
+        || in_pseudo_root(&dst_target)
     {
-        return Err(FileError::Protected(dst.as_path().to_path_buf()));
+        return Err(FileError::Protected(dst_target));
     }
-    if dst.as_path().starts_with(src.as_path()) {
+    if dst_target.starts_with(&src_target) {
         return Err(FileError::DestinationInsideSource {
-            source: src.as_path().to_path_buf(),
-            destination: dst.as_path().to_path_buf(),
+            source: src_target,
+            destination: dst_target,
         });
     }
-    if !overwrite && dst.as_path().exists() {
-        return Err(FileError::Exists(dst.as_path().to_path_buf()));
+    if !overwrite && dst_target.exists() {
+        return Err(FileError::Exists(dst_target));
     }
-    std::fs::rename(src.as_path(), dst.as_path()).map_err(|e| FileError::io(dst.as_path(), e))?;
-    describe(dst.as_path())
+    std::fs::rename(&src_target, &dst_target).map_err(|e| FileError::io(&dst_target, e))?;
+    describe(&dst_target)
 }
 
 pub fn copy_path(
     raw_source: &str,
     raw_destination: &str,
     overwrite: bool,
+    scope: Option<&AppScope>,
 ) -> Result<(FileEntry, u64, u32)> {
     let src = SafePath::parse(raw_source)?;
     let dst = SafePath::parse(raw_destination)?;
-    if is_protected(dst.as_path()) || in_pseudo_root(src.as_path()) {
-        return Err(FileError::Protected(dst.as_path().to_path_buf()));
+    let src_target = scoped(&src, scope)?;
+    let dst_target = scoped(&dst, scope)?;
+    if is_protected(&dst_target) || in_pseudo_root(&src_target) {
+        return Err(FileError::Protected(dst_target));
     }
-    if dst.as_path().starts_with(src.as_path()) {
+    if dst_target.starts_with(&src_target) {
         return Err(FileError::DestinationInsideSource {
-            source: src.as_path().to_path_buf(),
-            destination: dst.as_path().to_path_buf(),
+            source: src_target,
+            destination: dst_target,
         });
     }
-    if !overwrite && dst.as_path().exists() {
-        return Err(FileError::Exists(dst.as_path().to_path_buf()));
+    if !overwrite && dst_target.exists() {
+        return Err(FileError::Exists(dst_target));
     }
-    let (files, bytes) = walk::copy_recursive(src.as_path(), dst.as_path())?;
-    let entry = describe(dst.as_path())?;
+    let (files, bytes) = walk::copy_recursive(&src_target, &dst_target)?;
+    let entry = describe(&dst_target)?;
     Ok((entry, bytes, files))
 }
 
 /// Delete every path in `paths`, best-effort: one refusal does not abort the
 /// rest. Returns `(deleted count, [(path, error message)])`.
-pub fn delete_paths(paths: &[String], recursive: bool) -> (u32, Vec<(String, String)>) {
+pub fn delete_paths(
+    paths: &[String],
+    recursive: bool,
+    scope: Option<&AppScope>,
+) -> (u32, Vec<(String, String)>) {
     let mut deleted = 0u32;
     let mut failures = Vec::new();
     for raw in paths {
-        match delete_one(raw, recursive) {
+        match delete_one(raw, recursive, scope) {
             Ok(()) => deleted += 1,
             Err(err) => failures.push((raw.clone(), err.to_string())),
         }
@@ -464,9 +511,10 @@ pub fn delete_paths(paths: &[String], recursive: bool) -> (u32, Vec<(String, Str
     (deleted, failures)
 }
 
-fn delete_one(raw_path: &str, recursive: bool) -> Result<()> {
+fn delete_one(raw_path: &str, recursive: bool, scope: Option<&AppScope>) -> Result<()> {
     let safe = SafePath::parse(raw_path)?;
-    let path = safe.as_path();
+    let path = scoped(&safe, scope)?;
+    let path = path.as_path();
     if is_protected(path) {
         return Err(FileError::Protected(path.to_path_buf()));
     }
@@ -498,6 +546,7 @@ pub fn create_archive(
     names: &[String],
     raw_archive_path: &str,
     format: ArchiveFormat,
+    scope: Option<&AppScope>,
 ) -> Result<(FileEntry, u64, u32)> {
     if format != ArchiveFormat::TarGz {
         return Err(FileError::InvalidPath(
@@ -505,36 +554,41 @@ pub fn create_archive(
         ));
     }
     let dir = SafePath::parse(raw_directory)?;
-    if in_pseudo_root(dir.as_path()) {
-        return Err(FileError::Protected(dir.as_path().to_path_buf()));
+    let dir_target = scoped(&dir, scope)?;
+    if in_pseudo_root(&dir_target) {
+        return Err(FileError::Protected(dir_target));
     }
     let archive = SafePath::parse(raw_archive_path)?;
-    if is_protected(archive.as_path()) {
-        return Err(FileError::Protected(archive.as_path().to_path_buf()));
+    let archive_target = scoped(&archive, scope)?;
+    if is_protected(&archive_target) {
+        return Err(FileError::Protected(archive_target));
     }
+    // Re-validated as a `SafePath` so `.child()` gets the usual bare-name
+    // checks; `dir_target` is already the real, in-scope directory.
+    let dir_safe_target = SafePath::parse(&dir_target.display().to_string())?;
 
     let mut file_count = 0u32;
     {
-        let file = std::fs::File::create(archive.as_path())
-            .map_err(|e| FileError::io(archive.as_path(), e))?;
+        let file = std::fs::File::create(&archive_target)
+            .map_err(|e| FileError::io(&archive_target, e))?;
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
             file,
             flate2::Compression::default(),
         ));
         for name in names {
-            let child = dir.child(name)?;
+            let child = dir_safe_target.child(name)?;
             file_count += walk::append_named(&mut builder, child.as_path(), name)?;
         }
         builder
             .into_inner()
-            .map_err(|e| FileError::io(archive.as_path(), e))?
+            .map_err(|e| FileError::io(&archive_target, e))?
             .finish()
-            .map_err(|e| FileError::io(archive.as_path(), e))?;
+            .map_err(|e| FileError::io(&archive_target, e))?;
     }
-    let bytes = std::fs::metadata(archive.as_path())
+    let bytes = std::fs::metadata(&archive_target)
         .map(|m| m.len())
         .unwrap_or(0);
-    let entry = describe(archive.as_path())?;
+    let entry = describe(&archive_target)?;
     Ok((entry, bytes, file_count))
 }
 
@@ -637,9 +691,11 @@ pub fn set_attributes(
     mode: Option<u32>,
     owner: Option<&str>,
     group: Option<&str>,
+    scope: Option<&AppScope>,
 ) -> Result<FileEntry> {
     let safe = SafePath::parse(raw_path)?;
-    let path = safe.as_path();
+    let target = scoped(&safe, scope)?;
+    let path = target.as_path();
     if is_protected(path) {
         return Err(FileError::Protected(path.to_path_buf()));
     }
@@ -678,19 +734,18 @@ pub struct ReadHandle {
 }
 
 impl ReadHandle {
-    pub fn open(raw_path: &str, offset: u64) -> Result<Self> {
+    pub fn open(raw_path: &str, offset: u64, scope: Option<&AppScope>) -> Result<Self> {
         let safe = SafePath::parse(raw_path)?;
-        let meta = std::fs::symlink_metadata(safe.as_path())
-            .map_err(|e| FileError::io(safe.as_path(), e))?;
+        let target = scoped(&safe, scope)?;
+        let meta = std::fs::symlink_metadata(&target).map_err(|e| FileError::io(&target, e))?;
         if meta.is_dir() {
-            return Err(FileError::IsADirectory(safe.as_path().to_path_buf()));
+            return Err(FileError::IsADirectory(target));
         }
-        let mut file =
-            std::fs::File::open(safe.as_path()).map_err(|e| FileError::io(safe.as_path(), e))?;
+        let mut file = std::fs::File::open(&target).map_err(|e| FileError::io(&target, e))?;
         if offset > 0 {
             use std::io::Seek;
             file.seek(std::io::SeekFrom::Start(offset))
-                .map_err(|e| FileError::io(safe.as_path(), e))?;
+                .map_err(|e| FileError::io(&target, e))?;
         }
         Ok(Self {
             size: meta.len(),
@@ -727,14 +782,19 @@ pub struct WriteHandle {
 }
 
 impl WriteHandle {
-    pub fn open(header: &WriteHeader) -> Result<Self> {
+    pub fn open(header: &WriteHeader, scope: Option<&AppScope>) -> Result<Self> {
         let dir = SafePath::parse(&header.directory)?;
-        let dir_meta = std::fs::symlink_metadata(dir.as_path())
-            .map_err(|e| FileError::io(dir.as_path(), e))?;
+        let dir_target = scoped(&dir, scope)?;
+        let dir_meta =
+            std::fs::symlink_metadata(&dir_target).map_err(|e| FileError::io(&dir_target, e))?;
         if !dir_meta.is_dir() {
-            return Err(FileError::NotADirectory(dir.as_path().to_path_buf()));
+            return Err(FileError::NotADirectory(dir_target));
         }
-        let target = dir.child(&header.name)?;
+        // Re-validated as a `SafePath` so `.child()` gets the usual
+        // bare-name checks; `dir_target` is already the real, in-scope
+        // directory.
+        let dir_safe_target = SafePath::parse(&dir_target.display().to_string())?;
+        let target = dir_safe_target.child(&header.name)?;
         if is_protected(target.as_path()) {
             return Err(FileError::Protected(target.as_path().to_path_buf()));
         }
@@ -747,7 +807,7 @@ impl WriteHandle {
             ".asc-upload-{}.part",
             crate::daemon::api::console::random_hex(8)
         );
-        let temp_path = dir.as_path().join(temp_name);
+        let temp_path = dir_target.join(temp_name);
         use std::os::unix::fs::OpenOptionsExt;
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -835,7 +895,7 @@ mod tests {
         std::os::unix::fs::symlink("/nonexistent-target", dir.path().join("broken-link")).unwrap();
         std::os::unix::fs::symlink("/etc", dir.path().join("etc-link")).unwrap();
 
-        let listing = list_directory(&dir.path().display().to_string(), false).unwrap();
+        let listing = list_directory(&dir.path().display().to_string(), false, None).unwrap();
         let names: Vec<_> = listing.entries.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&"visible.txt".to_string()));
         assert!(!names.contains(&".hidden".to_string()));
@@ -865,7 +925,7 @@ mod tests {
         );
         assert_eq!(etc_link.target_kind, Some(FileKind::Directory));
 
-        let listing_hidden = list_directory(&dir.path().display().to_string(), true).unwrap();
+        let listing_hidden = list_directory(&dir.path().display().to_string(), true, None).unwrap();
         let names: Vec<_> = listing_hidden
             .entries
             .iter()
@@ -883,7 +943,7 @@ mod tests {
         for i in 0..5 {
             std::fs::write(dir.path().join(format!("f{i}")), b"").unwrap();
         }
-        let listing = list_directory(&dir.path().display().to_string(), false).unwrap();
+        let listing = list_directory(&dir.path().display().to_string(), false, None).unwrap();
         assert_eq!(listing.total_entries, 5);
         assert!(!listing.truncated);
     }
@@ -895,12 +955,12 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("a.txt"), b"x").unwrap();
 
-        let (deleted, failures) = delete_paths(&[sub.display().to_string()], false);
+        let (deleted, failures) = delete_paths(&[sub.display().to_string()], false, None);
         assert_eq!(deleted, 0);
         assert_eq!(failures.len(), 1);
         assert!(sub.exists());
 
-        let (deleted, failures) = delete_paths(&[sub.display().to_string()], true);
+        let (deleted, failures) = delete_paths(&[sub.display().to_string()], true, None);
         assert_eq!(deleted, 1);
         assert!(failures.is_empty());
         assert!(!sub.exists());
@@ -913,7 +973,7 @@ mod tests {
         std::fs::write(outside.path().join("keepme.txt"), b"x").unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
 
-        let (deleted, failures) = delete_paths(&[dir.path().display().to_string()], true);
+        let (deleted, failures) = delete_paths(&[dir.path().display().to_string()], true, None);
         assert_eq!(deleted, 1);
         assert!(failures.is_empty());
         assert!(
@@ -932,6 +992,7 @@ mod tests {
         let (deleted, failures) = delete_paths(
             &[ok.display().to_string(), missing.display().to_string()],
             false,
+            None,
         );
         assert_eq!(deleted, 1);
         assert_eq!(failures.len(), 1);
@@ -950,7 +1011,8 @@ mod tests {
             move_path(
                 &src.display().to_string(),
                 &dst.display().to_string(),
-                false
+                false,
+                None
             )
             .is_err()
         );
@@ -958,13 +1020,20 @@ mod tests {
             copy_path(
                 &src.display().to_string(),
                 &dst.display().to_string(),
-                false
+                false,
+                None
             )
             .is_err()
         );
         assert_eq!(std::fs::read(&dst).unwrap(), b"existing");
 
-        move_path(&src.display().to_string(), &dst.display().to_string(), true).unwrap();
+        move_path(
+            &src.display().to_string(),
+            &dst.display().to_string(),
+            true,
+            None,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"source");
     }
 
@@ -975,8 +1044,13 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         let dst = src.join("nested");
 
-        let err =
-            copy_path(&src.display().to_string(), &dst.display().to_string(), true).unwrap_err();
+        let err = copy_path(
+            &src.display().to_string(),
+            &dst.display().to_string(),
+            true,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, FileError::DestinationInsideSource { .. }));
     }
 
@@ -993,6 +1067,7 @@ mod tests {
             &["a.txt".to_string(), "link".to_string()],
             &archive_path.display().to_string(),
             ArchiveFormat::TarGz,
+            None,
         )
         .unwrap();
         assert_eq!(entry.name, "out.tar.gz");
@@ -1019,7 +1094,7 @@ mod tests {
             mode: None,
         };
         {
-            let mut handle = WriteHandle::open(&header).unwrap();
+            let mut handle = WriteHandle::open(&header, None).unwrap();
             handle.write_all(b"partial").unwrap();
             // Dropped without commit — the aborted upload's temp file must
             // not survive it.
@@ -1043,7 +1118,7 @@ mod tests {
             overwrite: false,
             mode: None,
         };
-        let mut handle = WriteHandle::open(&header).unwrap();
+        let mut handle = WriteHandle::open(&header, None).unwrap();
         handle.write_all(b"hello ").unwrap();
         handle.write_all(b"world").unwrap();
         let entry = handle.commit().unwrap();
@@ -1068,7 +1143,7 @@ mod tests {
             overwrite: false,
             mode: None,
         };
-        assert!(WriteHandle::open(&header).is_err());
+        assert!(WriteHandle::open(&header, None).is_err());
         assert_eq!(
             std::fs::read(dir.path().join("taken.bin")).unwrap(),
             b"existing"
@@ -1082,7 +1157,8 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let before = describe(&file).unwrap();
 
-        let entry = set_attributes(&file.display().to_string(), Some(0o600), None, None).unwrap();
+        let entry =
+            set_attributes(&file.display().to_string(), Some(0o600), None, None, None).unwrap();
         assert_eq!(entry.mode, 0o600);
         // Neither owner name nor uid should move when owner/group are None.
         assert_eq!(entry.uid, before.uid);
@@ -1100,6 +1176,7 @@ mod tests {
             None,
             Some("definitely-not-a-real-user"),
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, FileError::UnknownUser(_)));
@@ -1109,6 +1186,7 @@ mod tests {
             None,
             None,
             Some("definitely-not-a-real-group"),
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, FileError::UnknownGroup(_)));
@@ -1116,7 +1194,7 @@ mod tests {
 
     #[test]
     fn set_attributes_refuses_a_protected_path() {
-        let err = set_attributes("/etc", Some(0o755), None, None).unwrap_err();
+        let err = set_attributes("/etc", Some(0o755), None, None, None).unwrap_err();
         assert!(matches!(err, FileError::Protected(_)));
     }
 
@@ -1129,5 +1207,97 @@ mod tests {
         // Ascending by id, as documented.
         assert!(users.windows(2).all(|w| w[0].uid <= w[1].uid));
         assert!(groups.windows(2).all(|w| w[0].gid <= w[1].gid));
+    }
+
+    // ── app-scoped confinement (DMN-086): every entry point rejects a path
+    // outside its `AppScope`, mirroring the `AppScope::resolve` unit tests
+    // in `scope.rs` but through the public functions those tests never call
+    // directly. ──
+
+    #[test]
+    fn list_directory_confines_to_an_app_scope() {
+        let app = tempfile::tempdir().unwrap();
+        std::fs::write(app.path().join("inside.txt"), b"x").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scope = AppScope::new(vec![app.path().to_path_buf()]).unwrap();
+
+        let ok = list_directory(&app.path().display().to_string(), false, Some(&scope)).unwrap();
+        assert_eq!(ok.entries[0].name, "inside.txt");
+
+        let result = list_directory(&outside.path().display().to_string(), false, Some(&scope));
+        assert!(matches!(result, Err(FileError::OutsideScope(_))));
+    }
+
+    #[test]
+    fn create_directory_confines_to_an_app_scope() {
+        let app = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scope = AppScope::new(vec![app.path().to_path_buf()]).unwrap();
+
+        create_directory(
+            &app.path().join("data").display().to_string(),
+            false,
+            Some(&scope),
+        )
+        .unwrap();
+        assert!(app.path().join("data").is_dir());
+
+        let err = create_directory(
+            &outside.path().join("evil").display().to_string(),
+            false,
+            Some(&scope),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FileError::OutsideScope(_)));
+        assert!(!outside.path().join("evil").exists());
+    }
+
+    #[test]
+    fn read_handle_refuses_a_symlink_that_escapes_the_scope() {
+        let app = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("shadow"), b"root:x:0:0").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("shadow"), app.path().join("link")).unwrap();
+        let scope = AppScope::new(vec![app.path().to_path_buf()]).unwrap();
+
+        let result = ReadHandle::open(
+            &app.path().join("link").display().to_string(),
+            0,
+            Some(&scope),
+        );
+        assert!(
+            matches!(result, Err(FileError::OutsideScope(_))),
+            "a symlink planted inside the app directory must not read a target outside it"
+        );
+    }
+
+    #[test]
+    fn write_handle_confines_the_target_directory_to_an_app_scope() {
+        let app = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scope = AppScope::new(vec![app.path().to_path_buf()]).unwrap();
+
+        let header = WriteHeader {
+            directory: outside.path().display().to_string(),
+            name: "evil.txt".into(),
+            overwrite: false,
+            mode: None,
+        };
+        let result = WriteHandle::open(&header, Some(&scope));
+        assert!(matches!(result, Err(FileError::OutsideScope(_))));
+    }
+
+    #[test]
+    fn delete_paths_confines_to_an_app_scope() {
+        let app = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("keepme.txt");
+        std::fs::write(&victim, b"x").unwrap();
+        let scope = AppScope::new(vec![app.path().to_path_buf()]).unwrap();
+
+        let (deleted, failures) = delete_paths(&[victim.display().to_string()], true, Some(&scope));
+        assert_eq!(deleted, 0);
+        assert_eq!(failures.len(), 1);
+        assert!(victim.exists(), "a path outside the scope must survive");
     }
 }

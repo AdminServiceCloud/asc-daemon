@@ -202,7 +202,7 @@ async fn attach_docker(
 ) -> anyhow::Result<()> {
     let cfg = &state.config.docker;
     let connect = async {
-        let attach = docker::attach(cfg, container).await?;
+        let attach = docker::attach(cfg, container, true).await?;
         let output = attach.output.map(|item| {
             item.map(|chunk| chunk.into_bytes().to_vec())
                 .map_err(|e| anyhow::anyhow!("docker attach: {e}"))

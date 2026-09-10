@@ -1041,14 +1041,28 @@ pub async fn logs_follow(
 }
 
 /// Interactive attach: bidirectional stdin/stdout to a running container.
-pub async fn attach(cfg: &DockerConfig, container: &str) -> Result<AttachContainerResults> {
+///
+/// `replay_logs` asks the Engine to send the container's buffered output
+/// before switching to live streaming. The WS console hub needs this: a
+/// bare attach only carries output produced after it connects, so the very
+/// first attach of a freshly (re)created hub session (`console::hub::spawn`)
+/// would otherwise miss everything the app printed before that call —
+/// including its own startup banner — with no way to recover it later, since
+/// the hub's own replay buffer only starts accumulating from that point. The
+/// interactive CLI attach (`asc app attach`) passes `false` to match
+/// `docker attach`'s own convention of showing only new output.
+pub async fn attach(
+    cfg: &DockerConfig,
+    container: &str,
+    replay_logs: bool,
+) -> Result<AttachContainerResults> {
     let docker = connect(cfg)?;
     let opts = AttachContainerOptions {
         stdin: true,
         stdout: true,
         stderr: true,
         stream: true,
-        logs: false,
+        logs: replay_logs,
         detach_keys: None,
     };
     docker

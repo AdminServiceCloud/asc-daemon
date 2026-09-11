@@ -611,6 +611,22 @@ impl AppService for Grpc {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    async fn rename_app(
+        &self,
+        request: Request<pb::RenameAppRequest>,
+    ) -> Result<Response<pb::RenameAppResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let status = self
+            .0
+            .rename(ctx, req.id, req.name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RenameAppResponse {
+            app: Some(to_pb(&status)),
+        }))
+    }
+
     async fn start_app(
         &self,
         request: Request<pb::StartAppRequest>,

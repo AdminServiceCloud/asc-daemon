@@ -475,6 +475,16 @@ impl ApiState {
         rx
     }
 
+    pub async fn rename(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        name: String,
+    ) -> Result<AppStatus> {
+        self.blocking(move |s| s.manager.rename(&ctx, &id, &name))
+            .await
+    }
+
     pub async fn start(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {
         self.blocking(move |s| s.manager.start(&ctx, &id)).await
     }

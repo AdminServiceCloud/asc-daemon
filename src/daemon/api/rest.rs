@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/apps/{id}/disk", get(app_disk))
         .route("/v1/apps/{id}/ports", get(app_ports))
         .route("/v1/apps/{id}/upgrade", post(upgrade_app))
+        .route("/v1/apps/{id}/name", put(rename_app))
         .route("/v1/apps/{id}/start", post(start_app))
         .route("/v1/apps/{id}/stop", post(stop_app))
         .route("/v1/apps/{id}/restart", post(restart_app))
@@ -684,6 +685,23 @@ async fn install_app(
         }),
     };
     Ok((StatusCode::CREATED, Json(json)).into_response())
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    /// New custom name; empty resets to the package's own name.
+    #[serde(default)]
+    name: String,
+}
+
+async fn rename_app(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Result<Response, ApiError> {
+    let status = state.rename(ctx, id, body.name).await?;
+    Ok(Json(to_json(&status)).into_response())
 }
 
 async fn start_app(

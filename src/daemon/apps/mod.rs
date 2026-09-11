@@ -420,6 +420,45 @@ impl AppManager {
         })
     }
 
+    /// Set or clear the app's custom name (DMN-095). An empty (or
+    /// whitespace-only) name resets it to the package's own name — the same
+    /// state as an app that never had a custom name.
+    pub fn rename(&self, ctx: &UserContext, id: &str, name: &str) -> Result<AppStatus> {
+        let mut meta = self.get_authorized(ctx, id)?;
+        let trimmed = name.trim();
+        let custom_name = if trimmed.is_empty() {
+            None
+        } else {
+            let ok_len = (1..=64).contains(&trimmed.chars().count());
+            let ok_chars = !trimmed.chars().any(char::is_control);
+            if !ok_len || !ok_chars {
+                bail!(tf(Msg::PkgNameInvalid, trimmed));
+            }
+            // Uniqueness only matters when the name is actually changing —
+            // keeping the app's own current name must always be a no-op.
+            if meta.custom_name.as_deref() != Some(trimmed) {
+                let taken = self.store.list()?.into_iter().any(|m| {
+                    m.id != meta.id
+                        && (ctx.is_root || m.owner.uid == ctx.uid)
+                        && (m.id == trimmed || m.custom_name.as_deref() == Some(trimmed))
+                });
+                if taken {
+                    bail!(tf(Msg::PkgNameTaken, trimmed));
+                }
+            }
+            Some(trimmed.to_string())
+        };
+        meta.custom_name = custom_name;
+        self.store.save(&meta)?;
+        let state = self.state_of(&meta);
+        let commit = self.commit_of(&meta.id);
+        Ok(AppStatus {
+            meta,
+            state,
+            commit,
+        })
+    }
+
     pub fn start(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
@@ -786,6 +825,55 @@ mod tests {
 
         assert!(mgr.get_authorized(&user(1000), "Server").is_err());
         assert!(mgr.get_authorized(&user(1000), "app-a").is_ok());
+    }
+
+    #[test]
+    fn rename_sets_and_resets_custom_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install(&mgr, "helloworld", 1000);
+
+        let renamed = mgr
+            .rename(&user(1000), "helloworld", "  My Server  ")
+            .unwrap();
+        assert_eq!(renamed.meta.custom_name.as_deref(), Some("My Server"));
+        assert_eq!(renamed.meta.display_name(), "My Server");
+
+        // An empty (or whitespace-only) name resets it to the package name.
+        let reset = mgr.rename(&user(1000), "My Server", "   ").unwrap();
+        assert_eq!(reset.meta.custom_name, None);
+        assert_eq!(reset.meta.display_name(), "helloworld");
+    }
+
+    #[test]
+    fn rename_rejects_a_name_taken_by_another_visible_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install(&mgr, "app-a", 1000);
+        install_named(&mgr, "app-b", 1000, Some("Taken"));
+
+        assert!(mgr.rename(&user(1000), "app-a", "Taken").is_err());
+        // Renaming to the id of another visible app is taken too.
+        assert!(mgr.rename(&user(1000), "app-a", "app-b").is_err());
+        // Keeping an app's own current name is always a no-op, not a
+        // collision with itself.
+        assert!(mgr.rename(&user(1000), "app-b", "Taken").is_ok());
+        // A foreign user's app does not block the name.
+        install(&mgr, "bob-app", 1001);
+        assert!(mgr.rename(&user(1001), "bob-app", "Taken").is_ok());
+    }
+
+    #[test]
+    fn rename_rejects_foreign_app_and_bad_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        install(&mgr, "alice-app", 1000);
+
+        assert!(mgr.rename(&user(1001), "alice-app", "New Name").is_err());
+        assert!(
+            mgr.rename(&user(1000), "alice-app", &"x".repeat(65))
+                .is_err()
+        );
     }
 
     /// SO_PEERCRED contexts: a non-root peer is exactly itself — the sudo

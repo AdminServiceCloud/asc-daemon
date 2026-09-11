@@ -61,6 +61,9 @@ service AppService {
   // A disconnected caller does not cancel the install: it keeps running to
   // completion on the daemon regardless of whether anyone is still watching.
   rpc InstallAppStream(InstallAppRequest) returns (stream InstallAppEvent);
+  // Sets the app's custom name (DMN-095); an empty name resets it to the
+  // package's own name, same as an app that never had one.
+  rpc RenameApp(RenameAppRequest) returns (RenameAppResponse);
   rpc StartApp(StartAppRequest) returns (StartAppResponse);
   rpc StopApp(StopAppRequest) returns (StopAppResponse);
   rpc RestartApp(RestartAppRequest) returns (RestartAppResponse);
@@ -313,6 +316,16 @@ message UpgradeAppEvent {
     string line = 1;
     UpgradeAppResponse result = 2;
   }
+}
+
+message RenameAppRequest {
+  string id = 1;
+  // New custom name; empty resets to the package's own name.
+  string name = 2;
+}
+
+message RenameAppResponse {
+  App app = 1;
 }
 
 message StartAppRequest {

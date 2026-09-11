@@ -340,6 +340,7 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
             version: report.version,
             apps: vec![],
             skipped: vec![],
+            license_required: None,
         },
         InstallOutcome::Stack {
             stack,
@@ -359,7 +360,24 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
                 })
                 .collect(),
             skipped,
+            license_required: None,
         },
+    }
+}
+
+/// `LicenseRequired` is not a gRPC error: the caller's request otherwise
+/// succeeded, it just needs a consent round trip (DMN-091). `install_app`
+/// and `install_app_stream` catch the typed error before it would reach
+/// [`to_status`] and render it through this instead.
+fn license_required_to_pb(required: pkg::LicenseRequired) -> pb::InstallAppResponse {
+    pb::InstallAppResponse {
+        license_required: Some(pb::LicenseRequiredDetail {
+            package: required.package,
+            source: required.source,
+            git: required.git,
+            license: required.license,
+        }),
+        ..Default::default()
     }
 }
 
@@ -417,7 +435,7 @@ impl AppService for Grpc {
         let ctx = ctx_of(&request);
         let request = request.into_inner();
         let source = Some(request.source).filter(|s| !s.is_empty());
-        let outcome = self
+        match self
             .0
             .install(
                 ctx,
@@ -433,8 +451,13 @@ impl AppService for Grpc {
                 None,
             )
             .await
-            .map_err(to_status)?;
-        Ok(Response::new(install_outcome_to_pb(outcome)))
+        {
+            Ok(outcome) => Ok(Response::new(install_outcome_to_pb(outcome))),
+            Err(err) => match err.downcast::<pkg::LicenseRequired>() {
+                Ok(required) => Ok(Response::new(license_required_to_pb(required))),
+                Err(err) => Err(to_status(err)),
+            },
+        }
     }
 
     /// Streamed sibling of `install_app` (DMN-090): the platform's install
@@ -476,7 +499,17 @@ impl AppService for Grpc {
                     }),
                     rx,
                 )),
-                Some(super::InstallStreamEvent::Done(Err(err))) => Some((Err(to_status(err)), rx)),
+                Some(super::InstallStreamEvent::Done(Err(err))) => Some((
+                    match err.downcast::<pkg::LicenseRequired>() {
+                        Ok(required) => Ok(pb::InstallAppEvent {
+                            event: Some(pb::install_app_event::Event::Result(
+                                license_required_to_pb(required),
+                            )),
+                        }),
+                        Err(err) => Err(to_status(err)),
+                    },
+                    rx,
+                )),
                 None => None,
             }
         });

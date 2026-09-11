@@ -210,12 +210,28 @@ message InstallAppResponse {
   repeated InstalledApp apps = 3;
   // Stack installs: apps that were already installed and were skipped.
   repeated string skipped = 4;
+  // Set instead of every field above when the repository ships a LICENSE
+  // and the caller did not pass license_ack (DMN-028/DMN-091): the caller
+  // renders its own consent dialog from these fields and retries with
+  // license_ack = true. Not a gRPC error — the call otherwise succeeded, it
+  // just needs one more round trip.
+  optional LicenseRequiredDetail license_required = 5;
+}
+
+// See InstallAppResponse.license_required. Mirrors pkg::LicenseRequired
+// field-for-field (asc-daemon/src/daemon/pkg/install.rs).
+message LicenseRequiredDetail {
+  string package = 1;
+  string source = 2;
+  string git = 3;
+  string license = 4;
 }
 
 // One event of an InstallAppStream call: either one more line of progress
 // text, or the terminal result — the same InstallAppResponse the unary
-// InstallApp call returns. A stream that ends without a `result` event ended
-// in error instead; the gRPC status carries the reason, same as InstallApp.
+// InstallApp call returns (including the license_required branch). A stream
+// that ends without a `result` event ended in a genuine error instead; the
+// gRPC status carries the reason, same as InstallApp.
 message InstallAppEvent {
   oneof event {
     string line = 1;

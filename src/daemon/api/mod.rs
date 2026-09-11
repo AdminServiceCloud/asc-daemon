@@ -278,8 +278,12 @@ impl ApiState {
     /// Install from a registry spec or directly from a git URL (mirrors the
     /// CLI's dispatch). Without `license_ack` a repository shipping a
     /// LICENSE returns the typed [`pkg::LicenseRequired`] error — REST
-    /// serializes it structurally so clients (the CLI over the unix socket,
-    /// the platform UI) can render their own consent dialog and retry.
+    /// serializes it structurally (`license_required`) so the CLI over the
+    /// unix socket can render its own consent prompt and retry; the gRPC
+    /// layer (`api::grpc::install_app`/`install_app_stream`, DMN-091) catches
+    /// the same error and turns it into a normal `InstallAppResponse` with
+    /// `license_required` set, so the platform UI gets the same fields
+    /// without it ever reaching a gRPC error status.
     #[allow(clippy::too_many_arguments)]
     pub async fn install(
         self: &Arc<Self>,

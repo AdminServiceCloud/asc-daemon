@@ -250,7 +250,7 @@ fn install_from_file_registry() {
     git(&repo, &["tag", "v2.0.0"]);
 
     // Explicitly pinned version: no registry index refresh required.
-    match pkg::upgrade(&config, &ctx, "demo@2.0.0").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo@2.0.0", None).unwrap() {
         pkg::UpgradeOutcome::Upgraded { id, from, to, .. } => {
             assert_eq!(id, "demo");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
@@ -266,14 +266,14 @@ fn install_from_file_registry() {
     assert!(!app_dir.join("repository.old").exists(), "no leftovers");
 
     // The same version again reports up-to-date instead of recloning.
-    match pkg::upgrade(&config, &ctx, "demo@2.0.0").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo@2.0.0", None).unwrap() {
         pkg::UpgradeOutcome::UpToDate { version, .. } => assert_eq!(version, "v2.0.0"),
         other => panic!("expected up-to-date, got {other:?}"),
     }
 
     // A suffixed instance resolves upgrades through its recorded package:
     // 'demo-2' is not a registry name, meta.package points it at 'demo'.
-    match pkg::upgrade(&config, &ctx, "demo-2@2.0.0").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo-2@2.0.0", None).unwrap() {
         pkg::UpgradeOutcome::Upgraded { id, from, to, .. } => {
             assert_eq!(id, "demo-2");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
@@ -288,7 +288,7 @@ fn install_from_file_registry() {
     );
 
     // A missing tag fails before touching the installed repository.
-    assert!(pkg::upgrade(&config, &ctx, "demo@9.9.9").is_err());
+    assert!(pkg::upgrade(&config, &ctx, "demo@9.9.9", None).is_err());
     assert_eq!(
         store.get("demo").unwrap().unwrap().version.as_deref(),
         Some("v2.0.0")
@@ -296,7 +296,7 @@ fn install_from_file_registry() {
     assert!(app_dir.join("repository/asc.yaml").exists());
 
     // Upgrading an unknown app fails cleanly.
-    assert!(pkg::upgrade(&config, &ctx, "ghost").is_err());
+    assert!(pkg::upgrade(&config, &ctx, "ghost", None).is_err());
 
     // ── DMN-047: no @version installs the repository's newest tag ────────
     // The repo now has v1.0.0 and v2.0.0; `demo` (no version) must resolve

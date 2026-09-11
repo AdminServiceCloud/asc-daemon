@@ -13,6 +13,7 @@ pub mod sources;
 pub mod upgrade;
 
 pub use clone::clone_app;
+pub use gitref::short_commit;
 pub use install::{
     AmbiguousPackage, GitRef, ImageChoiceRequired, InstallOutcome, InstallReport, LicenseRequired,
     VersionChoiceRequired, install, install_from_git, instance_id, is_git_url, repo_name,
@@ -20,4 +21,4 @@ pub use install::{
 pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};
 pub use registry::RegistryClient;
 pub use sources::SourceList;
-pub use upgrade::{UpgradeOutcome, short_commit, upgrade};
+pub use upgrade::{UpgradeOutcome, upgrade};

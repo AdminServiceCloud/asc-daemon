@@ -98,6 +98,14 @@ pub enum InstallStreamEvent {
     Done(Result<pkg::InstallOutcome>),
 }
 
+/// One event of [`ApiState::upgrade_stream`]: a progress line, or the
+/// terminal result — the same `Result` the unary [`ApiState::upgrade`]
+/// returns.
+pub enum UpgradeStreamEvent {
+    Line(String),
+    Done(Result<pkg::UpgradeOutcome>),
+}
+
 /// Context of bearer-token (TCP) calls: full visibility — the platform
 /// performs its own per-user permission checks before reaching the daemon.
 /// Per-user API tokens are a follow-up (see docs/api.md). The unix-socket
@@ -271,7 +279,52 @@ impl ApiState {
         ctx: UserContext,
         spec: String,
     ) -> Result<pkg::UpgradeOutcome> {
-        self.blocking(move |s| pkg::upgrade(&s.config, &ctx, &spec))
+        self.blocking(move |s| pkg::upgrade(&s.config, &ctx, &spec, None))
+            .await
+    }
+
+    /// Streamed sibling of [`Self::upgrade`]: progress lines arrive as
+    /// [`UpgradeStreamEvent::Line`] as they happen, ending in one
+    /// [`UpgradeStreamEvent::Done`] with the same result `upgrade` would
+    /// have returned. Mirrors [`Self::install_stream`] exactly — the upgrade
+    /// keeps running in the background regardless of whether the receiver is
+    /// still being read.
+    pub fn upgrade_stream(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        spec: String,
+    ) -> tokio::sync::mpsc::Receiver<UpgradeStreamEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        struct ChannelReporter(tokio::sync::mpsc::Sender<UpgradeStreamEvent>);
+        impl progress::InstallReporter for ChannelReporter {
+            fn line(&self, text: &str) {
+                let _ = self
+                    .0
+                    .blocking_send(UpgradeStreamEvent::Line(text.to_string()));
+            }
+        }
+
+        let state = Arc::clone(self);
+        let result_tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let reporter = ChannelReporter(tx);
+            let outcome = pkg::upgrade(&state.config, &ctx, &spec, Some(&reporter));
+            let _ = result_tx.blocking_send(UpgradeStreamEvent::Done(outcome));
+        });
+        rx
+    }
+
+    /// A repository's tags, newest first, and which one `InstallApp`/
+    /// `UpgradeApp` would pick with no version given — one `git ls-remote`
+    /// round trip, no clone (DMN-0XX). Feeds a version picker for both the
+    /// install wizard (before the app exists) and the upgrade dropdown (an
+    /// already-installed app, resolved to a git URL by the caller).
+    pub async fn list_app_versions(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        git_url: String,
+    ) -> Result<pkg::gitref::RemoteRefs> {
+        self.blocking(move |_s| pkg::gitref::ls_remote(&git_url, &ctx))
             .await
     }
 

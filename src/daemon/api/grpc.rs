@@ -138,6 +138,7 @@ fn to_pb(status: &AppStatus) -> pb::App {
             ram_bytes: q.ram_bytes,
             disk_bytes: q.disk_bytes,
         }),
+        commit: status.commit.clone(),
     }
 }
 
@@ -381,10 +382,41 @@ fn license_required_to_pb(required: pkg::LicenseRequired) -> pb::InstallAppRespo
     }
 }
 
+/// Shared by `upgrade_app` and `upgrade_app_stream`: both end in the same
+/// result shape, one returned directly, the other as the last stream event.
+fn upgrade_outcome_to_pb(outcome: pkg::UpgradeOutcome) -> pb::UpgradeAppResponse {
+    match outcome {
+        pkg::UpgradeOutcome::Upgraded {
+            id,
+            from,
+            to,
+            from_commit,
+            to_commit,
+        } => pb::UpgradeAppResponse {
+            id,
+            from,
+            to,
+            from_commit,
+            to_commit,
+            up_to_date: false,
+        },
+        pkg::UpgradeOutcome::UpToDate { id, version } => pb::UpgradeAppResponse {
+            id,
+            from: Some(version.clone()),
+            to: version,
+            from_commit: None,
+            to_commit: None,
+            up_to_date: true,
+        },
+    }
+}
+
 #[tonic::async_trait]
 impl AppService for Grpc {
     type InstallAppStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::InstallAppEvent, Status>> + Send>>;
+    type UpgradeAppStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::UpgradeAppEvent, Status>> + Send>>;
 
     async fn list_apps(
         &self,
@@ -510,6 +542,69 @@ impl AppService for Grpc {
                     },
                     rx,
                 )),
+                None => None,
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn list_app_versions(
+        &self,
+        request: Request<pb::ListAppVersionsRequest>,
+    ) -> Result<Response<pb::ListAppVersionsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let refs = self
+            .0
+            .list_app_versions(ctx, request.into_inner().git_url)
+            .await
+            .map_err(to_status)?;
+        let latest = refs.latest_tag().map(str::to_string);
+        Ok(Response::new(pb::ListAppVersionsResponse {
+            tags: refs.tags,
+            latest,
+        }))
+    }
+
+    async fn upgrade_app(
+        &self,
+        request: Request<pb::UpgradeAppRequest>,
+    ) -> Result<Response<pb::UpgradeAppResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let outcome = self
+            .0
+            .upgrade(ctx, request.into_inner().spec)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(upgrade_outcome_to_pb(outcome)))
+    }
+
+    /// Streamed sibling of `upgrade_app`, mirroring `install_app_stream`
+    /// exactly: the danger-zone upgrade dialog watches this one so a slow
+    /// upgrade (a big new image pull) doesn't look like a hang. A disconnect
+    /// here does not cancel the upgrade — see `ApiState::upgrade_stream`.
+    async fn upgrade_app_stream(
+        &self,
+        request: Request<pb::UpgradeAppRequest>,
+    ) -> Result<Response<Self::UpgradeAppStreamStream>, Status> {
+        let ctx = ctx_of(&request);
+        let rx = self.0.upgrade_stream(ctx, request.into_inner().spec);
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(super::UpgradeStreamEvent::Line(line)) => Some((
+                    Ok(pb::UpgradeAppEvent {
+                        event: Some(pb::upgrade_app_event::Event::Line(line)),
+                    }),
+                    rx,
+                )),
+                Some(super::UpgradeStreamEvent::Done(Ok(outcome))) => Some((
+                    Ok(pb::UpgradeAppEvent {
+                        event: Some(pb::upgrade_app_event::Event::Result(upgrade_outcome_to_pb(
+                            outcome,
+                        ))),
+                    }),
+                    rx,
+                )),
+                Some(super::UpgradeStreamEvent::Done(Err(err))) => Some((Err(to_status(err)), rx)),
                 None => None,
             }
         });

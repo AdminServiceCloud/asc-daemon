@@ -159,7 +159,7 @@ fn ambiguous_package_requires_source_choice() {
     // Upgrade with no version resolves the newest tag through the stored
     // source (beta has v2.0.0, alpha does not) — no ambiguity error, no
     // accidental switch to alpha, and the version comes from the repo.
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         pkg::UpgradeOutcome::Upgraded { to, .. } => assert_eq!(to, "v2.0.0"),
         other => panic!("expected an upgrade, got {other:?}"),
     }

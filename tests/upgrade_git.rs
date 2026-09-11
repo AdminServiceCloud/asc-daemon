@@ -94,7 +94,7 @@ fn upgrade_follows_the_recorded_repository_url() {
     assert_eq!(meta.branch, None, "a tag install tracks no branch");
 
     // Nothing newer in the repository yet.
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         UpgradeOutcome::UpToDate { id, version } => {
             assert_eq!(id, "demo");
             assert_eq!(version, "v1.0.0");
@@ -108,7 +108,7 @@ fn upgrade_follows_the_recorded_repository_url() {
     git(&repo, &["commit", "-q", "-am", "1.1.0"]);
     git(&repo, &["tag", "v1.1.0"]);
     let new_commit = head(&repo);
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         UpgradeOutcome::Upgraded {
             id,
             from,
@@ -187,7 +187,7 @@ fn branch_installs_follow_their_branch() {
 
     // The branch has not moved — and the v1.0.0 tag must not pull the app off
     // the branch it was installed to track.
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         UpgradeOutcome::UpToDate { version, .. } => assert_eq!(version, "dev"),
         other => panic!("expected up-to-date, got: {other:?}"),
     }
@@ -197,7 +197,7 @@ fn branch_installs_follow_their_branch() {
     fs::write(repo.join("asc.yaml"), manifest("1.2.0-dev")).unwrap();
     git(&repo, &["commit", "-q", "-am", "more dev"]);
     let new_commit = head(&repo);
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         UpgradeOutcome::Upgraded {
             from,
             to,
@@ -225,7 +225,7 @@ fn branch_installs_follow_their_branch() {
     );
 
     // An explicit @version is the user pinning the app to a tag instead.
-    match pkg::upgrade(&config, &ctx, "demo@v1.0.0").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo@v1.0.0", None).unwrap() {
         UpgradeOutcome::Upgraded { to, .. } => assert_eq!(to, "v1.0.0"),
         other => panic!("expected an upgrade, got: {other:?}"),
     }
@@ -257,14 +257,14 @@ fn untagged_repositories_track_their_default_branch() {
         "the manifest version, no ref was checked out"
     );
 
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         UpgradeOutcome::UpToDate { version, .. } => assert_eq!(version, "0.1.0"),
         other => panic!("expected up-to-date, got: {other:?}"),
     }
 
     fs::write(repo.join("asc.yaml"), manifest("0.2.0")).unwrap();
     git(&repo, &["commit", "-q", "-am", "0.2.0"]);
-    match pkg::upgrade(&config, &ctx, "demo").unwrap() {
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
         UpgradeOutcome::Upgraded { from, to, .. } => {
             assert_eq!(from.as_deref(), Some("0.1.0"));
             assert_eq!(to, "0.2.0", "the new manifest's version");

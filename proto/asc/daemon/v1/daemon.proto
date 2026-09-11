@@ -95,6 +95,24 @@ service AppService {
   // Full-map replacement, same contract as PUT /v1/apps/{id}/settings: a key
   // absent from values_json resets to the package default.
   rpc SetAppSettings(SetAppSettingsRequest) returns (SetAppSettingsResponse);
+  // A repository's available versions (its git tags, newest first) without
+  // installing or cloning anything — one `git ls-remote` round trip. Used by
+  // a version picker: the install wizard (before the app exists) and the
+  // upgrade dropdown (an already-installed app) both resolve to a git URL
+  // and call this the same way.
+  rpc ListAppVersions(ListAppVersionsRequest) returns (ListAppVersionsResponse);
+  // Move an installed app to another version (DMN-053/DMN-056): `spec` is
+  // its id or custom name, optionally `@version` (omitted = the repository's
+  // newest tag). The app must already be stopped — same precondition as the
+  // CLI's `asc app upgrade`; a caller that wants to upgrade a running app
+  // stops it first (StopApp) and restarts it after (StartApp).
+  rpc UpgradeApp(UpgradeAppRequest) returns (UpgradeAppResponse);
+  // Same upgrade, as a live progress feed instead of one blocking call
+  // (mirrors InstallAppStream/DMN-090): a text line per step of the
+  // repository clone / image pull, ending with the same result UpgradeApp
+  // would have returned — or, on failure, the stream ends with the same
+  // error status. A disconnected caller does not cancel the upgrade.
+  rpc UpgradeAppStream(UpgradeAppRequest) returns (stream UpgradeAppEvent);
 }
 
 enum AppState {
@@ -122,6 +140,12 @@ message App {
   // Stable instance identity generated at install (DMN-044); absent for apps
   // installed before it. Unlike `id`, never reused after removal.
   optional string uuid = 10;
+  // Full commit sha the repository is currently checked out at (DMN-0XX),
+  // read live from the app's own `repository/` clone — not persisted in
+  // meta.json. Absent when it cannot be read (not a git repository, or an
+  // app installed before this field existed still resolves fine, just
+  // without a commit to show).
+  optional string commit = 11;
 }
 
 // Per-app resource limits; every field is optional — only set limits appear.
@@ -242,6 +266,53 @@ message InstallAppEvent {
 message InstalledApp {
   string id = 1;
   string version = 2;
+}
+
+message ListAppVersionsRequest {
+  // https://, http://, ssh://, or the scp-like git@host:path form — same
+  // forms InstallAppRequest.spec accepts for a direct git install.
+  string git_url = 1;
+}
+
+message ListAppVersionsResponse {
+  // Git tags, newest version first (semver-descending).
+  repeated string tags = 1;
+  // The tag InstallApp/UpgradeApp would pick with no version given; absent
+  // when the repository has no tags.
+  optional string latest = 2;
+}
+
+message UpgradeAppRequest {
+  // App id or custom name, optionally with "@version" (a git tag); no
+  // version = the repository's newest tag.
+  string spec = 1;
+}
+
+message UpgradeAppResponse {
+  string id = 1;
+  // The version that was installed before the upgrade; absent for an app
+  // with no recorded version (a moving ref with no tags).
+  optional string from = 2;
+  string to = 3;
+  // Full commit shas before/after (DMN-056) — the version alone does not
+  // identify what was actually installed for an app that follows a branch,
+  // and a re-tagged release moves a tag onto another commit.
+  optional string from_commit = 4;
+  optional string to_commit = 5;
+  // True when the app was already at the requested (or newest) version —
+  // `from`/`to_commit` etc. above still describe the version left in place.
+  bool up_to_date = 6;
+}
+
+// One event of an UpgradeAppStream call: either one more line of progress
+// text, or the terminal result — the same UpgradeAppResponse the unary
+// UpgradeApp call returns. A stream that ends without a `result` event ended
+// in a genuine error instead; the gRPC status carries the reason.
+message UpgradeAppEvent {
+  oneof event {
+    string line = 1;
+    UpgradeAppResponse result = 2;
+  }
 }
 
 message StartAppRequest {

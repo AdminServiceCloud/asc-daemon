@@ -7,6 +7,7 @@
 //! list of tags and branches to choose from. Credentials come from the same
 //! [`super::auth`] store as `git clone`.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -122,6 +123,33 @@ fn version_key(tag: &str) -> (Option<Vec<u64>>, bool) {
         .collect::<Option<Vec<_>>>()
         .filter(|v| !v.is_empty());
     (parts, no_prerelease)
+}
+
+/// The first 7 characters of a commit sha — what git itself abbreviates to,
+/// and what the CLI and the docs show.
+pub fn short_commit(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// The commit the repository in `dir` is checked out at, `None` when it
+/// cannot be read (no git, not a repository). Used both to report an
+/// installed app's current commit (DMN-0XX) and, during an upgrade, to tell
+/// "the branch moved" from "nothing changed" for apps that follow a branch
+/// rather than a tag.
+pub fn head_commit(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 #[cfg(test)]

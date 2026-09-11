@@ -1696,10 +1696,10 @@ fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
     }
 
     let ctx = UserContext::current();
-    let outcome = match pkg::upgrade(config, &ctx, spec) {
+    let outcome = match pkg::upgrade(config, &ctx, spec, None) {
         Ok(outcome) => outcome,
         // Private repository: offer to set up auth right here, then retry.
-        Err(err) if offer_auth_setup(&err) => pkg::upgrade(config, &ctx, spec)?,
+        Err(err) if offer_auth_setup(&err) => pkg::upgrade(config, &ctx, spec, None)?,
         Err(err) => return Err(err),
     };
     print_upgrade_outcome(&outcome);

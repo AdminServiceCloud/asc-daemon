@@ -131,6 +131,12 @@ pub enum Outcome {
 pub struct AppStatus {
     pub meta: AppMeta,
     pub state: RuntimeState,
+    /// Full commit sha the app's `repository/` clone is currently checked
+    /// out at, read live from disk — not persisted in meta.json, so an app
+    /// installed before this field existed still resolves fine, just
+    /// without a commit to show. `None` when it cannot be read (not a git
+    /// repository, git not installed).
+    pub commit: Option<String>,
 }
 
 /// One app's resource consumption for `asc stats` (DMN-006).
@@ -230,9 +236,22 @@ impl AppManager {
                 continue;
             }
             let state = self.state_of(&meta);
-            result.push(AppStatus { meta, state });
+            let commit = self.commit_of(&meta.id);
+            result.push(AppStatus {
+                meta,
+                state,
+                commit,
+            });
         }
         Ok(result)
+    }
+
+    /// The commit the app's `repository/` clone is checked out at — a
+    /// cheap, local `git rev-parse HEAD` (no network), same cost class as
+    /// `state_of`'s own per-app runtime inspection above.
+    fn commit_of(&self, id: &str) -> Option<String> {
+        let dir = self.store.app_dir(id).ok()?;
+        crate::daemon::pkg::gitref::head_commit(&dir.join("repository"))
     }
 
     /// Load an app the user is allowed to manage. `reference` is the app id
@@ -393,7 +412,12 @@ impl AppManager {
     pub fn status(&self, ctx: &UserContext, id: &str) -> Result<AppStatus> {
         let meta = self.get_authorized(ctx, id)?;
         let state = self.state_of(&meta);
-        Ok(AppStatus { meta, state })
+        let commit = self.commit_of(&meta.id);
+        Ok(AppStatus {
+            meta,
+            state,
+            commit,
+        })
     }
 
     pub fn start(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {

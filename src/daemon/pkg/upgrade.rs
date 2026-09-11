@@ -22,11 +22,11 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
+use super::gitref::{head_commit, ls_remote, short_commit};
 use super::install::{
     RemoveOnDrop, VersionSpec, clone_repository, enforce_install_policy, load_quota,
     locate_manifest, parse_spec, provision,
@@ -39,6 +39,7 @@ use crate::daemon::apps::{AppManager, RuntimeState, UserContext};
 use crate::daemon::config::Config;
 use crate::daemon::docker;
 use crate::daemon::i18n::{Msg, tf2};
+use crate::daemon::progress::InstallReporter;
 
 #[derive(Debug)]
 pub enum UpgradeOutcome {
@@ -62,7 +63,12 @@ pub enum UpgradeOutcome {
 
 /// Upgrade `name` (to the registry's latest tag) or `name@version`; the app
 /// is referenced by id or custom name. The app must be stopped.
-pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<UpgradeOutcome> {
+pub fn upgrade(
+    config: &Config,
+    ctx: &UserContext,
+    spec: &str,
+    report: Option<&dyn InstallReporter>,
+) -> Result<UpgradeOutcome> {
     let (reference, requested_version) = parse_spec(spec);
     let manager = AppManager::new(config);
     // Ownership check plus live state: only stopped apps are upgraded.
@@ -121,7 +127,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         VersionSpec::Exact(v) => Some(v.to_string()),
         VersionSpec::Latest | VersionSpec::Pick => match &meta.branch {
             Some(branch) => Some(branch.clone()),
-            None => match super::gitref::ls_remote(&git_url, ctx)?.latest_tag() {
+            None => match ls_remote(&git_url, ctx)?.latest_tag() {
                 Some(tag) => Some(tag.to_string()),
                 None if direct_git.is_some() => None,
                 None => {
@@ -162,7 +168,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         path: new_dir.clone(),
         armed: true,
     };
-    let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir, ctx, None)?;
+    let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir, ctx, report)?;
     // Both commits are read before the swap, while `repo_dir` still holds the
     // installed version: they are reported to the caller (DMN-056) and decide
     // whether a moving ref has moved at all.
@@ -218,7 +224,7 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         quota.as_ref(),
         settings.as_ref(),
         image_source,
-        None,
+        report,
     ) {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -279,32 +285,6 @@ pub fn upgrade(config: &Config, ctx: &UserContext, spec: &str) -> Result<Upgrade
         from_commit,
         to_commit,
     })
-}
-
-/// The first 7 characters of a commit sha — what git itself abbreviates to,
-/// and what the CLI and the docs show.
-pub fn short_commit(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
-/// The commit the repository in `dir` is checked out at, `None` when it
-/// cannot be read (no git, not a repository — an upgrade must still run).
-/// Used to tell "the branch moved" from "nothing changed" for apps that
-/// follow a branch rather than a tag.
-fn head_commit(dir: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "HEAD"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!sha.is_empty()).then_some(sha)
 }
 
 /// Remove the runtime objects the previous version created. Process apps

@@ -84,6 +84,7 @@ fn upgrade_follows_the_recorded_repository_url() {
         &url,
         Some(GitRef::Tag("v1.0.0")),
         None,
+        None,
         true,
         None,
         None,
@@ -176,6 +177,7 @@ fn branch_installs_follow_their_branch() {
         &url,
         Some(GitRef::Branch("dev")),
         None,
+        None,
         true,
         None,
         None,
@@ -250,7 +252,7 @@ fn untagged_repositories_track_their_default_branch() {
     let url = repo.display().to_string().replace('\\', "/");
     let (config, ctx, store) = workspace(ws.path());
 
-    pkg::install_from_git(&config, &ctx, &url, None, None, true, None, None).unwrap();
+    pkg::install_from_git(&config, &ctx, &url, None, None, None, true, None, None).unwrap();
     assert_eq!(
         store.get("demo").unwrap().unwrap().version.as_deref(),
         Some("0.1.0"),
@@ -275,4 +277,77 @@ fn untagged_repositories_track_their_default_branch() {
         store.get("demo").unwrap().unwrap().version.as_deref(),
         Some("0.2.0")
     );
+}
+
+/// DMN-096: a direct git install of a monorepo package records its manifest
+/// subdirectory (`meta.repo_path`) — an upgrade has no registry entry to
+/// re-resolve that path from, so it must carry it forward from meta.json,
+/// same as it already does for a tracked branch.
+#[test]
+fn upgrade_of_a_monorepo_direct_install_keeps_the_manifest_path() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not available");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let repo = ws.path().join("asc-example-apps");
+    fs::create_dir_all(repo.join("web/helloworld")).unwrap();
+    fs::write(
+        repo.join("web/helloworld/asc.yaml"),
+        "name: helloworld\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let url = repo.display().to_string().replace('\\', "/");
+    let (config, ctx, store) = workspace(ws.path());
+
+    pkg::install_from_git(
+        &config,
+        &ctx,
+        &url,
+        None,
+        Some("web/helloworld"),
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .get("helloworld")
+            .unwrap()
+            .unwrap()
+            .repo_path
+            .as_deref(),
+        Some("web/helloworld")
+    );
+
+    // A new release, still nested at the same path.
+    fs::write(
+        repo.join("web/helloworld/asc.yaml"),
+        "name: helloworld\nversion: 1.1.0\ntype: native\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    git(&repo, &["commit", "-q", "-am", "1.1.0"]);
+
+    match pkg::upgrade(&config, &ctx, "helloworld", None).unwrap() {
+        UpgradeOutcome::Upgraded { id, from, to, .. } => {
+            assert_eq!(id, "helloworld");
+            assert_eq!(from.as_deref(), Some("1.0.0"));
+            assert_eq!(to, "1.1.0");
+        }
+        other => panic!("expected an upgrade, got: {other:?}"),
+    }
+    let meta = store.get("helloworld").unwrap().unwrap();
+    assert_eq!(meta.version.as_deref(), Some("1.1.0"));
+    assert_eq!(
+        meta.repo_path.as_deref(),
+        Some("web/helloworld"),
+        "the manifest subdirectory survives the upgrade"
+    );
+    let app_dir = store.app_dir("helloworld").unwrap();
+    assert!(app_dir.join("repository/web/helloworld/asc.yaml").exists());
 }

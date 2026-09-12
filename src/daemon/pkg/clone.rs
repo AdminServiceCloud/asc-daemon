@@ -166,6 +166,9 @@ pub fn clone_app(
         version: source.version.clone(),
         source: source.source.clone(),
         branch: source.branch.clone(),
+        // A clone of a direct git install must re-clone at the same
+        // subdirectory as the source, if it had one (DMN-096).
+        repo_path: source.repo_path.clone(),
         // Recorded like a suffixed install instance, so `asc app upgrade`
         // keeps resolving the clone against the same registry package.
         package: Some(source.package.clone().unwrap_or_else(|| source.id.clone())),

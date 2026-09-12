@@ -45,6 +45,14 @@ pub struct AppMeta {
     /// installs, which upgrade by version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// In-repository subdirectory of the manifest, for a direct install of a
+    /// monorepo package (DMN-096) — the equivalent of a registry entry's
+    /// `source.path`, recorded here because a direct install has no entry to
+    /// carry it. `asc app upgrade` re-clones and re-resolves the manifest at
+    /// this same path. `None` for a root-manifest direct install and for
+    /// every registry install (its own entry carries the path instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_path: Option<String>,
     /// Registry install spec this app came from (`name` or `stack/app`);
     /// upgrades resolve the package through it. `None` = the app id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +267,7 @@ mod tests {
             version: Some("v1.2.0".into()),
             source: Some("official".into()),
             branch: None,
+            repo_path: None,
             package: None,
             desired_state: DesiredState::Running,
             quota: Some(Quota {
@@ -299,6 +308,27 @@ mod tests {
         // Old meta.json files (no custom_name key) must keep loading.
         let json = serde_json::to_string(&sample()).unwrap();
         assert!(!json.contains("custom_name"));
+    }
+
+    #[test]
+    fn repo_path_roundtrip_and_absent_by_default() {
+        // A registry install (the sample) never sets it, and it must not
+        // clutter meta.json for the overwhelming majority of apps that have
+        // no monorepo subdirectory (DMN-096).
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(!json.contains("repo_path"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = sample();
+        meta.repo_path = Some("web/helloworld".into());
+        meta.save(dir.path()).unwrap();
+        let loaded = AppMeta::load(dir.path()).unwrap();
+        assert_eq!(loaded.repo_path.as_deref(), Some("web/helloworld"));
+
+        // Meta.json written before DMN-096 (no repo_path key) still loads.
+        let old_json = serde_json::to_string(&sample()).unwrap();
+        let loaded_old: AppMeta = serde_json::from_str(&old_json).unwrap();
+        assert_eq!(loaded_old.repo_path, None);
     }
 
     #[test]

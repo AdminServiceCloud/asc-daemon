@@ -115,6 +115,7 @@ mod tests {
             version: None,
             source: None,
             branch: None,
+            repo_path: None,
             package: None,
             desired_state: DesiredState::Stopped,
             quota: None,

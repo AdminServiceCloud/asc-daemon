@@ -81,7 +81,8 @@ fn install_direct_from_git_url() {
     // No --branch/--tag: clones the default branch HEAD, id defaults to the
     // repository's own name, and the recorded version is the manifest's own
     // (no ref was explicitly checked out).
-    let report = pkg::install_from_git(&config, &ctx, &url, None, None, true, None, None).unwrap();
+    let report =
+        pkg::install_from_git(&config, &ctx, &url, None, None, None, true, None, None).unwrap();
     assert_eq!(report.id, "demo");
     assert_eq!(report.version, "1.0.0");
     let meta = store.get("demo").unwrap().expect("meta.json must exist");
@@ -99,6 +100,7 @@ fn install_direct_from_git_url() {
         &ctx,
         &url,
         Some(GitRef::Branch("dev")),
+        None,
         Some("demo-dev"),
         true,
         None,
@@ -120,6 +122,7 @@ fn install_direct_from_git_url() {
         &url,
         Some(GitRef::Tag("v1.0.0")),
         None,
+        None,
         true,
         None,
         None,
@@ -134,6 +137,7 @@ fn install_direct_from_git_url() {
         &ctx,
         &url,
         Some(GitRef::Branch("ghost")),
+        None,
         None,
         true,
         None,
@@ -181,7 +185,8 @@ runtime:
         is_root: false,
     };
 
-    let report = pkg::install_from_git(&config, &ctx, &url, None, None, true, None, None).unwrap();
+    let report =
+        pkg::install_from_git(&config, &ctx, &url, None, None, None, true, None, None).unwrap();
     assert_eq!(report.id, "homebar");
     let store = AppStore::new(config.daemon.apps_dir.clone());
     assert!(store.get("homebar").unwrap().is_some());
@@ -226,8 +231,8 @@ fn install_direct_from_git_requires_license_acceptance() {
         is_root: false,
     };
 
-    let err =
-        pkg::install_from_git(&config, &ctx, &url, None, None, false, None, None).unwrap_err();
+    let err = pkg::install_from_git(&config, &ctx, &url, None, None, None, false, None, None)
+        .unwrap_err();
     let required = err
         .downcast_ref::<pkg::LicenseRequired>()
         .expect("expected the typed license error");
@@ -238,7 +243,7 @@ fn install_direct_from_git_requires_license_acceptance() {
     assert!(!store.app_dir("licensed").unwrap().exists());
 
     // Accepted: installs normally.
-    pkg::install_from_git(&config, &ctx, &url, None, None, true, None, None).unwrap();
+    pkg::install_from_git(&config, &ctx, &url, None, None, None, true, None, None).unwrap();
     assert!(store.get("licensed").unwrap().is_some());
 }
 
@@ -283,7 +288,18 @@ fn install_reports_progress_lines_when_given_a_reporter() {
     }
     let reporter = CapturingReporter(std::sync::Mutex::new(Vec::new()));
 
-    pkg::install_from_git(&config, &ctx, &url, None, None, true, None, Some(&reporter)).unwrap();
+    pkg::install_from_git(
+        &config,
+        &ctx,
+        &url,
+        None,
+        None,
+        None,
+        true,
+        None,
+        Some(&reporter),
+    )
+    .unwrap();
 
     let lines = reporter.0.into_inner().unwrap();
     assert!(
@@ -294,4 +310,94 @@ fn install_reports_progress_lines_when_given_a_reporter() {
         lines.iter().any(|l| l.contains(&url)),
         "expected the clone URL to appear in the reported lines, got: {lines:?}"
     );
+}
+
+/// DMN-096: a monorepo package installed directly from a git URL (the path
+/// the marketplace UI takes for a registry package's `source.path`, e.g.
+/// `asc-example-apps` + `web/helloworld`) — without `path`, this used to look
+/// for `asc.yaml` at the repository root and name the app after the
+/// repository, not the package.
+#[test]
+fn install_direct_from_git_with_a_monorepo_path() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not available");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+
+    // Mirrors asc-example-apps: several unrelated packages in one
+    // repository, asc.yaml nested under a category directory.
+    let repo = ws.path().join("asc-example-apps");
+    fs::create_dir_all(repo.join("web/helloworld")).unwrap();
+    fs::write(
+        repo.join("web/helloworld/asc.yaml"),
+        "name: helloworld\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("databases/postgres")).unwrap();
+    fs::write(
+        repo.join("databases/postgres/asc.yaml"),
+        "name: postgres\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let url = repo.display().to_string().replace('\\', "/");
+
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    let ctx = UserContext {
+        uid: 1000,
+        name: "tester".into(),
+        is_root: false,
+    };
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+
+    // The id comes from the manifest's own subdirectory (`helloworld`), not
+    // the repository (`asc-example-apps`) — and the manifest is read from
+    // that subdirectory, not the repository root.
+    let report = pkg::install_from_git(
+        &config,
+        &ctx,
+        &url,
+        None,
+        Some("web/helloworld"),
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.id, "helloworld");
+    assert_eq!(report.version, "1.0.0");
+    let meta = store
+        .get("helloworld")
+        .unwrap()
+        .expect("meta.json must exist");
+    assert_eq!(meta.repo_path.as_deref(), Some("web/helloworld"));
+    let app_dir = store.app_dir("helloworld").unwrap();
+    assert!(app_dir.join("repository/web/helloworld/asc.yaml").exists());
+    // No asc.yaml was ever expected at the repository root.
+    assert!(!app_dir.join("repository/asc.yaml").exists());
+
+    // A path that tries to escape the clone is refused, same as a registry
+    // entry's path would be (safe_join / manifest_dir). The id is derived
+    // from the path's last segment ("etc") before the clone is even read,
+    // so that is the directory the failed install must clean up.
+    let err = pkg::install_from_git(
+        &config,
+        &ctx,
+        &url,
+        None,
+        Some("../../etc"),
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(!err.to_string().is_empty());
+    assert!(!store.app_dir("etc").unwrap().exists());
 }

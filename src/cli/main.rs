@@ -120,6 +120,10 @@ enum Command {
         /// Tag to check out (direct repository installs only)
         #[arg(long, conflicts_with = "branch")]
         tag: Option<String>,
+        /// In-repository subdirectory of the manifest, for a monorepo
+        /// package (direct repository installs only)
+        #[arg(long)]
+        path: Option<String>,
         /// Pull the prebuilt image when the manifest offers both `image` and
         /// `image-build` (DMN-050); skips the interactive choice
         #[arg(long, conflicts_with = "build")]
@@ -402,6 +406,10 @@ enum AppAction {
         /// Tag to check out (direct repository installs only)
         #[arg(long, conflicts_with = "branch")]
         tag: Option<String>,
+        /// In-repository subdirectory of the manifest, for a monorepo
+        /// package (direct repository installs only)
+        #[arg(long)]
+        path: Option<String>,
         /// Pull the prebuilt image when the manifest offers both (DMN-050)
         #[arg(long, conflicts_with = "build")]
         image: bool,
@@ -716,6 +724,7 @@ fn run() -> anyhow::Result<()> {
             name,
             branch,
             tag,
+            path,
             image,
             build,
         } => install_cmd(
@@ -724,6 +733,7 @@ fn run() -> anyhow::Result<()> {
             name,
             branch.as_deref(),
             tag.as_deref(),
+            path.as_deref(),
             image_choice_flag(image, build),
             &config,
         ),
@@ -805,6 +815,7 @@ fn install_cmd(
     name: Option<String>,
     branch: Option<&str>,
     tag: Option<&str>,
+    path: Option<&str>,
     image_choice: Option<ImageSource>,
     config: &Config,
 ) -> anyhow::Result<()> {
@@ -816,14 +827,15 @@ fn install_cmd(
             name,
             branch,
             tag,
+            path,
             image_choice,
             config,
             daemon,
         );
     }
-    if branch.is_some() || tag.is_some() {
+    if branch.is_some() || tag.is_some() || path.is_some() {
         anyhow::bail!(
-            "--branch and --tag are only used for a direct repository install (a git URL as the spec); pin a registry version with @<version> instead"
+            "--branch, --tag and --path are only used for a direct repository install (a git URL as the spec); pin a registry version with @<version> instead"
         );
     }
     let name = match name {
@@ -832,7 +844,9 @@ fn install_cmd(
     };
     let name = name.as_deref();
     let outcome = match &daemon {
-        Some(daemon) => install_daemon_loop(daemon, spec, source, name, None, None, image_choice)?,
+        Some(daemon) => {
+            install_daemon_loop(daemon, spec, source, name, None, None, None, image_choice)?
+        }
         None => {
             let ctx = UserContext::current();
             let mut spec = spec.to_string();
@@ -910,6 +924,7 @@ fn install_daemon_loop(
     name: Option<&str>,
     branch: Option<&str>,
     tag: Option<&str>,
+    path: Option<&str>,
     image_choice: Option<ImageSource>,
 ) -> anyhow::Result<pkg::InstallOutcome> {
     let mut spec = spec.to_string();
@@ -930,6 +945,7 @@ fn install_daemon_loop(
                 name,
                 branch,
                 tag,
+                path,
                 license_ack,
                 image_choice,
             )
@@ -998,6 +1014,7 @@ fn install_from_git_cmd(
     name: Option<String>,
     branch: Option<&str>,
     tag: Option<&str>,
+    path: Option<&str>,
     image_choice: Option<ImageSource>,
     config: &Config,
     daemon: Option<client::Daemon>,
@@ -1011,7 +1028,8 @@ fn install_from_git_cmd(
     };
     let name = name.as_deref();
     if let Some(daemon) = &daemon {
-        let outcome = install_daemon_loop(daemon, url, None, name, branch, tag, image_choice)?;
+        let outcome =
+            install_daemon_loop(daemon, url, None, name, branch, tag, path, image_choice)?;
         print_install_outcome(&outcome);
         return Ok(());
     }
@@ -1032,6 +1050,7 @@ fn install_from_git_cmd(
             &ctx,
             url,
             git_ref,
+            path,
             name,
             license_ack,
             image_choice,
@@ -1934,6 +1953,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             name,
             branch,
             tag,
+            path,
             image,
             build,
         } => install_cmd(
@@ -1942,6 +1962,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             name,
             branch.as_deref(),
             tag.as_deref(),
+            path.as_deref(),
             image_choice_flag(image, build),
             config,
         )?,

@@ -878,6 +878,12 @@ pub fn locate_installed(
     if repo.join(Manifest::FILE).exists() {
         return Ok((repo, None));
     }
+    // A direct git install of a monorepo package (DMN-096) records its own
+    // manifest subdirectory in meta.json — there is no registry entry here
+    // to resolve a path from, unlike every other case below.
+    if let Some(repo_path) = meta.repo_path.as_deref() {
+        return Ok((super::install::manifest_dir(&repo, Some(repo_path))?, None));
+    }
     let package_spec = meta.package.clone().unwrap_or_else(|| meta.id.clone());
     let (package, stack_app) = match package_spec.split_once('/') {
         Some((package, app)) => (package, Some(app)),

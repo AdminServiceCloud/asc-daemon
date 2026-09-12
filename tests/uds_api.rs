@@ -24,6 +24,7 @@ fn meta(id: &str, uid: u32) -> AppMeta {
         version: None,
         source: None,
         branch: None,
+        repo_path: None,
         package: None,
         desired_state: DesiredState::Stopped,
         quota: None,

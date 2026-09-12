@@ -511,6 +511,9 @@ fn install_one(
         )),
         // Registry installs are pinned to a tag, never to a branch.
         branch: None,
+        // The registry entry itself carries the path (DMN-096); nothing to
+        // record here — only a direct git install needs its own copy.
+        repo_path: None,
         package: match stack_app {
             Some(app) => Some(format!("{}/{app}", resolved.entry.name)),
             None if suffixed => Some(resolved.entry.name.clone()),
@@ -573,19 +576,38 @@ pub fn repo_name(url: &str) -> Result<String> {
         .with_context(|| format!("cannot derive an app name from '{url}' — pass --name explicitly"))
 }
 
+/// The default app id for a direct git install: for a monorepo package
+/// (`path` set — DMN-096), the manifest's own subdirectory name
+/// (`web/helloworld` → `helloworld`), matching how a registry install names
+/// the app after `entry.name` rather than the repository; otherwise the
+/// repository's own name at the root ([`repo_name`]).
+fn install_from_git_app_base(url: &str, path: Option<&str>) -> Result<String> {
+    match path.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(path) => {
+            let last = path.rsplit('/').next().unwrap_or(path);
+            canonical_id(last).with_context(|| {
+                format!("cannot derive an app name from '{path}' — pass --name explicitly")
+            })
+        }
+        None => repo_name(url),
+    }
+}
+
 /// Install directly from a git repository URL, bypassing the registry: for
 /// one-off installs and private forks that were never published anywhere.
-/// `asc.yaml` must be at the repository root (no monorepo `path`, unlike a
-/// registry entry — there is no entry to carry one). `git_ref` pins the
-/// branch or tag to check out; `None` clones the default branch HEAD.
-/// Private repositories reuse the same `asc auth` credentials as registry
-/// installs (host/prefix matching in [`super::auth`]).
+/// `asc.yaml` is at the repository root unless `path` names a monorepo
+/// subdirectory (DMN-096) — the direct-install equivalent of a registry
+/// entry's `source.path`, since there is no registry entry to carry one here.
+/// `git_ref` pins the branch or tag to check out; `None` clones the default
+/// branch HEAD. Private repositories reuse the same `asc auth` credentials
+/// as registry installs (host/prefix matching in [`super::auth`]).
 #[allow(clippy::too_many_arguments)]
 pub fn install_from_git(
     config: &Config,
     ctx: &UserContext,
     url: &str,
     git_ref: Option<GitRef<'_>>,
+    path: Option<&str>,
     custom_name: Option<&str>,
     license_ack: bool,
     image_choice: Option<ImageSource>,
@@ -595,7 +617,7 @@ pub fn install_from_git(
         validate_custom_name(config, ctx, name)?;
     }
     let store = AppStore::new(config.daemon.apps_dir.clone());
-    let base = repo_name(url)?;
+    let base = install_from_git_app_base(url, path)?;
     let name = instance_id(&store, &base)?;
 
     let app_dir = store.app_dir(&name)?;
@@ -613,9 +635,9 @@ pub fn install_from_git(
     };
     git_clone(url, checkout, &repo_dir, ctx, report)?;
 
-    // No monorepo `path` for a direct install: the manifest is the
-    // repository root.
-    let manifest_dir = repo_dir.clone();
+    // `path` names the manifest's subdirectory inside the clone for a
+    // monorepo package; `None` keeps the previous "repository root" default.
+    let manifest_dir = manifest_dir(&repo_dir, path)?;
     if !license_ack && let Some(license) = repo_license(&manifest_dir, &repo_dir) {
         return Err(anyhow::Error::new(LicenseRequired {
             package: name.clone(),
@@ -682,6 +704,7 @@ pub fn install_from_git(
             Some(GitRef::Branch(branch)) => Some(branch.to_string()),
             _ => None,
         },
+        repo_path: path.map(str::to_string),
         package: None,
         desired_state: DesiredState::Stopped,
         quota,
@@ -1769,6 +1792,30 @@ mod tests {
         // Nothing to derive a name from — the caller is told to pass --name.
         let err = repo_name("https://github.com/org/---.git").unwrap_err();
         assert!(format!("{err:#}").contains("--name"), "got: {err:#}");
+    }
+
+    #[test]
+    fn install_from_git_app_base_prefers_the_manifest_subdirectory() {
+        // A monorepo package (DMN-096) installs under the manifest's own
+        // directory name, not the repository's — same as a registry install
+        // names the app after `entry.name`, never the registry repository.
+        assert_eq!(
+            install_from_git_app_base(
+                "https://github.com/AdminServiceCloud/asc-example-apps",
+                Some("web/helloworld"),
+            )
+            .unwrap(),
+            "helloworld"
+        );
+        // No path (or a blank one) — the previous repository-root behavior.
+        assert_eq!(
+            install_from_git_app_base("https://github.com/mireblood/HOMEBAR", None).unwrap(),
+            "homebar"
+        );
+        assert_eq!(
+            install_from_git_app_base("https://github.com/mireblood/HOMEBAR", Some("  ")).unwrap(),
+            "homebar"
+        );
     }
 
     #[test]

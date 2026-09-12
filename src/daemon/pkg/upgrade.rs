@@ -89,7 +89,10 @@ pub fn upgrade(
         .and_then(|s| s.strip_prefix("git:"))
         .map(str::to_string);
     let (git_url, entry_path, stack_app) = match &direct_git {
-        Some(url) => (url.clone(), None, None),
+        // The manifest's subdirectory inside the repository (DMN-096) — a
+        // direct install has no registry entry to carry this, so it is
+        // recorded on the app itself at install time and just re-read here.
+        Some(url) => (url.clone(), meta.repo_path.clone(), None),
         None => {
             // Stack apps record their origin as `stack/app` in meta.package;
             // plain apps resolve by their own id.

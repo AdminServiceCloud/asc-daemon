@@ -175,6 +175,9 @@ struct InstallInput {
     name: Option<String>,
     branch: Option<String>,
     tag: Option<String>,
+    /// In-repository subdirectory of the manifest (DMN-096) — direct
+    /// repository installs only, for a monorepo package.
+    path: Option<String>,
     #[serde(default)]
     license_ack: bool,
     /// `prebuilt` or `build` when the package offers both image sources.
@@ -340,6 +343,7 @@ impl McpServer {
                     input.name.as_deref(),
                     input.branch.as_deref(),
                     input.tag.as_deref(),
+                    input.path.as_deref(),
                     input.license_ack,
                     image_choice,
                 )

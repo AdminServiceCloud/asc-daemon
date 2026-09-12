@@ -36,6 +36,7 @@ fn seed_app(store: &AppStore, id: &str, quota: Option<Quota>) -> AppMeta {
         version: Some("1.0.0".into()),
         source: Some("local:file:///demo".into()),
         branch: None,
+        repo_path: None,
         package: None,
         desired_state: DesiredState::Stopped,
         quota,

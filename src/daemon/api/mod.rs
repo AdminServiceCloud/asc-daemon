@@ -346,6 +346,7 @@ impl ApiState {
         name: Option<String>,
         branch: Option<String>,
         tag: Option<String>,
+        path: Option<String>,
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
     ) -> Result<pkg::InstallOutcome> {
@@ -365,6 +366,7 @@ impl ApiState {
                     &ctx,
                     &spec,
                     git_ref,
+                    path.as_deref(),
                     name.as_deref(),
                     license_ack,
                     image_choice,
@@ -372,9 +374,9 @@ impl ApiState {
                 )?;
                 return Ok(pkg::InstallOutcome::App(report));
             }
-            if branch.is_some() || tag.is_some() {
+            if branch.is_some() || tag.is_some() || path.is_some() {
                 anyhow::bail!(
-                    "branch and tag are only used for a direct repository install (a git URL as the spec)"
+                    "branch, tag and path are only used for a direct repository install (a git URL as the spec)"
                 );
             }
             pkg::install(
@@ -408,6 +410,7 @@ impl ApiState {
         name: Option<String>,
         branch: Option<String>,
         tag: Option<String>,
+        path: Option<String>,
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
     ) -> tokio::sync::mpsc::Receiver<InstallStreamEvent> {
@@ -447,6 +450,7 @@ impl ApiState {
                         &ctx,
                         &spec,
                         git_ref,
+                        path.as_deref(),
                         name.as_deref(),
                         license_ack,
                         image_choice,
@@ -454,9 +458,9 @@ impl ApiState {
                     )?;
                     return Ok(pkg::InstallOutcome::App(report));
                 }
-                if branch.is_some() || tag.is_some() {
+                if branch.is_some() || tag.is_some() || path.is_some() {
                     anyhow::bail!(
-                        "branch and tag are only used for a direct repository install (a git URL as the spec)"
+                        "branch, tag and path are only used for a direct repository install (a git URL as the spec)"
                     );
                 }
                 pkg::install(

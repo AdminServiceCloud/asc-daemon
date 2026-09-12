@@ -114,6 +114,7 @@ async fn grpc_install_returns_license_required_instead_of_an_error() {
         name: None,
         branch: None,
         tag: None,
+        path: None,
         license_ack,
     };
 

@@ -226,6 +226,11 @@ message InstallAppRequest {
   // Consent to the package license (DMN-028). Without it a repository
   // shipping a LICENSE fails with the structured license error.
   bool license_ack = 6;
+  // In-repository subdirectory of the manifest (DMN-096) — a direct git
+  // install only, for monorepo packages whose asc.yaml is not at the
+  // repository root (e.g. a registry entry's source.path). Ignored for a
+  // registry spec, which resolves its own path from the registry entry.
+  optional string path = 7;
 }
 
 message InstallAppResponse {

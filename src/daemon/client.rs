@@ -320,6 +320,7 @@ impl Daemon {
         name: Option<&str>,
         branch: Option<&str>,
         tag: Option<&str>,
+        path: Option<&str>,
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
     ) -> Result<pkg::InstallOutcome> {
@@ -329,6 +330,7 @@ impl Daemon {
             "name": name,
             "branch": branch,
             "tag": tag,
+            "path": path,
             "license_ack": license_ack,
             "image_choice": image_choice,
         });

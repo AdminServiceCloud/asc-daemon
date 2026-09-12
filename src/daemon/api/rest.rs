@@ -634,6 +634,10 @@ struct InstallBody {
     branch: Option<String>,
     #[serde(default)]
     tag: Option<String>,
+    /// In-repository subdirectory of the manifest (DMN-096) — direct
+    /// repository installs only, for a monorepo package.
+    #[serde(default)]
+    path: Option<String>,
     /// Consent to the package license (DMN-028); without it a repository
     /// shipping a LICENSE fails with the structured license error.
     #[serde(default)]
@@ -659,6 +663,7 @@ async fn install_app(
             body.name,
             body.branch,
             body.tag,
+            body.path,
             body.license_ack,
             body.image_choice,
         )

@@ -110,7 +110,18 @@ apps:
         stack,
         installed,
         skipped,
-    } = pkg::install(&config, &ctx, "demo-stack", None, None, true, None, None).unwrap()
+    } = pkg::install(
+        &config,
+        &ctx,
+        "demo-stack",
+        None,
+        None,
+        true,
+        None,
+        false,
+        None,
+    )
+    .unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -147,7 +158,18 @@ apps:
     // ── Re-install: wanted apps become new instances (DMN-033) ───────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
-    } = pkg::install(&config, &ctx, "demo-stack", None, None, true, None, None).unwrap()
+    } = pkg::install(
+        &config,
+        &ctx,
+        "demo-stack",
+        None,
+        None,
+        true,
+        None,
+        false,
+        None,
+    )
+    .unwrap()
     else {
         panic!("expected a stack install");
     };
@@ -171,6 +193,7 @@ apps:
         Some("my"),
         true,
         None,
+        false,
         None,
     )
     .unwrap()
@@ -208,6 +231,7 @@ apps:
         Some("my"),
         true,
         None,
+        false,
         None,
     )
     .unwrap_err();
@@ -230,6 +254,7 @@ apps:
         None,
         true,
         None,
+        false,
         None,
     )
     .unwrap()
@@ -252,6 +277,7 @@ apps:
         None,
         true,
         None,
+        false,
         None,
     )
     .unwrap()
@@ -272,6 +298,7 @@ apps:
         None,
         true,
         None,
+        false,
         None,
     )
     .unwrap_err();

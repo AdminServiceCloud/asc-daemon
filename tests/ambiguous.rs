@@ -111,7 +111,7 @@ fn ambiguous_package_requires_source_choice() {
     let store = AppStore::new(config.daemon.apps_dir.clone());
 
     // No explicit source → typed error listing both candidates in priority order.
-    let err = pkg::install(&config, &ctx, "demo", None, None, true, None, None).unwrap_err();
+    let err = pkg::install(&config, &ctx, "demo", None, None, true, None, false, None).unwrap_err();
     let ambiguous = err
         .downcast_ref::<pkg::AmbiguousPackage>()
         .expect("expected AmbiguousPackage");
@@ -132,8 +132,18 @@ fn ambiguous_package_requires_source_choice() {
     );
 
     // Unknown source name fails cleanly.
-    let err =
-        pkg::install(&config, &ctx, "demo", Some("ghost"), None, true, None, None).unwrap_err();
+    let err = pkg::install(
+        &config,
+        &ctx,
+        "demo",
+        Some("ghost"),
+        None,
+        true,
+        None,
+        false,
+        None,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("ghost"), "got: {err:#}");
 
     // Explicit source pins the registry; an explicit version pins the tag
@@ -146,6 +156,7 @@ fn ambiguous_package_requires_source_choice() {
         None,
         true,
         None,
+        false,
         None,
     )
     .unwrap() else {
@@ -183,5 +194,5 @@ fn ambiguous_package_requires_source_choice() {
     .unwrap();
     // Bypass the index cache so the edit is visible immediately.
     let _ = fs::remove_dir_all(ws.path().join("cache"));
-    assert!(pkg::install(&config, &ctx, "demo", None, None, true, None, None).is_ok());
+    assert!(pkg::install(&config, &ctx, "demo", None, None, true, None, false, None).is_ok());
 }

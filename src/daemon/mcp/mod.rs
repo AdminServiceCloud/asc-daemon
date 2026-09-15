@@ -178,10 +178,18 @@ struct InstallInput {
     /// In-repository subdirectory of the manifest (DMN-096) — direct
     /// repository installs only, for a monorepo package.
     path: Option<String>,
+    /// One app of a stack instead of every non-optional one (DMN-097) —
+    /// direct repository installs only; a registry spec uses `<stack>/<app>`.
+    stack_app: Option<String>,
     #[serde(default)]
     license_ack: bool,
     /// `prebuilt` or `build` when the package offers both image sources.
     image_choice: Option<String>,
+    /// Skip the resource shortfall check (DMN-099); without it, a host that
+    /// cannot currently cover the package's requirements or runtime quota
+    /// fails the call instead of a raw container-create error.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -344,8 +352,10 @@ impl McpServer {
                     input.branch.as_deref(),
                     input.tag.as_deref(),
                     input.path.as_deref(),
+                    input.stack_app.as_deref(),
                     input.license_ack,
                     image_choice,
+                    input.force,
                 )
             })
             .await

@@ -128,8 +128,10 @@ async fn grpc_upgrade_app_moves_to_a_newer_tag_and_reports_up_to_date_otherwise(
         Some(GitRef::Tag("v1.0.0")),
         None,
         None,
+        None,
         true,
         None,
+        false,
         None,
     )
     .unwrap();

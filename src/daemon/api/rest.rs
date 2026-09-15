@@ -128,6 +128,24 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
+        if let Some(not_met) = self
+            .0
+            .downcast_ref::<crate::daemon::pkg::RequirementsNotMet>()
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "requirements_not_met": {
+                        "app": not_met.app,
+                        "shortages": not_met.shortages.iter().map(|s| {
+                            serde_json::json!({ "resource": s.resource, "need": s.need, "have": s.have })
+                        }).collect::<Vec<_>>(),
+                    },
+                })),
+            )
+                .into_response();
+        }
         if let Some(ambiguous) = self
             .0
             .downcast_ref::<crate::daemon::pkg::AmbiguousPackage>()
@@ -638,6 +656,11 @@ struct InstallBody {
     /// repository installs only, for a monorepo package.
     #[serde(default)]
     path: Option<String>,
+    /// One app of a stack to install instead of every non-optional one
+    /// (DMN-097) — direct repository installs only, where there is no
+    /// registry entry and so no `<stack>/<app>` spec form.
+    #[serde(default)]
+    stack_app: Option<String>,
     /// Consent to the package license (DMN-028); without it a repository
     /// shipping a LICENSE fails with the structured license error.
     #[serde(default)]
@@ -647,6 +670,11 @@ struct InstallBody {
     /// error for such manifests.
     #[serde(default)]
     image_choice: Option<crate::daemon::apps::ImageSource>,
+    /// Skip the resource shortfall check (DMN-099); without it, a host that
+    /// cannot currently cover the package's requirements or runtime quota
+    /// fails with the structured `requirements_not_met` error.
+    #[serde(default)]
+    force: bool,
 }
 
 async fn install_app(
@@ -664,8 +692,10 @@ async fn install_app(
             body.branch,
             body.tag,
             body.path,
+            body.stack_app,
             body.license_ack,
             body.image_choice,
+            body.force,
         )
         .await?
     {

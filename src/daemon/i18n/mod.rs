@@ -121,6 +121,9 @@ pub enum Msg {
     AppLowResources,
     AppStartRiskPrompt,
     AppStartDeclined,
+    PkgResourcesInsufficient,
+    PkgInstallRiskPrompt,
+    PkgInstallDeclined,
     PkgSshHostKey,
     AuthPromptConfigure,
     AuthPromptToken,
@@ -426,6 +429,15 @@ pub fn t(msg: Msg) -> &'static str {
             "Всё равно запустить на свой страх и риск? [y/N] ",
         ),
         Msg::AppStartDeclined => ("start of '{}' cancelled", "запуск '{}' отменён"),
+        Msg::PkgResourcesInsufficient => (
+            "installing '{}' needs more than the host has right now: {}",
+            "для установки '{}' сейчас не хватает: {}",
+        ),
+        Msg::PkgInstallRiskPrompt => (
+            "Install anyway at your own risk? [y/N] ",
+            "Всё равно установить на свой страх и риск? [y/N] ",
+        ),
+        Msg::PkgInstallDeclined => ("install of '{}' cancelled", "установка '{}' отменена"),
         Msg::PkgSshHostKey => (
             "the ssh host key of {} is not known to the user running asc — add it once: ssh-keyscan {} >> ~/.ssh/known_hosts",
             "ssh-ключ хоста {} неизвестен пользователю, от имени которого работает asc — добавьте его один раз: ssh-keyscan {} >> ~/.ssh/known_hosts",

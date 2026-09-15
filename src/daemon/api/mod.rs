@@ -328,6 +328,31 @@ impl ApiState {
             .await
     }
 
+    /// What a package repository ships — one app or a stack of them, with
+    /// the stack's apps and their declared requirements (DMN-098). A shallow
+    /// clone into a temporary directory that is thrown away again: nothing is
+    /// installed, no app directory is created. The install dialog calls it to
+    /// show what an install is about to put on the node.
+    pub async fn inspect_package(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        git_url: String,
+        branch: Option<String>,
+        tag: Option<String>,
+        path: Option<String>,
+    ) -> Result<pkg::PackageInfo> {
+        self.blocking(move |_s| {
+            let git_ref = match (branch.as_deref(), tag.as_deref()) {
+                (Some(b), None) => Some(pkg::GitRef::Branch(b)),
+                (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
+                (None, None) => None,
+                (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
+            };
+            pkg::inspect_git(&git_url, git_ref, path.as_deref(), &ctx)
+        })
+        .await
+    }
+
     /// Install from a registry spec or directly from a git URL (mirrors the
     /// CLI's dispatch). Without `license_ack` a repository shipping a
     /// LICENSE returns the typed [`pkg::LicenseRequired`] error — REST
@@ -336,7 +361,10 @@ impl ApiState {
     /// layer (`api::grpc::install_app`/`install_app_stream`, DMN-091) catches
     /// the same error and turns it into a normal `InstallAppResponse` with
     /// `license_required` set, so the platform UI gets the same fields
-    /// without it ever reaching a gRPC error status.
+    /// without it ever reaching a gRPC error status. Without `force`, a host
+    /// that cannot currently cover the package's requirements or runtime
+    /// quota is caught the same way (DMN-099) — [`pkg::RequirementsNotMet`],
+    /// surfaced as `requirements_not_met` rather than `license_required`.
     #[allow(clippy::too_many_arguments)]
     pub async fn install(
         self: &Arc<Self>,
@@ -347,8 +375,10 @@ impl ApiState {
         branch: Option<String>,
         tag: Option<String>,
         path: Option<String>,
+        stack_app: Option<String>,
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
+        force: bool,
     ) -> Result<pkg::InstallOutcome> {
         self.blocking(move |s| {
             if pkg::is_git_url(&spec) {
@@ -361,22 +391,23 @@ impl ApiState {
                     (None, None) => None,
                     (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
                 };
-                let report = pkg::install_from_git(
+                return pkg::install_from_git(
                     &s.config,
                     &ctx,
                     &spec,
                     git_ref,
                     path.as_deref(),
+                    stack_app.as_deref(),
                     name.as_deref(),
                     license_ack,
                     image_choice,
+                    force,
                     None,
-                )?;
-                return Ok(pkg::InstallOutcome::App(report));
+                );
             }
-            if branch.is_some() || tag.is_some() || path.is_some() {
+            if branch.is_some() || tag.is_some() || path.is_some() || stack_app.is_some() {
                 anyhow::bail!(
-                    "branch, tag and path are only used for a direct repository install (a git URL as the spec)"
+                    "branch, tag, path and stack_app are only used for a direct repository install (a registry spec carries the version as '@version' and a stack app as '<stack>/<app>')"
                 );
             }
             pkg::install(
@@ -387,6 +418,7 @@ impl ApiState {
                 name.as_deref(),
                 license_ack,
                 image_choice,
+                force,
                 None,
             )
         })
@@ -411,8 +443,10 @@ impl ApiState {
         branch: Option<String>,
         tag: Option<String>,
         path: Option<String>,
+        stack_app: Option<String>,
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
+        force: bool,
     ) -> tokio::sync::mpsc::Receiver<InstallStreamEvent> {
         // A line per subscriber's outstanding capacity: git/docker can emit
         // many lines quickly, and blocking the install itself on a slow
@@ -445,22 +479,23 @@ impl ApiState {
                         (None, None) => None,
                         (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
                     };
-                    let report = pkg::install_from_git(
+                    return pkg::install_from_git(
                         &state.config,
                         &ctx,
                         &spec,
                         git_ref,
                         path.as_deref(),
+                        stack_app.as_deref(),
                         name.as_deref(),
                         license_ack,
                         image_choice,
+                        force,
                         Some(&reporter),
-                    )?;
-                    return Ok(pkg::InstallOutcome::App(report));
+                    );
                 }
-                if branch.is_some() || tag.is_some() || path.is_some() {
+                if branch.is_some() || tag.is_some() || path.is_some() || stack_app.is_some() {
                     anyhow::bail!(
-                        "branch, tag and path are only used for a direct repository install (a git URL as the spec)"
+                        "branch, tag, path and stack_app are only used for a direct repository install (a registry spec carries the version as '@version' and a stack app as '<stack>/<app>')"
                     );
                 }
                 pkg::install(
@@ -471,6 +506,7 @@ impl ApiState {
                     name.as_deref(),
                     license_ack,
                     image_choice,
+                    force,
                     Some(&reporter),
                 )
             })();

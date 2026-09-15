@@ -124,6 +124,10 @@ enum Command {
         /// package (direct repository installs only)
         #[arg(long)]
         path: Option<String>,
+        /// One app of a stack instead of every non-optional one (direct
+        /// repository installs only; a registry spec uses <stack>/<app>)
+        #[arg(long = "app")]
+        stack_app: Option<String>,
         /// Pull the prebuilt image when the manifest offers both `image` and
         /// `image-build` (DMN-050); skips the interactive choice
         #[arg(long, conflicts_with = "build")]
@@ -132,6 +136,11 @@ enum Command {
         /// `image-build` (DMN-050); skips the interactive choice
         #[arg(long, conflicts_with = "image")]
         build: bool,
+        /// Install even though the host cannot currently cover the
+        /// package's declared requirements or runtime quota; skips the
+        /// interactive prompt
+        #[arg(long)]
+        force: bool,
     },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
@@ -410,12 +419,21 @@ enum AppAction {
         /// package (direct repository installs only)
         #[arg(long)]
         path: Option<String>,
+        /// One app of a stack instead of every non-optional one (direct
+        /// repository installs only; a registry spec uses <stack>/<app>)
+        #[arg(long = "app")]
+        stack_app: Option<String>,
         /// Pull the prebuilt image when the manifest offers both (DMN-050)
         #[arg(long, conflicts_with = "build")]
         image: bool,
         /// Build the image locally when the manifest offers both (DMN-050)
         #[arg(long, conflicts_with = "image")]
         build: bool,
+        /// Install even though the host cannot currently cover the
+        /// package's declared requirements or runtime quota; skips the
+        /// interactive prompt
+        #[arg(long)]
+        force: bool,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
     Attach {
@@ -725,8 +743,10 @@ fn run() -> anyhow::Result<()> {
             branch,
             tag,
             path,
+            stack_app,
             image,
             build,
+            force,
         } => install_cmd(
             &spec,
             source.as_deref(),
@@ -734,7 +754,9 @@ fn run() -> anyhow::Result<()> {
             branch.as_deref(),
             tag.as_deref(),
             path.as_deref(),
+            stack_app.as_deref(),
             image_choice_flag(image, build),
+            force,
             &config,
         ),
         Command::Attach { id } => attach_anywhere(&id, &config),
@@ -816,7 +838,9 @@ fn install_cmd(
     branch: Option<&str>,
     tag: Option<&str>,
     path: Option<&str>,
+    stack_app: Option<&str>,
     image_choice: Option<ImageSource>,
+    force: bool,
     config: &Config,
 ) -> anyhow::Result<()> {
     let daemon = daemon_backend(config)?;
@@ -828,7 +852,9 @@ fn install_cmd(
             branch,
             tag,
             path,
+            stack_app,
             image_choice,
+            force,
             config,
             daemon,
         );
@@ -838,26 +864,41 @@ fn install_cmd(
             "--branch, --tag and --path are only used for a direct repository install (a git URL as the spec); pin a registry version with @<version> instead"
         );
     }
+    if stack_app.is_some() {
+        anyhow::bail!(
+            "--app is only used for a direct repository install (a git URL as the spec); a registry stack app is installed as <stack>/<app>"
+        );
+    }
     let name = match name {
         Some(name) => Some(name),
         None => prompt_app_name(spec, config, daemon.as_ref())?,
     };
     let name = name.as_deref();
     let outcome = match &daemon {
-        Some(daemon) => {
-            install_daemon_loop(daemon, spec, source, name, None, None, None, image_choice)?
-        }
+        Some(daemon) => install_daemon_loop(
+            daemon,
+            spec,
+            source,
+            name,
+            None,
+            None,
+            None,
+            None,
+            image_choice,
+            force,
+        )?,
         None => {
             let ctx = UserContext::current();
             let mut spec = spec.to_string();
             let mut source = source.map(str::to_string);
             let mut license_ack = false;
             let mut image_choice = image_choice;
+            let mut force = force;
             // Interactive recoveries loop until the install passes or the user
             // declines: auth setup for private repositories, a source pick when
             // several provide the package, a version pick for `pkg@` (DMN-048),
             // an image-source pick when both are offered (DMN-050), license
-            // consent (DMN-028).
+            // consent (DMN-028), a resource shortfall (DMN-099).
             loop {
                 match pkg::install(
                     config,
@@ -867,6 +908,7 @@ fn install_cmd(
                     name,
                     license_ack,
                     image_choice,
+                    force,
                     None,
                 ) {
                     Ok(outcome) => break outcome,
@@ -887,6 +929,10 @@ fn install_cmd(
                         }
                         if accept_license(&err)? {
                             license_ack = true;
+                            continue;
+                        }
+                        if accept_resources(&err)? {
+                            force = true;
                             continue;
                         }
                         return Err(err);
@@ -925,12 +971,15 @@ fn install_daemon_loop(
     branch: Option<&str>,
     tag: Option<&str>,
     path: Option<&str>,
+    stack_app: Option<&str>,
     image_choice: Option<ImageSource>,
+    force: bool,
 ) -> anyhow::Result<pkg::InstallOutcome> {
     let mut spec = spec.to_string();
     let mut source = source.map(str::to_string);
     let mut license_ack = false;
     let mut image_choice = image_choice;
+    let mut force = force;
     loop {
         // The daemon answers this call once the whole install is over —
         // clone, image pull or local image build, container create — with
@@ -946,8 +995,10 @@ fn install_daemon_loop(
                 branch,
                 tag,
                 path,
+                stack_app,
                 license_ack,
                 image_choice,
+                force,
             )
         }) {
             Ok(outcome) => return Ok(outcome),
@@ -968,6 +1019,10 @@ fn install_daemon_loop(
                 }
                 if accept_license(&err)? {
                     license_ack = true;
+                    continue;
+                }
+                if accept_resources(&err)? {
+                    force = true;
                     continue;
                 }
                 return Err(err);
@@ -1015,7 +1070,9 @@ fn install_from_git_cmd(
     branch: Option<&str>,
     tag: Option<&str>,
     path: Option<&str>,
+    stack_app: Option<&str>,
     image_choice: Option<ImageSource>,
+    force: bool,
     config: &Config,
     daemon: Option<client::Daemon>,
 ) -> anyhow::Result<()> {
@@ -1028,8 +1085,18 @@ fn install_from_git_cmd(
     };
     let name = name.as_deref();
     if let Some(daemon) = &daemon {
-        let outcome =
-            install_daemon_loop(daemon, url, None, name, branch, tag, path, image_choice)?;
+        let outcome = install_daemon_loop(
+            daemon,
+            url,
+            None,
+            name,
+            branch,
+            tag,
+            path,
+            stack_app,
+            image_choice,
+            force,
+        )?;
         print_install_outcome(&outcome);
         return Ok(());
     }
@@ -1042,21 +1109,24 @@ fn install_from_git_cmd(
     };
     let mut license_ack = false;
     let mut image_choice = image_choice;
+    let mut force = force;
     // Same interactive recoveries as a registry install, minus the source
     // pick (there is only ever one source: the URL itself).
-    let report = loop {
+    let outcome = loop {
         match pkg::install_from_git(
             config,
             &ctx,
             url,
             git_ref,
             path,
+            stack_app,
             name,
             license_ack,
             image_choice,
+            force,
             None,
         ) {
-            Ok(report) => break report,
+            Ok(outcome) => break outcome,
             Err(err) if offer_auth_setup(&err) => continue,
             Err(err) => {
                 if let Some(chosen) = pick_image(&err)? {
@@ -1067,12 +1137,15 @@ fn install_from_git_cmd(
                     license_ack = true;
                     continue;
                 }
+                if accept_resources(&err)? {
+                    force = true;
+                    continue;
+                }
                 return Err(err);
             }
         }
     };
-    println!("{}", tf2(Msg::PkgInstalled, &report.id, &report.version));
-    println!("{}", tf(Msg::PkgStartHint, &report.id));
+    print_install_outcome(&outcome);
     Ok(())
 }
 
@@ -1621,6 +1694,29 @@ fn accept_license(err: &anyhow::Error) -> anyhow::Result<bool> {
     ))
 }
 
+/// When `err` says the host cannot currently cover the package's declared
+/// requirements or runtime quota (DMN-099), print what's missing and, on a
+/// terminal, ask to install anyway. Unlike a license, resource risk is never
+/// accepted on the caller's behalf: a non-interactive caller gets `Ok(false)`
+/// and the loop re-raises the original structured error for a script to act
+/// on (e.g. retry with `--force`) — only an explicit terminal answer
+/// authorizes a force retry here.
+fn accept_resources(err: &anyhow::Error) -> anyhow::Result<bool> {
+    let Some(not_met) = err.downcast_ref::<pkg::RequirementsNotMet>() else {
+        return Ok(false);
+    };
+    eprintln!("{not_met}");
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(false);
+    }
+    let answer = read_line(t(Msg::PkgInstallRiskPrompt))?;
+    if matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
+        return Ok(true);
+    }
+    anyhow::bail!(tf(Msg::PkgInstallDeclined, &not_met.app));
+}
+
 fn offer_auth_setup(err: &anyhow::Error) -> bool {
     use asc_daemon::daemon::pkg::auth::{self, AuthRequired, GitAuth, Method};
     use asc_daemon::daemon::pkg::sources::Scope;
@@ -1954,8 +2050,10 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             branch,
             tag,
             path,
+            stack_app,
             image,
             build,
+            force,
         } => install_cmd(
             &spec,
             source.as_deref(),
@@ -1963,7 +2061,9 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             branch.as_deref(),
             tag.as_deref(),
             path.as_deref(),
+            stack_app.as_deref(),
             image_choice_flag(image, build),
+            force,
             config,
         )?,
         AppAction::Attach { id } => attach_cmd(&id, config)?,

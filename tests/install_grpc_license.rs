@@ -115,7 +115,9 @@ async fn grpc_install_returns_license_required_instead_of_an_error() {
         branch: None,
         tag: None,
         path: None,
+        stack_app: None,
         license_ack,
+        force: false,
     };
 
     // Unary: license required comes back as a normal response, not a gRPC

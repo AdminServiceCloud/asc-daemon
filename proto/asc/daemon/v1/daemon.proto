@@ -104,6 +104,14 @@ service AppService {
   // upgrade dropdown (an already-installed app) both resolve to a git URL
   // and call this the same way.
   rpc ListAppVersions(ListAppVersionsRequest) returns (ListAppVersionsResponse);
+  // What a package repository actually ships, read before installing
+  // anything (DMN-098): one application (asc.yaml) or a stack of them
+  // (asc.stack.yaml), with the stack's apps, their dependencies and their
+  // declared requirements. The daemon clones the repository shallowly into a
+  // temporary directory and throws it away — nothing is installed and no app
+  // directory is created. An install dialog calls this to show what it is
+  // about to put on the node.
+  rpc InspectPackage(InspectPackageRequest) returns (InspectPackageResponse);
   // Move an installed app to another version (DMN-053/DMN-056): `spec` is
   // its id or custom name, optionally `@version` (omitted = the repository's
   // newest tag). The app must already be stopped — same precondition as the
@@ -231,6 +239,17 @@ message InstallAppRequest {
   // repository root (e.g. a registry entry's source.path). Ignored for a
   // registry spec, which resolves its own path from the registry entry.
   optional string path = 7;
+  // One app of a stack to install instead of every non-optional one
+  // (DMN-097) — a direct git install only: a registry spec addresses the
+  // same thing as "<stack>/<app>". A direct install without it installs
+  // every non-optional app of the stack the repository turns out to ship.
+  optional string stack_app = 8;
+  // Skip the resource shortfall check (DMN-099): without it, an install the
+  // host cannot currently cover fails with requirements_not_met below
+  // instead of running into a raw container-create failure. Does not affect
+  // the CPU quota clamp, which always applies — the Engine rejects a quota
+  // above the host's total core count outright, consent or not.
+  bool force = 9;
 }
 
 message InstallAppResponse {
@@ -248,6 +267,12 @@ message InstallAppResponse {
   // license_ack = true. Not a gRPC error — the call otherwise succeeded, it
   // just needs one more round trip.
   optional LicenseRequiredDetail license_required = 5;
+  // Set instead of every field above when the host cannot currently cover
+  // the package's declared requirements or runtime quota and the caller did
+  // not pass force (DMN-099): the caller renders its own "not enough
+  // resources, install anyway?" screen and retries with force = true. Not a
+  // gRPC error, same reasoning as license_required.
+  optional RequirementsNotMetDetail requirements_not_met = 6;
 }
 
 // See InstallAppResponse.license_required. Mirrors pkg::LicenseRequired
@@ -257,6 +282,22 @@ message LicenseRequiredDetail {
   string source = 2;
   string git = 3;
   string license = 4;
+}
+
+// See InstallAppResponse.requirements_not_met. Mirrors
+// pkg::resources::RequirementsNotMet field-for-field.
+message RequirementsNotMetDetail {
+  string app = 1;
+  repeated ResourceShortage shortages = 2;
+}
+
+// One resource the host falls short on, as "need > have": RAM/disk in
+// human-readable sizes ("4.0 GiB"), CPU in cores ("2").
+message ResourceShortage {
+  // "RAM", "disk" or "CPU".
+  string resource = 1;
+  string need = 2;
+  string have = 3;
 }
 
 // One event of an InstallAppStream call: either one more line of progress
@@ -288,6 +329,65 @@ message ListAppVersionsResponse {
   // The tag InstallApp/UpgradeApp would pick with no version given; absent
   // when the repository has no tags.
   optional string latest = 2;
+}
+
+message InspectPackageRequest {
+  // Repository to read — the same URL forms InstallAppRequest.spec accepts
+  // for a direct git install.
+  string git_url = 1;
+  // Ref to read the package at; neither = the default branch HEAD.
+  optional string branch = 2;
+  optional string tag = 3;
+  // Manifest subdirectory inside the repository (a monorepo package, e.g. a
+  // registry entry's source.path); absent = the repository root.
+  optional string path = 4;
+}
+
+message InspectPackageResponse {
+  // What the package is; apps leave `apps` empty, stacks leave
+  // `requirements` unset (their apps carry their own).
+  PackageKind kind = 1;
+  // The app's own name, or the stack's.
+  string name = 2;
+  string version = 3;
+  optional string title = 4;
+  optional string description = 5;
+  PackageRequirements requirements = 6;
+  // Stack packages: the apps it ships, in manifest order.
+  repeated StackApp apps = 7;
+}
+
+enum PackageKind {
+  PACKAGE_KIND_UNSPECIFIED = 0;
+  // asc.yaml — one application.
+  PACKAGE_KIND_APP = 1;
+  // asc.stack.yaml — several applications shipped together.
+  PACKAGE_KIND_STACK = 2;
+}
+
+message StackApp {
+  // Name within the stack — what InstallAppRequest.stack_app takes.
+  string name = 1;
+  // The id the app installs under: the name from its own asc.yaml, which is
+  // not the stack-local one ("server" of the "cs2" stack → "cs2-server").
+  string app_id = 2;
+  string version = 3;
+  optional string title = 4;
+  optional string description = 5;
+  // Skipped on a whole-stack install unless requested by name.
+  bool optional = 6;
+  // Apps of the same stack installed (and started) before this one.
+  repeated string depends_on = 7;
+  PackageRequirements requirements = 8;
+}
+
+// Minimum resources a package declares for itself (asc.yaml `requirements`);
+// absent fields are simply not declared.
+message PackageRequirements {
+  // Size strings as written in the manifest: "4G", "512M".
+  optional string ram = 1;
+  optional string disk = 2;
+  optional double cpu = 3;
 }
 
 message UpgradeAppRequest {

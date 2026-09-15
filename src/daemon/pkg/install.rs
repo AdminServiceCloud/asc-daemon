@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
+use super::resources;
 use super::settings::{SettingKind, SettingValues, SettingsFile};
 use crate::daemon::apps::meta::{
     AppMeta, DesiredState, ImageSource, Owner, Quota, Runtime, canonical_id, new_uuid,
@@ -22,6 +23,7 @@ use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
 use crate::daemon::docker;
 use crate::daemon::i18n::{Msg, t, tf, tf2, tf3};
+use crate::daemon::monitor;
 use crate::daemon::progress::{self, InstallReporter, PhaseBar};
 
 #[derive(Debug)]
@@ -98,6 +100,31 @@ impl std::fmt::Display for LicenseRequired {
 
 impl std::error::Error for LicenseRequired {}
 
+/// Typed error: the directory the install pointed at ships `asc.stack.yaml`
+/// instead of `asc.yaml` — the package is a stack, not a single app (DMN-097).
+/// A direct git install catches it and restarts as a stack install; a registry
+/// entry that mislabels a stack as `type: app` surfaces it as its message.
+#[derive(Debug)]
+pub struct StackPackage {
+    pub stack: String,
+    /// Every app the stack declares, in manifest order.
+    pub apps: Vec<String>,
+}
+
+impl std::fmt::Display for StackPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "package '{}' is a stack of {} app(s) ({}), not a single application",
+            self.stack,
+            self.apps.len(),
+            self.apps.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for StackPackage {}
+
 /// The first of LICENSE.md, LICENSE, LICENSE.txt in `dir`, if any.
 fn license_in(dir: &Path) -> Option<String> {
     ["LICENSE.md", "LICENSE", "LICENSE.txt"]
@@ -120,7 +147,7 @@ fn repo_license(package_dir: &Path, repo_root: &Path) -> Option<String> {
 /// caller has not accepted it. Packages without a license file install
 /// without a prompt.
 fn require_license_ack(
-    resolved: &ResolvedPackage,
+    origin: Origin<'_>,
     package: &str,
     package_dir: &Path,
     repo_root: &Path,
@@ -132,8 +159,8 @@ fn require_license_ack(
     if let Some(license) = repo_license(package_dir, repo_root) {
         return Err(anyhow::Error::new(LicenseRequired {
             package: package.to_string(),
-            source: resolved.source_name.clone(),
-            git: resolved.entry.source.git.clone(),
+            source: origin.source_name().to_string(),
+            git: origin.git().to_string(),
             license,
         }));
     }
@@ -199,6 +226,9 @@ impl Drop for RemoveOnDrop {
 /// `image_choice` picks the image when the manifest offers both a prebuilt
 /// `image` and an `image-build`; without it such a manifest raises
 /// [`ImageChoiceRequired`] (DMN-050).
+/// `force` skips the resource shortfall check (DMN-099); without it, a host
+/// that cannot currently cover the manifest's `requirements` or the runtime
+/// quota raises [`super::resources::RequirementsNotMet`].
 #[allow(clippy::too_many_arguments)]
 pub fn install(
     config: &Config,
@@ -208,6 +238,7 @@ pub fn install(
     custom_name: Option<&str>,
     license_ack: bool,
     image_choice: Option<ImageSource>,
+    force: bool,
     report: Option<&dyn InstallReporter>,
 ) -> Result<InstallOutcome> {
     let (package_spec, version_spec) = parse_spec(spec);
@@ -237,10 +268,12 @@ pub fn install(
         custom_name,
         license_ack,
         image_choice,
+        force,
         report,
     };
+    let origin = Origin::Registry(&resolved);
     if resolved.entry.package_type == "stack" {
-        return install_stack(config, ctx, &resolved, package, stack_app, opts);
+        return install_stack(config, ctx, origin, package, stack_app, opts);
     }
     if stack_app.is_some() {
         bail!(tf2(Msg::PkgNotAStack, package, package));
@@ -250,7 +283,7 @@ pub fn install(
     // resolve case-insensitively, so `asc install HOMEBAR` must still install
     // the app under the canonical id.
     let id = instance_id(&store, &canonical_id(&resolved.entry.name)?)?;
-    install_one(config, ctx, &resolved, &id, None, opts).map(InstallOutcome::App)
+    install_one(config, ctx, origin, &id, None, opts).map(InstallOutcome::App)
 }
 
 /// Instance id for a fresh install (DMN-033): the package name itself, or
@@ -288,6 +321,12 @@ struct InstallOpts<'a> {
     /// Image source when the manifest offers both `image` and `image-build`
     /// (DMN-050); `None` raises [`ImageChoiceRequired`] for such a manifest.
     image_choice: Option<ImageSource>,
+    /// Skip the resource shortfall check (DMN-099): without it, an install
+    /// the host cannot currently cover raises [`super::resources::RequirementsNotMet`]
+    /// instead of running into a raw container-create failure. Never skips
+    /// the CPU quota clamp — that one guards a hard Engine limit no consent
+    /// can talk around.
+    force: bool,
     /// Where to send progress lines as the install runs (DMN-090); `None`
     /// for a local `asc install` (its progress is the terminal bars instead).
     report: Option<&'a dyn InstallReporter>,
@@ -315,6 +354,96 @@ pub(super) fn validate_custom_name(config: &Config, ctx: &UserContext, name: &st
     Ok(())
 }
 
+/// Where a package being installed comes from: a registry entry, or a git
+/// URL given directly (`asc install <url>`, DMN-040/097). Both clone the same
+/// repository the same way and differ only in what an install records in
+/// meta.json — which is what `asc app upgrade` resolves the package from
+/// later — and in how the license prompt names the source.
+#[derive(Clone, Copy)]
+pub(super) enum Origin<'a> {
+    Registry(&'a ResolvedPackage),
+    Git {
+        url: &'a str,
+        git_ref: Option<GitRef<'a>>,
+        /// Manifest subdirectory inside the repository (DMN-096).
+        path: Option<&'a str>,
+    },
+}
+
+impl<'a> Origin<'a> {
+    fn git(&self) -> &'a str {
+        match self {
+            Origin::Registry(resolved) => &resolved.entry.source.git,
+            Origin::Git { url, .. } => url,
+        }
+    }
+
+    /// Manifest subdirectory inside the repository: the registry entry's
+    /// `source.path` or the one passed to the direct install.
+    fn path(&self) -> Option<&'a str> {
+        match self {
+            Origin::Registry(resolved) => resolved.entry.source.path.as_deref(),
+            Origin::Git { path, .. } => *path,
+        }
+    }
+
+    /// Source name for the license prompt: the registry source, or the
+    /// repository itself for a direct install.
+    fn source_name(&self) -> &str {
+        match self {
+            Origin::Registry(resolved) => &resolved.source_name,
+            Origin::Git { .. } => "git",
+        }
+    }
+
+    /// `meta.source`: `"<registry>:<git url>"` for a registry install,
+    /// `"git:<url>"` for a direct one (the form `upgrade` recognizes).
+    fn meta_source(&self) -> String {
+        match self {
+            Origin::Registry(resolved) => {
+                format!("{}:{}", resolved.source_name, resolved.entry.source.git)
+            }
+            Origin::Git { url, .. } => format!("git:{url}"),
+        }
+    }
+
+    /// The branch an install follows across upgrades; `None` pins a tag —
+    /// registry installs are always tag-pinned.
+    fn branch(&self) -> Option<String> {
+        match self {
+            Origin::Git {
+                git_ref: Some(GitRef::Branch(branch)),
+                ..
+            } => Some((*branch).to_string()),
+            _ => None,
+        }
+    }
+
+    /// Clone the package repository into `dest`, returning the ref that was
+    /// actually checked out (`None` — the default branch HEAD).
+    fn clone_into(
+        &self,
+        dest: &Path,
+        version: Option<&str>,
+        ctx: &UserContext,
+        report: Option<&dyn InstallReporter>,
+    ) -> Result<Option<String>> {
+        match self {
+            Origin::Registry(resolved) => {
+                clone_repository(&resolved.entry.source.git, version, dest, ctx, report)
+            }
+            Origin::Git { url, git_ref, .. } => {
+                let checkout = match git_ref {
+                    Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(*r),
+                    None => None,
+                };
+                git_clone(url, checkout, dest, ctx, report)?;
+                Ok(checkout.map(str::to_string))
+            }
+        }
+    }
+}
+
 /// Install a stack: clone once to read `asc.stack.yaml`, then install the
 /// selected apps (all non-optional ones, or the requested app) together with
 /// their transitive dependencies, dependencies first. Each app installs
@@ -325,7 +454,7 @@ pub(super) fn validate_custom_name(config: &Config, ctx: &UserContext, name: &st
 fn install_stack(
     config: &Config,
     ctx: &UserContext,
-    resolved: &ResolvedPackage,
+    origin: Origin<'_>,
     package: &str,
     stack_app: Option<&str>,
     opts: InstallOpts<'_>,
@@ -337,16 +466,10 @@ fn install_stack(
         path: probe_dir.clone(),
         armed: true,
     };
-    clone_repository(
-        &resolved.entry.source.git,
-        opts.version,
-        &probe_dir,
-        ctx,
-        opts.report,
-    )?;
-    let stack_root = manifest_dir(&probe_dir, resolved.entry.source.path.as_deref())?;
+    origin.clone_into(&probe_dir, opts.version, ctx, opts.report)?;
+    let stack_root = manifest_dir(&probe_dir, origin.path())?;
     // One repository = one license: consent is asked once for the stack.
-    require_license_ack(resolved, package, &stack_root, &probe_dir, opts.license_ack)?;
+    require_license_ack(origin, package, &stack_root, &probe_dir, opts.license_ack)?;
     let stack = StackManifest::load(&stack_root)?;
 
     let wanted: Vec<&str> = match stack_app {
@@ -401,7 +524,7 @@ fn install_stack(
             license_ack: true,
             ..opts
         };
-        let report = install_one(config, ctx, resolved, &id, Some(&app.name), app_opts)?;
+        let report = install_one(config, ctx, origin, &id, Some(&app.name), app_opts)?;
         installed.push(report);
     }
     Ok(InstallOutcome::Stack {
@@ -417,7 +540,7 @@ fn install_stack(
 fn install_one(
     config: &Config,
     ctx: &UserContext,
-    resolved: &ResolvedPackage,
+    origin: Origin<'_>,
     name: &str,
     stack_app: Option<&str>,
     opts: InstallOpts<'_>,
@@ -432,17 +555,24 @@ fn install_one(
     };
 
     let repo_dir = app_dir.join("repository");
-    let cloned_tag = clone_repository(
-        &resolved.entry.source.git,
-        opts.version,
-        &repo_dir,
-        ctx,
-        opts.report,
-    )?;
+    let cloned_tag = origin.clone_into(&repo_dir, opts.version, ctx, opts.report)?;
 
-    let (manifest_dir, _) =
-        locate_manifest(&repo_dir, resolved.entry.source.path.as_deref(), stack_app)?;
-    require_license_ack(resolved, name, &manifest_dir, &repo_dir, opts.license_ack)?;
+    let (manifest_dir, _) = locate_manifest(&repo_dir, origin.path(), stack_app)?;
+    // The clone may turn out to hold a stack root rather than an app: a
+    // direct git install has no registry entry to tell it apart beforehand
+    // and restarts as a stack install, a registry entry that mislabels a
+    // stack as `type: app` gets the error (DMN-097).
+    if stack_app.is_none()
+        && !manifest_dir.join(Manifest::FILE).exists()
+        && manifest_dir.join(StackManifest::FILE).exists()
+    {
+        let stack = StackManifest::load(&manifest_dir)?;
+        return Err(anyhow::Error::new(StackPackage {
+            stack: stack.name,
+            apps: stack.apps.into_iter().map(|app| app.name).collect(),
+        }));
+    }
+    require_license_ack(origin, name, &manifest_dir, &repo_dir, opts.license_ack)?;
     let manifest = Manifest::load(&manifest_dir)?;
 
     // The app type is only known after reading the manifest; the cleanup
@@ -451,6 +581,37 @@ fn install_one(
 
     let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
     let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
+
+    // Resource shortfall check (DMN-099), before anything is pulled or
+    // built. A metrics read failure must not block the install — same
+    // permissive stance `asc app start`'s own check already takes — so both
+    // the check and the CPU clamp below are simply skipped when it fails.
+    let quota = match monitor::system::snapshot_blocking() {
+        Ok(metrics) => {
+            if !opts.force {
+                let shortages = resources::check(
+                    manifest.requirements.as_ref(),
+                    quota.as_ref(),
+                    &metrics,
+                    &app_dir,
+                );
+                if !shortages.is_empty() {
+                    return Err(anyhow::Error::new(resources::RequirementsNotMet {
+                        app: name.to_string(),
+                        shortages,
+                    }));
+                }
+            }
+            // Unconditional: the Engine rejects a CPU quota above the host's
+            // total core count outright, `--force` or not — the only way
+            // through is bringing the request back under the ceiling.
+            resources::clamp_cpu(quota, metrics.cpu.cores, name, opts.report)
+        }
+        Err(err) => {
+            debug!(error = %format!("{err:#}"), "cannot read system metrics; skipping the resource check");
+            quota
+        }
+    };
 
     for sub in ["config", "data"] {
         fs::create_dir_all(app_dir.join(sub))
@@ -487,11 +648,30 @@ fn install_one(
     // A suffixed instance id (second install of the same package, DMN-033)
     // records its package for upgrades and gets the id as its display name —
     // otherwise several instances would list under one identical title.
-    let base = match stack_app {
-        Some(_) => manifest.name.as_str(),
-        None => resolved.entry.name.as_str(),
+    let base = match (origin, stack_app) {
+        (_, Some(_)) => manifest.name.clone(),
+        (Origin::Registry(resolved), None) => resolved.entry.name.clone(),
+        (Origin::Git { url, path, .. }, None) => install_from_git_app_base(url, path)?,
     };
     let suffixed = name != base;
+    // A direct install re-resolves its package from the URL in `source`, so
+    // what an upgrade needs from it is the manifest subdirectory: the stack
+    // app's own directory for a stack member, the given path otherwise.
+    let repo_path = match origin {
+        Origin::Registry(_) => None,
+        Origin::Git { path, .. } => match stack_app {
+            Some(_) => Some(
+                manifest_dir
+                    .strip_prefix(&repo_dir)
+                    .with_context(|| {
+                        format!("manifest {} is outside the clone", manifest_dir.display())
+                    })?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None => path.map(str::to_string),
+        },
+    };
     let meta = AppMeta {
         id: name.to_string(),
         uuid: Some(uuid),
@@ -505,19 +685,22 @@ fn install_one(
             name: ctx.name.clone(),
         },
         version: Some(effective_version.clone()),
-        source: Some(format!(
-            "{}:{}",
-            resolved.source_name, resolved.entry.source.git
-        )),
-        // Registry installs are pinned to a tag, never to a branch.
-        branch: None,
-        // The registry entry itself carries the path (DMN-096); nothing to
-        // record here — only a direct git install needs its own copy.
-        repo_path: None,
-        package: match stack_app {
-            Some(app) => Some(format!("{}/{app}", resolved.entry.name)),
-            None if suffixed => Some(resolved.entry.name.clone()),
-            None => None,
+        source: Some(origin.meta_source()),
+        // Registry installs are pinned to a tag, never to a branch; a direct
+        // install follows the branch it was given (`--branch`).
+        branch: origin.branch(),
+        // The registry entry itself carries the path (DMN-096); only a direct
+        // git install needs its own copy.
+        repo_path,
+        package: match origin {
+            Origin::Registry(resolved) => match stack_app {
+                Some(app) => Some(format!("{}/{app}", resolved.entry.name)),
+                None if suffixed => Some(resolved.entry.name.clone()),
+                None => None,
+            },
+            // Nothing to re-resolve in a registry: `source` and `repo_path`
+            // are all an upgrade of a direct install reads.
+            Origin::Git { .. } => None,
         },
         desired_state: DesiredState::Stopped,
         quota,
@@ -601,6 +784,13 @@ fn install_from_git_app_base(url: &str, path: Option<&str>) -> Result<String> {
 /// `git_ref` pins the branch or tag to check out; `None` clones the default
 /// branch HEAD. Private repositories reuse the same `asc auth` credentials
 /// as registry installs (host/prefix matching in [`super::auth`]).
+///
+/// The package may be a stack (`asc.stack.yaml`) just as well as a single app
+/// (DMN-097): without a registry entry to declare the type, the clone decides.
+/// `stack_app` installs one named app of the stack; `None` installs every
+/// non-optional one, exactly like the registry stack install.
+/// `force` skips the resource shortfall check (DMN-099) the same way it does
+/// for [`install`].
 #[allow(clippy::too_many_arguments)]
 pub fn install_from_git(
     config: &Config,
@@ -608,120 +798,51 @@ pub fn install_from_git(
     url: &str,
     git_ref: Option<GitRef<'_>>,
     path: Option<&str>,
+    stack_app: Option<&str>,
     custom_name: Option<&str>,
     license_ack: bool,
     image_choice: Option<ImageSource>,
+    force: bool,
     report: Option<&dyn InstallReporter>,
-) -> Result<InstallReport> {
+) -> Result<InstallOutcome> {
     if let Some(name) = custom_name {
         validate_custom_name(config, ctx, name)?;
     }
-    let store = AppStore::new(config.daemon.apps_dir.clone());
-    let base = install_from_git_app_base(url, path)?;
-    let name = instance_id(&store, &base)?;
-
-    let app_dir = store.app_dir(&name)?;
-    fs::create_dir_all(&app_dir)
-        .with_context(|| format!("cannot create app directory {}", app_dir.display()))?;
-    let mut cleanup = RemoveOnDrop {
-        path: app_dir.clone(),
-        armed: true,
-    };
-
-    let repo_dir = app_dir.join("repository");
-    let checkout = match git_ref {
-        Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(r),
-        None => None,
-    };
-    git_clone(url, checkout, &repo_dir, ctx, report)?;
-
-    // `path` names the manifest's subdirectory inside the clone for a
-    // monorepo package; `None` keeps the previous "repository root" default.
-    let manifest_dir = manifest_dir(&repo_dir, path)?;
-    if !license_ack && let Some(license) = repo_license(&manifest_dir, &repo_dir) {
-        return Err(anyhow::Error::new(LicenseRequired {
-            package: name.clone(),
-            source: "git".to_string(),
-            git: url.to_string(),
-            license,
-        }));
-    }
-    let manifest = Manifest::load(&manifest_dir)?;
-
-    // The app type is only known after reading the manifest; the cleanup
-    // guard removes the cloned repository on this failure path too.
-    enforce_install_policy(config, ctx, &manifest, &name)?;
-
-    let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
-    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
-
-    for sub in ["config", "data"] {
-        fs::create_dir_all(app_dir.join(sub))
-            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
-    }
-    if let Some(settings) = &settings
-        && !settings.settings.is_empty()
-    {
-        let mut values = SettingValues::default();
-        values.merge_defaults(&settings.settings);
-        values.save(&app_dir.join("config"))?;
-    }
-
-    let uuid = new_uuid()?;
-    let runtime = provision(
-        &manifest,
-        &name,
-        Some(&uuid),
-        &app_dir,
-        &manifest_dir,
-        &config.docker,
-        quota.as_ref(),
-        settings.as_ref(),
+    let origin = Origin::Git { url, git_ref, path };
+    let opts = InstallOpts {
+        // A direct install checks out the ref it was given, not a resolved
+        // registry tag: [`Origin::clone_into`] takes it from `git_ref`.
+        version: None,
+        custom_name,
+        license_ack,
         image_choice,
+        force,
         report,
-    )?;
-
-    let effective_version = checkout
-        .map(str::to_string)
-        .unwrap_or_else(|| manifest.version.clone());
-    let meta = AppMeta {
-        id: name.clone(),
-        uuid: Some(uuid),
-        name: manifest.title.clone().unwrap_or_else(|| name.clone()),
-        custom_name: custom_name.map(str::to_string),
-        owner: Owner {
-            uid: ctx.uid,
-            name: ctx.name.clone(),
-        },
-        version: Some(effective_version.clone()),
-        // No registry source name for a direct install — the URL *is* the
-        // source of truth, and `asc app upgrade` re-resolves the app from it
-        // instead of looking the id up in the registries (DMN-053).
-        source: Some(format!("git:{url}")),
-        // A branch install tracks that branch across upgrades; a tag install
-        // is pinned by `version` and moves tag by tag like a registry app.
-        branch: match git_ref {
-            Some(GitRef::Branch(branch)) => Some(branch.to_string()),
-            _ => None,
-        },
-        repo_path: path.map(str::to_string),
-        package: None,
-        desired_state: DesiredState::Stopped,
-        quota,
-        runtime,
     };
-    store.save(&meta)?;
-    cleanup.disarm();
-    info!(
-        app = %name,
-        version = %effective_version,
-        ref_kind = git_ref.map(GitRef::kind).unwrap_or("default"),
-        "app installed from git"
-    );
-    Ok(InstallReport {
-        id: name,
-        version: effective_version,
-    })
+    let base = install_from_git_app_base(url, path)?;
+
+    // Whether the repository holds an app or a stack is only visible after
+    // the clone, so the app install runs first and restarts as a stack
+    // install when it reports one. Naming an app of the stack up front says
+    // it is a stack already — no point cloning twice to find out.
+    if stack_app.is_none() {
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        let id = instance_id(&store, &base)?;
+        match install_one(config, ctx, origin, &id, None, opts) {
+            Ok(report) => {
+                info!(
+                    app = %report.id,
+                    version = %report.version,
+                    ref_kind = git_ref.map(GitRef::kind).unwrap_or("default"),
+                    "app installed from git"
+                );
+                return Ok(InstallOutcome::App(report));
+            }
+            Err(err) if err.downcast_ref::<StackPackage>().is_none() => return Err(err),
+            Err(err) => debug!(error = %err, "direct git install restarts as a stack install"),
+        }
+    }
+    install_stack(config, ctx, origin, &base, stack_app, opts)
 }
 
 /// Root policy (DMN-003): regular users may be limited to Docker apps.
@@ -1019,7 +1140,7 @@ pub(super) fn clone_repository(
 /// output once stderr isn't a tty (which it never is here, piped for
 /// capture), so `--progress` forces it back on and [`read_progress_lines`]
 /// parses the `\r`-delimited status line as it streams in.
-fn git_clone(
+pub(super) fn git_clone(
     git_url: &str,
     tag: Option<&str>,
     dest: &Path,
@@ -1148,16 +1269,20 @@ pub(super) fn manifest_dir(repo_dir: &Path, sub: Option<&str>) -> Result<PathBuf
 /// let it escape the repository. `has_root` also catches "/abs", which is
 /// not `is_absolute` on Windows.
 pub(super) fn safe_join(base: &Path, sub: &str) -> Result<PathBuf> {
-    let clean = Path::new(sub);
-    if clean.is_absolute()
-        || clean.has_root()
-        || clean
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        bail!("invalid package path '{sub}'");
+    let mut joined = base.to_path_buf();
+    for component in Path::new(sub).components() {
+        match component {
+            // `./server` is how stack manifests spell an app directory: the
+            // result is the same path, without the "." left in the middle of
+            // it — it is also recorded in meta.json (DMN-097).
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => joined.push(part),
+            // "..", "/abs" (not `is_absolute` on every platform) and Windows
+            // prefixes must never escape the repository.
+            _ => bail!("invalid package path '{sub}'"),
+        }
     }
-    Ok(base.join(clean))
+    Ok(joined)
 }
 
 /// Directory of the app manifest inside a cloned repository: the registry

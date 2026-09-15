@@ -121,6 +121,7 @@ fn install_from_file_registry() {
             None,
             true,
             None,
+            false,
             None,
         )
         .unwrap_err();
@@ -142,6 +143,7 @@ fn install_from_file_registry() {
             None,
             true,
             None,
+            false,
             None,
         )
         .unwrap();
@@ -151,8 +153,18 @@ fn install_from_file_registry() {
     // The repository ships LICENSE.md: installing without acceptance raises
     // the typed error (source + repository + text), leaving nothing behind.
     {
-        let err =
-            pkg::install(&config, &ctx, "demo@1.0.0", None, None, false, None, None).unwrap_err();
+        let err = pkg::install(
+            &config,
+            &ctx,
+            "demo@1.0.0",
+            None,
+            None,
+            false,
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
         let required = err
             .downcast_ref::<pkg::LicenseRequired>()
             .expect("expected the typed license error");
@@ -174,6 +186,7 @@ fn install_from_file_registry() {
             None,
             false,
             None,
+            false,
             None,
         )
         .unwrap_err();
@@ -186,9 +199,18 @@ fn install_from_file_registry() {
     }
 
     // Requested tag is `1.0.0`, the repo has `v1.0.0` — the fallback must hit.
-    let pkg::InstallOutcome::App(report) =
-        pkg::install(&config, &ctx, "demo@1.0.0", None, None, true, None, None).unwrap()
-    else {
+    let pkg::InstallOutcome::App(report) = pkg::install(
+        &config,
+        &ctx,
+        "demo@1.0.0",
+        None,
+        None,
+        true,
+        None,
+        false,
+        None,
+    )
+    .unwrap() else {
         panic!("expected a single-app install");
     };
     assert_eq!(report.id, "demo");
@@ -207,9 +229,18 @@ fn install_from_file_registry() {
     // A second install of the same package becomes a new instance (DMN-033):
     // the id gets the first free '-N' suffix, the id doubles as the display
     // name, and the registry package is recorded for upgrades.
-    let pkg::InstallOutcome::App(second) =
-        pkg::install(&config, &ctx, "demo@1.0.0", None, None, true, None, None).unwrap()
-    else {
+    let pkg::InstallOutcome::App(second) = pkg::install(
+        &config,
+        &ctx,
+        "demo@1.0.0",
+        None,
+        None,
+        true,
+        None,
+        false,
+        None,
+    )
+    .unwrap() else {
         panic!("expected a single-app install");
     };
     assert_eq!(second.id, "demo-2");
@@ -225,6 +256,7 @@ fn install_from_file_registry() {
         Some("My Demo"),
         true,
         None,
+        false,
         None,
     )
     .unwrap() else {
@@ -236,7 +268,7 @@ fn install_from_file_registry() {
     store.remove("demo-3").unwrap();
 
     // Unknown packages fail with the "not found" error, not a panic/partial state.
-    assert!(pkg::install(&config, &ctx, "ghost", None, None, true, None, None).is_err());
+    assert!(pkg::install(&config, &ctx, "ghost", None, None, true, None, false, None).is_err());
     assert!(!store.app_dir("ghost").unwrap().exists());
 
     // ── Upgrade: a new tag in the package repository ─────────────────────
@@ -302,7 +334,7 @@ fn install_from_file_registry() {
     // The repo now has v1.0.0 and v2.0.0; `demo` (no version) must resolve
     // v2.0.0 from the tags, not any registry field.
     let pkg::InstallOutcome::App(latest) =
-        pkg::install(&config, &ctx, "demo", None, None, true, None, None).unwrap()
+        pkg::install(&config, &ctx, "demo", None, None, true, None, false, None).unwrap()
     else {
         panic!("expected a single-app install");
     };
@@ -314,7 +346,8 @@ fn install_from_file_registry() {
     store.remove(&latest.id).unwrap();
 
     // ── DMN-048: `demo@` asks which version, listing tags and branches ───
-    let err = pkg::install(&config, &ctx, "demo@", None, None, true, None, None).unwrap_err();
+    let err =
+        pkg::install(&config, &ctx, "demo@", None, None, true, None, false, None).unwrap_err();
     let choice = err
         .downcast_ref::<pkg::VersionChoiceRequired>()
         .unwrap_or_else(|| panic!("expected VersionChoiceRequired, got: {err:#}"));

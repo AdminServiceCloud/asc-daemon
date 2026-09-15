@@ -321,8 +321,10 @@ impl Daemon {
         branch: Option<&str>,
         tag: Option<&str>,
         path: Option<&str>,
+        stack_app: Option<&str>,
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
+        force: bool,
     ) -> Result<pkg::InstallOutcome> {
         let body = serde_json::json!({
             "spec": spec,
@@ -331,8 +333,10 @@ impl Daemon {
             "branch": branch,
             "tag": tag,
             "path": path,
+            "stack_app": stack_app,
             "license_ack": license_ack,
             "image_choice": image_choice,
+            "force": force,
         });
         let json = self.request(Method::POST, "/v1/apps", Some(body))?;
         let report = |v: &Value| pkg::InstallReport {
@@ -589,6 +593,23 @@ fn typed_error(json: &Value) -> anyhow::Error {
             license: license["license"].as_str().unwrap_or_default().to_string(),
         });
     }
+    if let Some(not_met) = json.get("requirements_not_met") {
+        return anyhow::Error::new(pkg::RequirementsNotMet {
+            app: not_met["app"].as_str().unwrap_or_default().to_string(),
+            shortages: not_met["shortages"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .map(|s| pkg::Shortage {
+                            resource: s["resource"].as_str().unwrap_or_default().to_string(),
+                            need: s["need"].as_str().unwrap_or_default().to_string(),
+                            have: s["have"].as_str().unwrap_or_default().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    }
     if let Some(ambiguous) = json.get("ambiguous") {
         return anyhow::Error::new(pkg::AmbiguousPackage {
             name: ambiguous["name"].as_str().unwrap_or_default().to_string(),
@@ -678,6 +699,20 @@ mod tests {
         assert_eq!(choice.source.as_deref(), Some("official"));
         assert_eq!(choice.tags, vec!["v1.28.0", "v1.27.0"]);
         assert_eq!(choice.branches, vec!["main"]);
+
+        let err = typed_error(&serde_json::json!({
+            "error": "not enough resources",
+            "requirements_not_met": {
+                "app": "cs2",
+                "shortages": [
+                    { "resource": "CPU", "need": "2", "have": "1" },
+                ],
+            },
+        }));
+        let not_met = err.downcast_ref::<pkg::RequirementsNotMet>().unwrap();
+        assert_eq!(not_met.app, "cs2");
+        assert_eq!(not_met.shortages.len(), 1);
+        assert_eq!(not_met.shortages[0].resource, "CPU");
 
         // DMN-062: a private repository reported by the daemon must arrive
         // as the same typed error the in-process clone raises, so the CLI's

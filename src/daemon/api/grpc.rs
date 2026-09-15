@@ -342,6 +342,7 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
             apps: vec![],
             skipped: vec![],
             license_required: None,
+            requirements_not_met: None,
         },
         InstallOutcome::Stack {
             stack,
@@ -362,7 +363,47 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
                 .collect(),
             skipped,
             license_required: None,
+            requirements_not_met: None,
         },
+    }
+}
+
+/// The inspected package (DMN-098) in its wire form.
+fn package_info_to_pb(info: pkg::PackageInfo) -> pb::InspectPackageResponse {
+    pb::InspectPackageResponse {
+        kind: match info.kind {
+            pkg::PackageKind::App => pb::PackageKind::App as i32,
+            pkg::PackageKind::Stack => pb::PackageKind::Stack as i32,
+        },
+        name: info.name,
+        version: info.version,
+        title: info.title,
+        description: info.description,
+        requirements: info.requirements.as_ref().map(requirements_to_pb),
+        apps: info
+            .apps
+            .into_iter()
+            .map(|app| pb::StackApp {
+                name: app.name,
+                app_id: app.app_id,
+                version: app.version,
+                title: app.title,
+                description: app.description,
+                optional: app.optional,
+                depends_on: app.depends_on,
+                requirements: app.requirements.as_ref().map(requirements_to_pb),
+            })
+            .collect(),
+    }
+}
+
+fn requirements_to_pb(
+    requirements: &crate::daemon::pkg::manifest::Requirements,
+) -> pb::PackageRequirements {
+    pb::PackageRequirements {
+        ram: requirements.ram.clone(),
+        disk: requirements.disk.clone(),
+        cpu: requirements.cpu,
     }
 }
 
@@ -379,6 +420,42 @@ fn license_required_to_pb(required: pkg::LicenseRequired) -> pb::InstallAppRespo
             license: required.license,
         }),
         ..Default::default()
+    }
+}
+
+/// `RequirementsNotMet` is the same non-error shape as `LicenseRequired`
+/// (DMN-099): the caller renders its own "not enough resources" screen and
+/// retries with `force = true`.
+fn requirements_not_met_to_pb(not_met: pkg::RequirementsNotMet) -> pb::InstallAppResponse {
+    pb::InstallAppResponse {
+        requirements_not_met: Some(pb::RequirementsNotMetDetail {
+            app: not_met.app,
+            shortages: not_met
+                .shortages
+                .into_iter()
+                .map(|s| pb::ResourceShortage {
+                    resource: s.resource,
+                    need: s.need,
+                    have: s.have,
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Shared by `install_app` and `install_app_stream`: catches the two
+/// "otherwise succeeded, needs one more round trip" install errors
+/// (`LicenseRequired`, `RequirementsNotMet`) before they would reach
+/// [`to_status`] and renders either as a normal, successful response.
+fn install_error_to_pb(err: anyhow::Error) -> Result<pb::InstallAppResponse, Status> {
+    let err = match err.downcast::<pkg::LicenseRequired>() {
+        Ok(required) => return Ok(license_required_to_pb(required)),
+        Err(err) => err,
+    };
+    match err.downcast::<pkg::RequirementsNotMet>() {
+        Ok(not_met) => Ok(requirements_not_met_to_pb(not_met)),
+        Err(err) => Err(to_status(err)),
     }
 }
 
@@ -477,19 +554,18 @@ impl AppService for Grpc {
                 request.branch,
                 request.tag,
                 request.path,
+                request.stack_app,
                 request.license_ack,
                 // The image-source choice (DMN-050) has no gRPC field yet; a
                 // both-image manifest surfaces ImageChoiceRequired here. The
                 // interactive flow is the CLI/REST path.
                 None,
+                request.force,
             )
             .await
         {
             Ok(outcome) => Ok(Response::new(install_outcome_to_pb(outcome))),
-            Err(err) => match err.downcast::<pkg::LicenseRequired>() {
-                Ok(required) => Ok(Response::new(license_required_to_pb(required))),
-                Err(err) => Err(to_status(err)),
-            },
+            Err(err) => install_error_to_pb(err).map(Response::new),
         }
     }
 
@@ -514,8 +590,10 @@ impl AppService for Grpc {
             request.branch,
             request.tag,
             request.path,
+            request.stack_app,
             request.license_ack,
             None,
+            request.force,
         );
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
             match rx.recv().await {
@@ -534,14 +612,9 @@ impl AppService for Grpc {
                     rx,
                 )),
                 Some(super::InstallStreamEvent::Done(Err(err))) => Some((
-                    match err.downcast::<pkg::LicenseRequired>() {
-                        Ok(required) => Ok(pb::InstallAppEvent {
-                            event: Some(pb::install_app_event::Event::Result(
-                                license_required_to_pb(required),
-                            )),
-                        }),
-                        Err(err) => Err(to_status(err)),
-                    },
+                    install_error_to_pb(err).map(|response| pb::InstallAppEvent {
+                        event: Some(pb::install_app_event::Event::Result(response)),
+                    }),
                     rx,
                 )),
                 None => None,
@@ -565,6 +638,26 @@ impl AppService for Grpc {
             tags: refs.tags,
             latest,
         }))
+    }
+
+    async fn inspect_package(
+        &self,
+        request: Request<pb::InspectPackageRequest>,
+    ) -> Result<Response<pb::InspectPackageResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let request = request.into_inner();
+        let info = self
+            .0
+            .inspect_package(
+                ctx,
+                request.git_url,
+                request.branch,
+                request.tag,
+                request.path,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(package_info_to_pb(info)))
     }
 
     async fn upgrade_app(

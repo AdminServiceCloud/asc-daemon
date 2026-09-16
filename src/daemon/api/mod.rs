@@ -33,6 +33,7 @@ use crate::daemon::files;
 use crate::daemon::monitor::Monitor;
 use crate::daemon::pkg;
 use crate::daemon::progress;
+use crate::daemon::users;
 
 use console::ConsoleTokens;
 use tokens::TokenStore;
@@ -50,6 +51,7 @@ pub const CAPABILITIES: &[&str] = &[
     "app.stats",
     "app.ports",
     "app.uptime",
+    "users",
 ];
 
 /// Shared state behind both transports.
@@ -1063,6 +1065,128 @@ impl ApiState {
         self.blocking(move |_| {
             files::require_root(&ctx)?;
             Ok(files::list_system_identities()?)
+        })
+        .await
+    }
+
+    // ── Local account management (DMN-099, see docs/user-management.md) ──
+
+    pub async fn list_users(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<users::ManagedUser>> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::list_users()?)
+        })
+        .await
+    }
+
+    pub async fn create_user(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        name: String,
+        home: Option<String>,
+        shell: Option<String>,
+        create_home: Option<bool>,
+        groups: Vec<String>,
+    ) -> Result<users::ManagedUser> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::create_user(
+                &name,
+                home.as_deref(),
+                shell.as_deref(),
+                create_home,
+                &groups,
+            )?)
+        })
+        .await
+    }
+
+    pub async fn delete_user(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        name: String,
+        remove_home: bool,
+    ) -> Result<()> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::delete_user(&name, remove_home)?)
+        })
+        .await
+    }
+
+    pub async fn set_user_locked(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        name: String,
+        locked: bool,
+    ) -> Result<users::ManagedUser> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::set_user_locked(&name, locked)?)
+        })
+        .await
+    }
+
+    pub async fn set_user_shell(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        name: String,
+        shell: String,
+    ) -> Result<users::ManagedUser> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::set_user_shell(&name, &shell)?)
+        })
+        .await
+    }
+
+    pub async fn set_user_groups(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        name: String,
+        groups: Vec<String>,
+    ) -> Result<users::ManagedUser> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::set_user_groups(&name, &groups)?)
+        })
+        .await
+    }
+
+    pub async fn list_authorized_keys(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        user: String,
+    ) -> Result<Vec<users::AuthorizedKey>> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::list_authorized_keys(&user)?)
+        })
+        .await
+    }
+
+    pub async fn add_authorized_key(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        user: String,
+        public_key: String,
+    ) -> Result<users::AuthorizedKey> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::add_authorized_key(&user, &public_key)?)
+        })
+        .await
+    }
+
+    pub async fn remove_authorized_key(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        user: String,
+        fingerprint: String,
+    ) -> Result<()> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            Ok(users::remove_authorized_key(&user, &fingerprint)?)
         })
         .await
     }

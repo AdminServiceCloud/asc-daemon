@@ -21,6 +21,7 @@ use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::files;
 use crate::daemon::pkg;
 use crate::daemon::pkg::InstallOutcome;
+use crate::daemon::users;
 
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
@@ -87,6 +88,28 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/v1/files/content",
             get(read_file_content).put(write_file_content),
+        )
+        // Local account management (DMN-099, see docs/user-management.md):
+        // list local accounts (including root), create/delete, lock/unlock,
+        // change shell, manage supplementary groups, and deploy an SSH
+        // public key into an account's authorized_keys. Every handler
+        // requires a root caller context, same as the files routes above.
+        .route("/v1/users", get(list_users).post(create_user))
+        .route("/v1/users/{name}", delete(delete_user))
+        .route("/v1/users/{name}/locked", put(set_user_locked))
+        .route("/v1/users/{name}/shell", put(set_user_shell))
+        .route("/v1/users/{name}/groups", put(set_user_groups))
+        .route(
+            "/v1/users/{name}/authorized-keys",
+            get(list_authorized_keys).post(add_authorized_key),
+        )
+        // Shares a path with the GET/POST route above under a different
+        // method; the fingerprint travels in a JSON body rather than a
+        // path/query param specifically to avoid URL-encoding a
+        // `SHA256:...` value (its base64 alphabet includes `/`).
+        .route(
+            "/v1/users/{name}/authorized-keys",
+            delete(remove_authorized_key_by_body),
         )
         .with_state(state)
 }
@@ -216,6 +239,20 @@ impl IntoResponse for ApiError {
                 }
                 F::UnknownUser(_) | F::UnknownGroup(_) => StatusCode::BAD_REQUEST,
                 F::Io(..) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+        // Typed account-management errors (DMN-099), same status mapping as
+        // the gRPC `to_status` arm.
+        if let Some(err) = self.0.downcast_ref::<users::UserError>() {
+            use users::UserError as U;
+            let status = match err {
+                U::NotFound(_) => StatusCode::NOT_FOUND,
+                U::AlreadyExists(_) => StatusCode::CONFLICT,
+                U::Protected(_) => StatusCode::FORBIDDEN,
+                U::InvalidInput(_) | U::UnknownGroup(_) => StatusCode::BAD_REQUEST,
+                U::CommandFailed { .. } => StatusCode::CONFLICT,
+                U::Io(..) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
@@ -1396,6 +1433,191 @@ async fn list_system_identities(
         })).collect::<Vec<_>>(),
     }))
     .into_response())
+}
+
+// ── Local account management (DMN-099, see docs/user-management.md) ──
+
+fn managed_user_json(u: &users::ManagedUser) -> serde_json::Value {
+    serde_json::json!({
+        "name": u.name,
+        "uid": u.uid,
+        "gid": u.gid,
+        "home": u.home,
+        "shell": u.shell,
+        "locked": u.locked,
+        "is_system": u.is_system,
+        "groups": u.groups,
+    })
+}
+
+fn authorized_key_json(k: &users::AuthorizedKey) -> serde_json::Value {
+    serde_json::json!({
+        "fingerprint": k.fingerprint,
+        "key_type": k.key_type,
+        "comment": k.comment,
+    })
+}
+
+/// Every local account, root included.
+async fn list_users(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let accounts = state.list_users(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "users": accounts.iter().map(managed_user_json).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct CreateUserBody {
+    name: String,
+    #[serde(default)]
+    home: Option<String>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    create_home: Option<bool>,
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+async fn create_user(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<CreateUserBody>,
+) -> Result<Response, ApiError> {
+    let user = state
+        .create_user(
+            ctx,
+            body.name,
+            body.home,
+            body.shell,
+            body.create_home,
+            body.groups,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "user": managed_user_json(&user) })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct DeleteUserQuery {
+    #[serde(default)]
+    remove_home: bool,
+}
+
+async fn delete_user(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+    Query(query): Query<DeleteUserQuery>,
+) -> Result<Response, ApiError> {
+    state.delete_user(ctx, name, query.remove_home).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct LockedBody {
+    locked: bool,
+}
+
+async fn set_user_locked(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+    Json(body): Json<LockedBody>,
+) -> Result<Response, ApiError> {
+    let user = state.set_user_locked(ctx, name, body.locked).await?;
+    Ok(Json(serde_json::json!({ "user": managed_user_json(&user) })).into_response())
+}
+
+#[derive(Deserialize)]
+struct ShellBody {
+    shell: String,
+}
+
+async fn set_user_shell(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+    Json(body): Json<ShellBody>,
+) -> Result<Response, ApiError> {
+    let user = state.set_user_shell(ctx, name, body.shell).await?;
+    Ok(Json(serde_json::json!({ "user": managed_user_json(&user) })).into_response())
+}
+
+#[derive(Deserialize)]
+struct GroupsBody {
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+async fn set_user_groups(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+    Json(body): Json<GroupsBody>,
+) -> Result<Response, ApiError> {
+    let user = state.set_user_groups(ctx, name, body.groups).await?;
+    Ok(Json(serde_json::json!({ "user": managed_user_json(&user) })).into_response())
+}
+
+async fn list_authorized_keys(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    let keys = state.list_authorized_keys(ctx, name).await?;
+    Ok(Json(serde_json::json!({
+        "keys": keys.iter().map(authorized_key_json).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct AddAuthorizedKeyBody {
+    public_key: String,
+}
+
+async fn add_authorized_key(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+    Json(body): Json<AddAuthorizedKeyBody>,
+) -> Result<Response, ApiError> {
+    let key = state.add_authorized_key(ctx, name, body.public_key).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "key": authorized_key_json(&key) })),
+    )
+        .into_response())
+}
+
+/// `DELETE /v1/users/{name}/authorized-keys`, named distinctly from the
+/// GET/POST handlers above since it takes a JSON body `{"fingerprint"}`
+/// rather than a path/query param — a `SHA256:...` fingerprint's base64
+/// alphabet includes `/`, which is awkward to URL-encode into a path
+/// segment.
+#[derive(Deserialize)]
+struct RemoveAuthorizedKeyBody {
+    fingerprint: String,
+}
+
+async fn remove_authorized_key_by_body(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(name): Path<String>,
+    Json(body): Json<RemoveAuthorizedKeyBody>,
+) -> Result<Response, ApiError> {
+    state
+        .remove_authorized_key(ctx, name, body.fingerprint)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(Deserialize)]

@@ -24,6 +24,7 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | 💾 Бекапы приложений | [backups](backups.md) |
 | 📁 SFTP-сервер по приложению | [sftp](sftp.md) |
 | 📁 Файловый API: обход ФС, потоковая передача | [files](files.md) |
+| 👤 Управление локальными пользователями: аккаунты, группы, SSH-ключи | [user-management](user-management.md) |
 | 🖥️ WebSocket-консоль приложений | [console](console.md) |
 | ⏰ Планировщик задач | [scheduler](scheduler.md) |
 | ⌨️ Автодополнение в шелле (Tab) для bash, zsh и fish | [completion](completion.md) |

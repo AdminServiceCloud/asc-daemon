@@ -191,7 +191,8 @@ mod rest {
                 "console.exec",
                 "app.stats",
                 "app.ports",
-                "app.uptime"
+                "app.uptime",
+                "users"
             ]
         );
 
@@ -577,7 +578,8 @@ mod grpc {
                 "console.exec",
                 "app.stats",
                 "app.ports",
-                "app.uptime"
+                "app.uptime",
+                "users"
             ]
         );
 

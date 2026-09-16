@@ -16,6 +16,7 @@ use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::files;
 use crate::daemon::pkg;
 use crate::daemon::pkg::InstallOutcome;
+use crate::daemon::users;
 
 use pb::app_service_server::{AppService, AppServiceServer};
 use pb::credential_service_server::{CredentialService, CredentialServiceServer};
@@ -25,6 +26,7 @@ use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
 use pb::source_service_server::{SourceService, SourceServiceServer};
 use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
+use pb::user_service_server::{UserService, UserServiceServer};
 
 /// gRPC routes as an axum router (mounted next to REST on one listener).
 pub fn routes(state: Arc<ApiState>) -> Router {
@@ -35,7 +37,8 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(TokenServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(SourceServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(CredentialServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(FileServiceServer::new(Grpc(state)))
+        .add_service(FileServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(UserServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 
@@ -77,6 +80,17 @@ fn to_status(err: anyhow::Error) -> Status {
                 Status::failed_precondition(msg)
             }
             F::Io(..) => Status::internal(msg),
+        };
+    }
+    if let Some(err) = err.downcast_ref::<users::UserError>() {
+        use users::UserError as U;
+        return match err {
+            U::NotFound(_) => Status::not_found(msg),
+            U::AlreadyExists(_) => Status::already_exists(msg),
+            U::Protected(_) => Status::permission_denied(msg),
+            U::InvalidInput(_) | U::UnknownGroup(_) => Status::invalid_argument(msg),
+            U::CommandFailed { .. } => Status::failed_precondition(msg),
+            U::Io(..) => Status::internal(msg),
         };
     }
     if msg.contains("not found") || msg.contains("не найдено") {
@@ -1524,5 +1538,172 @@ impl FileService for Grpc {
             bytes_written: entry.size,
             entry: Some(file_entry_to_pb(&entry)),
         }))
+    }
+}
+
+fn managed_user_to_pb(u: users::ManagedUser) -> pb::ManagedUser {
+    pb::ManagedUser {
+        name: u.name,
+        uid: u.uid,
+        gid: u.gid,
+        home: u.home,
+        shell: u.shell,
+        locked: u.locked,
+        is_system: u.is_system,
+        groups: u.groups,
+    }
+}
+
+fn authorized_key_to_pb(k: users::AuthorizedKey) -> pb::AuthorizedKey {
+    pb::AuthorizedKey {
+        fingerprint: k.fingerprint,
+        key_type: k.key_type,
+        comment: k.comment,
+    }
+}
+
+/// Local Linux account management (DMN-099, see docs/user-management.md):
+/// every method is root-gated, mirroring `FileService` above — whole-machine
+/// account administration, not scoped per calling user.
+#[tonic::async_trait]
+impl UserService for Grpc {
+    async fn list_users(
+        &self,
+        request: Request<pb::ListUsersRequest>,
+    ) -> Result<Response<pb::ListUsersResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let accounts = self.0.list_users(ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::ListUsersResponse {
+            users: accounts.into_iter().map(managed_user_to_pb).collect(),
+        }))
+    }
+
+    async fn create_user(
+        &self,
+        request: Request<pb::CreateUserRequest>,
+    ) -> Result<Response<pb::CreateUserResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let user = self
+            .0
+            .create_user(
+                ctx,
+                req.name,
+                req.home,
+                req.shell,
+                req.create_home,
+                req.groups,
+            )
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::CreateUserResponse {
+            user: Some(managed_user_to_pb(user)),
+        }))
+    }
+
+    async fn delete_user(
+        &self,
+        request: Request<pb::DeleteUserRequest>,
+    ) -> Result<Response<pb::DeleteUserResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        self.0
+            .delete_user(ctx, req.name, req.remove_home)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DeleteUserResponse {}))
+    }
+
+    async fn set_user_locked(
+        &self,
+        request: Request<pb::SetUserLockedRequest>,
+    ) -> Result<Response<pb::SetUserLockedResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let user = self
+            .0
+            .set_user_locked(ctx, req.name, req.locked)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SetUserLockedResponse {
+            user: Some(managed_user_to_pb(user)),
+        }))
+    }
+
+    async fn set_user_shell(
+        &self,
+        request: Request<pb::SetUserShellRequest>,
+    ) -> Result<Response<pb::SetUserShellResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let user = self
+            .0
+            .set_user_shell(ctx, req.name, req.shell)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SetUserShellResponse {
+            user: Some(managed_user_to_pb(user)),
+        }))
+    }
+
+    async fn set_user_groups(
+        &self,
+        request: Request<pb::SetUserGroupsRequest>,
+    ) -> Result<Response<pb::SetUserGroupsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let user = self
+            .0
+            .set_user_groups(ctx, req.name, req.groups)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SetUserGroupsResponse {
+            user: Some(managed_user_to_pb(user)),
+        }))
+    }
+
+    async fn list_authorized_keys(
+        &self,
+        request: Request<pb::ListAuthorizedKeysRequest>,
+    ) -> Result<Response<pb::ListAuthorizedKeysResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let keys = self
+            .0
+            .list_authorized_keys(ctx, req.user)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListAuthorizedKeysResponse {
+            keys: keys.into_iter().map(authorized_key_to_pb).collect(),
+        }))
+    }
+
+    async fn add_authorized_key(
+        &self,
+        request: Request<pb::AddAuthorizedKeyRequest>,
+    ) -> Result<Response<pb::AddAuthorizedKeyResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let key = self
+            .0
+            .add_authorized_key(ctx, req.user, req.public_key)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::AddAuthorizedKeyResponse {
+            key: Some(authorized_key_to_pb(key)),
+        }))
+    }
+
+    async fn remove_authorized_key(
+        &self,
+        request: Request<pb::RemoveAuthorizedKeyRequest>,
+    ) -> Result<Response<pb::RemoveAuthorizedKeyResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        self.0
+            .remove_authorized_key(ctx, req.user, req.fingerprint)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RemoveAuthorizedKeyResponse {}))
     }
 }

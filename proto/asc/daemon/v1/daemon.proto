@@ -1212,3 +1212,141 @@ message ListSystemIdentitiesResponse {
   repeated SystemUser users = 1;
   repeated SystemGroup groups = 2;
 }
+
+// Local Linux account management: list/create/delete accounts, lock/unlock,
+// change shell and supplementary groups, and manage each account's
+// `~/.ssh/authorized_keys`. Every method is root-gated like FileService —
+// this is whole-machine account administration, not scoped per calling
+// user. Account creation/deletion shells out to `useradd`/`userdel`
+// (battle-tested distro tooling handles /etc/shadow, skeleton files and
+// NSS consistently) rather than hand-editing /etc/passwd.
+service UserService {
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  // Refuses uid 0 and any uid below 1000: this deletes a Linux account,
+  // not a platform record, and system/service accounts are not this
+  // feature's business.
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  rpc SetUserLocked(SetUserLockedRequest) returns (SetUserLockedResponse);
+  rpc SetUserShell(SetUserShellRequest) returns (SetUserShellResponse);
+  // Replaces the full supplementary group set, `UpdateNodeProjects`-style:
+  // a partial add/remove API would let two operators silently clobber each
+  // other's changes.
+  rpc SetUserGroups(SetUserGroupsRequest) returns (SetUserGroupsResponse);
+  rpc ListAuthorizedKeys(ListAuthorizedKeysRequest) returns (ListAuthorizedKeysResponse);
+  // Idempotent: adding a key already present returns it unchanged instead
+  // of duplicating the line.
+  rpc AddAuthorizedKey(AddAuthorizedKeyRequest) returns (AddAuthorizedKeyResponse);
+  rpc RemoveAuthorizedKey(RemoveAuthorizedKeyRequest) returns (RemoveAuthorizedKeyResponse);
+}
+
+message ManagedUser {
+  string name = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+  string home = 4;
+  string shell = 5;
+  bool locked = 6;
+  // uid < 1000 (or 0): surfaced for visibility, not hidden — but blocked
+  // from DeleteUser and worth a UI badge.
+  bool is_system = 7;
+  // Supplementary groups only (not the primary gid), sorted by name.
+  repeated string groups = 8;
+}
+
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  // Ordered by uid ascending, root included.
+  repeated ManagedUser users = 1;
+}
+
+message CreateUserRequest {
+  string name = 1;
+  // Default: /home/<name>.
+  optional string home = 2;
+  // Default: /bin/bash.
+  optional string shell = 3;
+  // Default true: `useradd -m` vs `-M`.
+  optional bool create_home = 4;
+  // Supplementary groups to add at creation time (e.g. sudo, docker) —
+  // must already exist on the machine.
+  repeated string groups = 5;
+}
+
+message CreateUserResponse {
+  ManagedUser user = 1;
+}
+
+message DeleteUserRequest {
+  string name = 1;
+  // `userdel -r`: also remove the home directory and mail spool.
+  bool remove_home = 2;
+}
+
+message DeleteUserResponse {}
+
+message SetUserLockedRequest {
+  string name = 1;
+  bool locked = 2;
+}
+
+message SetUserLockedResponse {
+  ManagedUser user = 1;
+}
+
+message SetUserShellRequest {
+  string name = 1;
+  // Must be an absolute path already present in /etc/shells.
+  string shell = 2;
+}
+
+message SetUserShellResponse {
+  ManagedUser user = 1;
+}
+
+message SetUserGroupsRequest {
+  string name = 1;
+  // Full replacement set; empty clears every supplementary group.
+  repeated string groups = 2;
+}
+
+message SetUserGroupsResponse {
+  ManagedUser user = 1;
+}
+
+message AuthorizedKey {
+  // "SHA256:base64", from `ssh-keygen -lf`.
+  string fingerprint = 1;
+  // e.g. ssh-ed25519, ssh-rsa.
+  string key_type = 2;
+  // Trailing comment field of the line, if any.
+  string comment = 3;
+}
+
+message ListAuthorizedKeysRequest {
+  string user = 1;
+}
+
+message ListAuthorizedKeysResponse {
+  // In file order.
+  repeated AuthorizedKey keys = 1;
+}
+
+message AddAuthorizedKeyRequest {
+  string user = 1;
+  // Full "type base64 [comment]" line.
+  string public_key = 2;
+}
+
+message AddAuthorizedKeyResponse {
+  // The stored key; unchanged and returned as-is when already present.
+  AuthorizedKey key = 1;
+}
+
+message RemoveAuthorizedKeyRequest {
+  string user = 1;
+  string fingerprint = 2;
+}
+
+message RemoveAuthorizedKeyResponse {}

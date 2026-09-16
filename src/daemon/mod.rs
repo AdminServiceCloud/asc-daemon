@@ -20,3 +20,4 @@ pub mod progress;
 pub mod scheduler;
 pub mod server;
 pub mod service;
+pub mod users;

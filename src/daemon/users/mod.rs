@@ -299,12 +299,12 @@ pub fn create_user(
     if read_accounts()?.iter().any(|u| u.name == name) {
         return Err(UserError::AlreadyExists(name.to_string()));
     }
-    if let Some(home) = home {
-        if !home.starts_with('/') {
-            return Err(UserError::InvalidInput(format!(
-                "home must be an absolute path: {home}"
-            )));
-        }
+    if let Some(home) = home
+        && !home.starts_with('/')
+    {
+        return Err(UserError::InvalidInput(format!(
+            "home must be an absolute path: {home}"
+        )));
     }
     let known_groups = read_groups()?;
     for group in groups {

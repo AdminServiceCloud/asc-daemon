@@ -79,6 +79,8 @@ recognizes keeps working against a newer daemon.
 | `PUT /v1/apps/{id}/settings {"values": {...}}` | — (REST only for now) | Replace the chosen values; keys the app's own schema does not define are rejected. A gRPC counterpart waits on modelling the settings schema in the proto contracts |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Removal including data |
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Temporary console token |
+| `GET /v1/docker/containers?all=&size=` | `DockerService.ListContainers` (DMN-102) | Every container on the host, ASC-managed or not, with the owning application resolved where there is one. `size=1` makes the Engine walk each container's writable layer, so it is off by default. **Root context only** |
+| `GET /v1/docker/stats?ids=a,b` | `DockerService.ListContainerStats` (DMN-112) | Live CPU/memory/network/block usage of containers; `ids` filters **before** the sampling window, empty means every running container. Costs one ~500 ms window for the whole set. **Root context only** |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | Metrics history from the ring buffer, oldest → newest |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Token state: kind, live access tokens, rotation window, the primary's truncated digest — never token material |

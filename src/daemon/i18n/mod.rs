@@ -90,6 +90,9 @@ pub enum Msg {
     AppListEmpty,
     StacksEmpty,
     PortsNone,
+    DockerNoContainers,
+    DockerRootRequired,
+    DockerUnsupportedByDaemon,
     AppNameAmbiguous,
     AttachHint,
     AttachDockerOnly,
@@ -336,6 +339,15 @@ pub fn t(msg: Msg) -> &'static str {
             "Стеки не установлены (отдельно установленные приложения не в счёт — см. 'asc ls')",
         ),
         Msg::PortsNone => ("no published ports", "нет опубликованных портов"),
+        Msg::DockerNoContainers => ("no containers", "контейнеров нет"),
+        Msg::DockerRootRequired => (
+            "root is required: listing every container on the host is a node-admin operation",
+            "требуются права root: список всех контейнеров хоста — операция администратора ноды",
+        ),
+        Msg::DockerUnsupportedByDaemon => (
+            "the daemon on this host is too old to list containers — update it (asc-updater)",
+            "демон на этом хосте слишком старый, чтобы показать контейнеры — обновите его (asc-updater)",
+        ),
         Msg::AppNameAmbiguous => (
             "several apps are named '{}' — use the app id instead",
             "названию '{}' соответствует несколько приложений — используйте id",

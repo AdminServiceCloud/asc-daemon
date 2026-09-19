@@ -51,6 +51,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(app_settings).put(set_app_settings),
         )
         .route("/v1/apps/{id}/console-token", post(console_token))
+        // Docker host inventory (DMN-102/DMN-112, see
+        // docs/app-management.md): the whole Engine, not just ASC's own
+        // containers. Root context only, enforced in the service layer —
+        // a container ASC did not create has no owner to authorize against.
+        .route("/v1/docker/containers", get(list_containers))
+        .route("/v1/docker/stats", get(container_stats))
         // Registry sources & credentials (DMN-083/084), pushed by the
         // platform — see docs/custom-registry.md, docs/package-manager.md.
         .route("/v1/sources", get(list_sources).put(replace_sources))
@@ -89,7 +95,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             "/v1/files/content",
             get(read_file_content).put(write_file_content),
         )
-        // Local account management (DMN-099, see docs/user-management.md):
+        // Local account management (DMN-100, see docs/user-management.md):
         // list local accounts (including root), create/delete, lock/unlock,
         // change shell, manage supplementary groups, and deploy an SSH
         // public key into an account's authorized_keys. Every handler
@@ -242,7 +248,7 @@ impl IntoResponse for ApiError {
             };
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
-        // Typed account-management errors (DMN-099), same status mapping as
+        // Typed account-management errors (DMN-100), same status mapping as
         // the gRPC `to_status` arm.
         if let Some(err) = self.0.downcast_ref::<users::UserError>() {
             use users::UserError as U;
@@ -570,6 +576,92 @@ async fn ports_summary(
             "name": app.name,
             "owner": app.owner,
             "ports": app.ports,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Query of `GET /v1/docker/containers` (DMN-102).
+#[derive(Deserialize)]
+struct ContainersQuery {
+    /// Include stopped containers, like `docker ps -a`.
+    #[serde(default)]
+    all: bool,
+    /// Ask the Engine for container sizes. Off by default — it walks every
+    /// container's writable layer.
+    #[serde(default)]
+    size: bool,
+}
+
+/// Every container on the host, ASC-managed or not. Root context only.
+async fn list_containers(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<ContainersQuery>,
+) -> Result<Response, ApiError> {
+    let rows = state.list_containers(ctx, query.all, query.size).await?;
+    Ok(Json(serde_json::json!({
+        "containers": rows.iter().map(|row| serde_json::json!({
+            "id": row.info.id,
+            "names": row.info.names,
+            "image": row.info.image,
+            "imageId": row.info.image_id,
+            "state": row.info.state,
+            "status": row.info.status,
+            "created": row.info.created,
+            "ports": row.info.ports.iter().map(|port| serde_json::json!({
+                "private": port.private,
+                "public": port.public,
+                "protocol": port.protocol,
+                "ip": port.ip,
+            })).collect::<Vec<_>>(),
+            "labels": row.info.labels,
+            "appId": row.app_id,
+            "appUuid": row.app_uuid,
+            "composeProject": row.info.compose_project,
+            "composeService": row.info.compose_service,
+            "sizeRw": row.info.size_rw,
+            "sizeRootFs": row.info.size_root_fs,
+            "networks": row.info.networks,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Query of `GET /v1/docker/stats` (DMN-112).
+#[derive(Deserialize)]
+struct ContainerStatsQuery {
+    /// Comma-separated container ids or names; absent = every running one.
+    ids: Option<String>,
+}
+
+/// Live container resource usage. Costs the sampling window (~500 ms) per
+/// call, once for the whole set — the CPU percentage is a delta of two
+/// readings.
+async fn container_stats(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<ContainerStatsQuery>,
+) -> Result<Response, ApiError> {
+    let ids = query
+        .ids
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
+    let rows = state.list_container_stats(ctx, ids).await?;
+    Ok(Json(serde_json::json!({
+        "stats": rows.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "cpuPercent": row.cpu_percent,
+            "memoryBytes": row.memory_bytes,
+            "memoryLimitBytes": row.memory_limit_bytes,
+            "networkRxBytes": row.net_rx_bytes,
+            "networkTxBytes": row.net_tx_bytes,
+            "blockReadBytes": row.block_read_bytes,
+            "blockWriteBytes": row.block_write_bytes,
         })).collect::<Vec<_>>(),
     }))
     .into_response())
@@ -1435,7 +1527,7 @@ async fn list_system_identities(
     .into_response())
 }
 
-// ── Local account management (DMN-099, see docs/user-management.md) ──
+// ── Local account management (DMN-100, see docs/user-management.md) ──
 
 fn managed_user_json(u: &users::ManagedUser) -> serde_json::Value {
     serde_json::json!({

@@ -79,6 +79,8 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `PUT /v1/apps/{id}/settings {"values": {...}}` | — (пока только REST) | Заменить выбранные значения; ключи, которых нет в схеме самого приложения, отклоняются. gRPC-аналог ждёт моделирования схемы настроек в proto-контрактах |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Удаление с данными |
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Временный токен консоли |
+| `GET /v1/docker/containers?all=&size=` | `DockerService.ListContainers` (DMN-102) | Все контейнеры хоста — и ASC-овские, и чужие, — с определённым приложением-владельцем там, где оно есть. `size=1` заставляет Engine обойти writable-слой каждого контейнера, поэтому по умолчанию выключено. **Только root-контекст** |
+| `GET /v1/docker/stats?ids=a,b` | `DockerService.ListContainerStats` (DMN-112) | Живые CPU/память/сеть/диск контейнеров; `ids` фильтрует **до** окна сэмплирования, пусто — все запущенные. Стоит одного окна ~500 мс на весь набор. **Только root-контекст** |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Состояние токенов: вид, число живых временных, окно ротации, усечённый дайджест основного — никогда сам токен |

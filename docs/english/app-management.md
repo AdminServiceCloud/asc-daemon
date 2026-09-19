@@ -64,6 +64,41 @@ Why a second identifier: an `id` is **reusable**. Removing `helloworld-2` frees 
 - `asc app clone` gives the clone its **own** UUID — it is a separate instance, not a copy of an identity.
 - Exposed by the API as `App.uuid` (proto field 10, REST `uuid`), absent when unset.
 
+### 🐳 Host containers (DMN-102/DMN-112)
+
+`asc docker ps` lists **every** container on the host, not just the ones ASC
+installed, and `asc docker stats` reports their live CPU and memory. Both go
+through the Engine API like the rest of the driver, and both are **root
+only**: a container ASC did not create has no owner for the ownership check
+to work against, so there is nothing to scope a non-root caller to.
+
+- A container that *is* an ASC application is marked as such. The link is
+  resolved from each application's own `meta.json` runtime, **never** by
+  looking for an `asc-` prefix on the container name: that prefix is a naming
+  convention the daemon happens to use, not a claim of ownership, and an
+  operator is free to name a hand-made container the same way.
+- Compose's `com.docker.compose.project` / `.service` labels are lifted out of
+  the raw label map into their own fields, so a caller does not have to know
+  how Compose spells its own keys.
+- **Sizes are opt-in** (`asc docker ps -s`, `size=1`): the Engine walks every
+  container's writable layer to answer, which is a visible pause on a busy
+  host and pointless for a caller that only wants the list.
+- **Stats are a separate call**, not a column of the list. A CPU percentage
+  needs two readings ~500 ms apart, and the listing must not pay that cost
+  every time it is opened — the same split `asc ls` and `asc stats` already
+  make. The two readings are taken around one shared sleep, so asking about
+  fifty containers costs the same ~500 ms as asking about one, and the id
+  filter is applied *before* the window rather than after.
+- A container that disappears between the two readings is simply left out of
+  the result: that is an ordinary race, not a failed call.
+
+**Lifecycle control is deliberately absent here.** An ASC application's
+container must not be started or stopped behind the application manager's
+back — `desired_state` is reconciled after a daemon restart, so the container
+would come straight back and the operator would read that as a bug; use
+`asc app start|stop` instead. A container ASC does not own has no
+authorization model at all, which is a separate task with its own capability.
+
 ### ⚙️ Core
 
 - **Drivers**: the `AppDriver { start, stop, restart, state, logs, remove }` trait with implementations `DockerDriver` (via the **Docker Engine API over the unix socket** — not the `docker` CLI; the socket path is configurable — `[docker] socket`, default `/var/run/docker.sock`), `SystemdDriver` (units `asc-app-<id>.service`), `ProcessDriver` (supervised PID: a pid file and a log file in the application directory). Application installation (creating a container/unit from the manifest) is the package manager's job (DMN-003).
@@ -71,8 +106,8 @@ Why a second identifier: an `id` is **reusable**. Removing `helloworld-2` frees 
 - **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple *nodes* running the platform together. Multiple instances of one application on a single node already work (DMN-033/034, above).
-- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself).
+- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself), `asc docker ps|stats` (host containers).
 
 ## 🔗 Related tasks
 
-DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, DMN-053, FE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, DMN-053, DMN-102, DMN-112, FE-005, FE-108 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

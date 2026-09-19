@@ -21,6 +21,7 @@ use crate::daemon::users;
 use pb::app_service_server::{AppService, AppServiceServer};
 use pb::credential_service_server::{CredentialService, CredentialServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
+use pb::docker_service_server::{DockerService, DockerServiceServer};
 use pb::file_service_server::{FileService, FileServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
 use pb::source_service_server::{SourceService, SourceServiceServer};
@@ -38,7 +39,8 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(SourceServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(CredentialServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(FileServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(UserServiceServer::new(Grpc(state)))
+        .add_service(UserServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(DockerServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 
@@ -1562,7 +1564,7 @@ fn authorized_key_to_pb(k: users::AuthorizedKey) -> pb::AuthorizedKey {
     }
 }
 
-/// Local Linux account management (DMN-099, see docs/user-management.md):
+/// Local Linux account management (DMN-100, see docs/user-management.md):
 /// every method is root-gated, mirroring `FileService` above — whole-machine
 /// account administration, not scoped per calling user.
 #[tonic::async_trait]
@@ -1705,5 +1707,87 @@ impl UserService for Grpc {
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::RemoveAuthorizedKeyResponse {}))
+    }
+}
+/// Docker host inventory (DMN-102/DMN-112, see docs/app-management.md): the
+/// whole Engine, not just ASC's own containers. Root-only — the service
+/// layer enforces it, the same way FileService/UserService do.
+#[tonic::async_trait]
+impl DockerService for Grpc {
+    async fn list_containers(
+        &self,
+        request: Request<pb::ListContainersRequest>,
+    ) -> Result<Response<pb::ListContainersResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let rows = self
+            .0
+            .list_containers(ctx, req.all, req.with_size)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListContainersResponse {
+            containers: rows.iter().map(container_to_pb).collect(),
+        }))
+    }
+
+    async fn list_container_stats(
+        &self,
+        request: Request<pb::ListContainerStatsRequest>,
+    ) -> Result<Response<pb::ListContainerStatsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let rows = self
+            .0
+            .list_container_stats(ctx, request.into_inner().ids)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListContainerStatsResponse {
+            stats: rows.iter().map(container_stats_to_pb).collect(),
+        }))
+    }
+}
+
+fn container_to_pb(row: &super::ContainerRow) -> pb::Container {
+    let info = &row.info;
+    pb::Container {
+        id: info.id.clone(),
+        names: info.names.clone(),
+        image: info.image.clone(),
+        image_id: info.image_id.clone(),
+        state: info.state.clone(),
+        status: info.status.clone(),
+        created: info.created,
+        ports: info
+            .ports
+            .iter()
+            .map(|port| pb::ContainerPort {
+                private_port: port.private as u32,
+                public_port: port.public.map(u32::from),
+                protocol: port.protocol.clone(),
+                ip: port.ip.clone(),
+            })
+            .collect(),
+        labels: info.labels.clone(),
+        app_id: row.app_id.clone(),
+        app_uuid: row.app_uuid.clone(),
+        compose_project: info.compose_project.clone(),
+        compose_service: info.compose_service.clone(),
+        size_rw: info.size_rw,
+        size_root_fs: info.size_root_fs,
+        networks: info.networks.clone(),
+    }
+}
+
+fn container_stats_to_pb(row: &super::ContainerStatsRow) -> pb::ContainerStats {
+    pb::ContainerStats {
+        id: row.id.clone(),
+        cpu_percent: row.cpu_percent,
+        memory_bytes: row.memory_bytes,
+        // A container without a limit reports 0 here; the proto comment says
+        // so, and the platform renders it as "no limit" rather than "0 bytes".
+        memory_limit_bytes: row.memory_limit_bytes.unwrap_or(0),
+        network_rx_bytes: row.net_rx_bytes.unwrap_or(0),
+        network_tx_bytes: row.net_tx_bytes.unwrap_or(0),
+        block_read_bytes: row.block_read_bytes.unwrap_or(0),
+        block_write_bytes: row.block_write_bytes.unwrap_or(0),
     }
 }

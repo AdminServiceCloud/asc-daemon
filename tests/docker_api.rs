@@ -130,6 +130,12 @@ fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String
     if path.contains("/images/") && path.contains("private") && path.ends_with("/json") {
         return ("404 Not Found", r#"{"message":"no such image"}"#.into());
     }
+    // `docker ps`: the container *list*, not one container's inspect — it
+    // has to be matched before the generic `/json` arm below, which both
+    // paths would otherwise hit.
+    if path.ends_with("/containers/json") {
+        return ("200 OK", CONTAINER_LIST.into());
+    }
     if path.contains("missing") && path.ends_with("/json") {
         return ("404 Not Found", r#"{"message":"no such container"}"#.into());
     }
@@ -144,6 +150,47 @@ fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String
     }
     ("404 Not Found", r#"{"message":"unhandled"}"#.into())
 }
+
+/// Fixture for `GET /containers/json` (DMN-102): one container that belongs
+/// to an ASC app, one raised by Compose, one stopped and unpublished.
+const CONTAINER_LIST: &str = r#"[
+  {
+    "Id": "aaaa000000000000000000000000000000000000000000000000000000000001",
+    "Names": ["/asc-helloworld"],
+    "Image": "ghcr.io/acme/hello:1.0",
+    "ImageID": "sha256:abc",
+    "State": "running",
+    "Status": "Up 3 hours",
+    "Created": 1700000000,
+    "Ports": [{"IP": "0.0.0.0", "PrivatePort": 3000, "PublicPort": 8080, "Type": "tcp"}],
+    "Labels": {"maintainer": "acme"},
+    "NetworkSettings": {"Networks": {"bridge": {}}}
+  },
+  {
+    "Id": "bbbb000000000000000000000000000000000000000000000000000000000002",
+    "Names": ["/shop-db-1"],
+    "Image": "postgres:16",
+    "ImageID": "sha256:def",
+    "State": "running",
+    "Status": "Up 2 days",
+    "Created": 1700000100,
+    "Ports": [{"PrivatePort": 5432, "Type": "tcp"}],
+    "Labels": {
+      "com.docker.compose.project": "shop",
+      "com.docker.compose.service": "db"
+    },
+    "NetworkSettings": {"Networks": {"shop_default": {}, "bridge": {}}}
+  },
+  {
+    "Id": "cccc000000000000000000000000000000000000000000000000000000000003",
+    "Names": ["/manual"],
+    "Image": "alpine:3.20",
+    "ImageID": "sha256:ghi",
+    "State": "exited",
+    "Status": "Exited (0) 5 minutes ago",
+    "Created": 1700000200
+  }
+]"#;
 
 fn wait_for_socket(path: &Path) {
     for _ in 0..50 {
@@ -496,4 +543,90 @@ fn missing_socket_is_a_friendly_error() {
         msg.contains("/nonexistent/docker.sock"),
         "error should name the socket path, got: {msg}"
     );
+}
+/// The Engine's container summaries reach the daemon's own shape intact:
+/// names lose the historic leading slash, Compose labels are lifted into
+/// their own fields, an exposed-only port keeps no host side, and a
+/// container with no networks reports none rather than failing to parse.
+#[test]
+fn container_list_maps_engine_summaries() {
+    let (cfg, _dir, _hits) = test_cfg();
+
+    let containers = docker::list_containers(&cfg, true, false).unwrap();
+    assert_eq!(containers.len(), 3);
+
+    let app = &containers[0];
+    assert_eq!(app.names, vec!["asc-helloworld".to_string()]);
+    assert_eq!(app.image, "ghcr.io/acme/hello:1.0");
+    assert_eq!(app.state, "running");
+    assert_eq!(app.status, "Up 3 hours");
+    assert_eq!(app.created, 1_700_000_000);
+    assert_eq!(app.ports.len(), 1);
+    assert_eq!(app.ports[0].private, 3000);
+    assert_eq!(app.ports[0].public, Some(8080));
+    assert_eq!(app.ports[0].protocol, "tcp");
+    assert_eq!(app.ports[0].ip, "0.0.0.0");
+    assert_eq!(app.networks, vec!["bridge".to_string()]);
+    // The list itself never claims ownership — that is resolved against the
+    // app store one layer up, so nothing here may guess from the name.
+    assert_eq!(app.compose_project, None);
+
+    let compose = &containers[1];
+    assert_eq!(compose.compose_project.as_deref(), Some("shop"));
+    assert_eq!(compose.compose_service.as_deref(), Some("db"));
+    // Exposed but not published: no host side at all, not a zero.
+    assert_eq!(compose.ports[0].public, None);
+    // Networks come back sorted, so a caller can compare them directly.
+    assert_eq!(
+        compose.networks,
+        vec!["bridge".to_string(), "shop_default".to_string()]
+    );
+
+    let manual = &containers[2];
+    assert_eq!(manual.names, vec!["manual".to_string()]);
+    assert_eq!(manual.state, "exited");
+    assert!(manual.ports.is_empty());
+    assert!(manual.networks.is_empty());
+    assert!(manual.labels.is_empty());
+}
+
+/// Sizes are opt-in: `size=1` makes the Engine walk every container's
+/// writable layer, so a plain listing must never ask for it.
+#[test]
+fn container_list_asks_for_sizes_only_when_requested() {
+    let (cfg, _dir, hits) = test_cfg();
+
+    docker::list_containers(&cfg, false, false).unwrap();
+    let plain = hits.lock().unwrap().clone();
+    let plain = plain
+        .iter()
+        .find(|h| h.contains("/containers/json"))
+        .expect("no container list request recorded");
+    assert!(
+        plain.contains("size=false") || !plain.contains("size=true"),
+        "a plain listing must not request sizes: {plain}"
+    );
+
+    let (cfg, _dir, hits) = test_cfg();
+    docker::list_containers(&cfg, false, true).unwrap();
+    let sized = hits.lock().unwrap().clone();
+    let sized = sized
+        .iter()
+        .find(|h| h.contains("/containers/json"))
+        .expect("no container list request recorded");
+    assert!(
+        sized.contains("size=true"),
+        "an explicit size request must reach the Engine: {sized}"
+    );
+}
+
+/// A container the Engine reports without sizes must not read as "0 bytes"
+/// just because the caller asked for them.
+#[test]
+fn container_list_leaves_missing_sizes_unset() {
+    let (cfg, _dir, _hits) = test_cfg();
+
+    let containers = docker::list_containers(&cfg, true, true).unwrap();
+    assert!(containers.iter().all(|c| c.size_rw.is_none()));
+    assert!(containers.iter().all(|c| c.size_root_fs.is_none()));
 }

@@ -192,7 +192,9 @@ mod rest {
                 "app.stats",
                 "app.ports",
                 "app.uptime",
-                "users"
+                "users",
+                "docker.containers",
+                "docker.stats"
             ]
         );
 
@@ -579,7 +581,9 @@ mod grpc {
                 "app.stats",
                 "app.ports",
                 "app.uptime",
-                "users"
+                "users",
+                "docker.containers",
+                "docker.stats"
             ]
         );
 

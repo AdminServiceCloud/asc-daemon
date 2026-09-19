@@ -66,6 +66,6 @@ An account's `~/.ssh/authorized_keys` path is always derived from its **resolved
 
 ## 🔗 Related tasks
 
-- DMN-099 — `UserService` implementation in the daemon.
+- DMN-100 — `UserService` implementation in the daemon.
 - The `users` capability flag (see `ApiState::CAPABILITIES`) gates the platform's "Users" tab client-side, the same pattern as `sources`/`credentials`.
 - [📁 files](files.md) — the neighboring, node-wide file API; `UserService` follows the same root-gating discipline but has no `app_id` scoping.

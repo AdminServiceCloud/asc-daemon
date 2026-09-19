@@ -150,6 +150,12 @@ enum Command {
     Search { query: String },
     /// Refresh registry indexes (bypass the cache)
     Update,
+    /// Inspect the node's Docker Engine: every container on the host, not
+    /// just ASC apps (root only)
+    Docker {
+        #[command(subcommand)]
+        action: DockerAction,
+    },
     /// Manage registry sources: your own list; under sudo — the system list
     /// shared by all users
     Source {
@@ -216,6 +222,27 @@ enum LsAction {
     Disk,
     /// CPU, memory and disk stats per app (same as `asc stats`)
     Stats,
+}
+
+/// `asc docker <action>` (DMN-102/DMN-112): the node's Docker Engine as a
+/// whole, not just ASC's own apps. Root only — a container ASC did not
+/// create has no owner to authorize a non-root caller against.
+#[derive(Subcommand)]
+enum DockerAction {
+    /// List containers on this host, ASC-managed or not
+    Ps {
+        /// Include stopped containers
+        #[arg(short, long)]
+        all: bool,
+        /// Ask the Engine for container sizes (walks every writable layer)
+        #[arg(short, long)]
+        size: bool,
+    },
+    /// Live CPU and memory of containers (samples twice ~500 ms apart)
+    Stats {
+        /// Container ids or names; all running containers when omitted
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -771,6 +798,7 @@ fn run() -> anyhow::Result<()> {
             println!("{}", tf2(Msg::UpdateDone, updated.len(), total));
             Ok(())
         }
+        Command::Docker { action } => docker_cmd(action, &config),
         Command::Source { action } => source_cmd(action),
         Command::Auth { action } => auth_cmd(action),
         Command::Backup { action } => backup_cmd(action, &config),
@@ -2421,6 +2449,220 @@ fn print_disk_summary(rows: &[DiskRow], fs_total: Option<u64>, show_user: bool) 
                 monitor::human_bytes(row.bytes),
             );
         }
+    }
+}
+
+/// `asc docker <action>` (DMN-102/DMN-112). Through the daemon when its
+/// socket is there, in-process otherwise — the same two-backend shape
+/// [`ports_cmd`] uses.
+fn docker_cmd(action: DockerAction, config: &Config) -> anyhow::Result<()> {
+    match action {
+        DockerAction::Ps { all, size } => docker_ps_cmd(all, size, config),
+        DockerAction::Stats { ids } => docker_stats_cmd(&ids, config),
+    }
+}
+
+/// Refuse a non-root caller on the in-process path. The daemon enforces the
+/// same rule in its service layer; this is the local mirror of it, so `asc
+/// docker ps` behaves identically with and without a running daemon.
+fn require_root_for_docker() -> anyhow::Result<()> {
+    if UserContext::current().is_root {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", t(Msg::DockerRootRequired))
+    }
+}
+
+fn docker_ps_cmd(all: bool, size: bool, config: &Config) -> anyhow::Result<()> {
+    let rows: Vec<ContainerRow> = if let Some(daemon) = daemon_backend(config)? {
+        daemon
+            .list_containers(all, size)?
+            .into_iter()
+            .map(|c| ContainerRow {
+                name: c.names.first().cloned().unwrap_or(c.id.clone()),
+                id: c.id,
+                image: c.image,
+                state: c.state,
+                status: c.status,
+                owner: c.app_id,
+                ports: port_labels(
+                    c.ports
+                        .iter()
+                        .map(|p| container_port_label(p.private, p.public, &p.protocol)),
+                ),
+                size_rw: c.size_rw,
+            })
+            .collect()
+    } else {
+        require_root_for_docker()?;
+        let manager = AppManager::new(config);
+        let ctx = UserContext::current();
+        let owners: std::collections::HashMap<String, String> = manager
+            .list(&ctx)?
+            .into_iter()
+            .filter_map(|app| match &app.meta.runtime {
+                asc_daemon::daemon::apps::meta::Runtime::Docker { container, .. } => {
+                    Some((container.clone(), app.meta.id.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        docker::list_containers(&config.docker, all, size)?
+            .into_iter()
+            .map(|c| ContainerRow {
+                owner: c.names.iter().find_map(|n| owners.get(n).cloned()),
+                name: c.names.first().cloned().unwrap_or(c.id.clone()),
+                id: c.id,
+                image: c.image,
+                state: c.state,
+                status: c.status,
+                ports: port_labels(
+                    c.ports
+                        .iter()
+                        .map(|p| container_port_label(p.private, p.public, &p.protocol)),
+                ),
+                size_rw: c.size_rw,
+            })
+            .collect()
+    };
+    print_container_list(&rows, size);
+    Ok(())
+}
+
+fn docker_stats_cmd(ids: &[String], config: &Config) -> anyhow::Result<()> {
+    if let Some(daemon) = daemon_backend(config)? {
+        let rows = daemon.container_stats(ids)?;
+        print_container_stats(
+            &rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.id.clone(),
+                        r.cpu_percent,
+                        r.memory_bytes,
+                        r.memory_limit_bytes,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        return Ok(());
+    }
+    require_root_for_docker()?;
+    // In-process: the same two readings around one shared sleep the daemon
+    // takes, so `asc docker stats` reads the same with and without a daemon.
+    let cfg = &config.docker;
+    let targets: Vec<String> = if ids.is_empty() {
+        docker::list_containers(cfg, false, false)?
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    } else {
+        ids.to_vec()
+    };
+    let first: Vec<Option<docker::ContainerUsage>> = targets
+        .iter()
+        .map(|id| docker::stats_usage(cfg, id).unwrap_or(None))
+        .collect();
+    let started = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let elapsed_micros = started.elapsed().as_micros() as u64;
+    let mut rows = Vec::with_capacity(targets.len());
+    for (id, first) in targets.into_iter().zip(first) {
+        let (Some(first), Some(second)) = (first, docker::stats_usage(cfg, &id).unwrap_or(None))
+        else {
+            continue;
+        };
+        let cpu = if elapsed_micros == 0 {
+            0.0
+        } else {
+            second.cpu_time_micros.saturating_sub(first.cpu_time_micros) as f64
+                / elapsed_micros as f64
+                * 100.0
+        };
+        rows.push((id, cpu, second.memory_bytes, second.memory_limit_bytes));
+    }
+    print_container_stats(&rows);
+    Ok(())
+}
+
+/// One container line of `asc docker ps`, from either backend.
+struct ContainerRow {
+    id: String,
+    name: String,
+    image: String,
+    state: String,
+    status: String,
+    /// Id of the ASC app this container belongs to, when it belongs to one.
+    owner: Option<String>,
+    ports: Vec<String>,
+    size_rw: Option<u64>,
+}
+
+/// Port labels for one container, deduplicated.
+///
+/// The Engine reports a published port once per host bind address, so a
+/// plain `-p 8080:80` comes back twice — once for `0.0.0.0`, once for `::`.
+/// The API keeps both rows (the bind address is real information); this line
+/// does not show the address, so printing `8080->80/tcp` twice would read as
+/// a bug.
+fn port_labels(labels: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for label in labels {
+        if !out.contains(&label) {
+            out.push(label);
+        }
+    }
+    out
+}
+
+/// `3000/tcp` for an exposed-only port, `8080->3000/tcp` for a published one.
+fn container_port_label(private: u16, public: Option<u16>, protocol: &str) -> String {
+    let protocol = if protocol.is_empty() { "tcp" } else { protocol };
+    match public {
+        Some(public) => format!("{public}->{private}/{protocol}"),
+        None => format!("{private}/{protocol}"),
+    }
+}
+
+fn print_container_list(rows: &[ContainerRow], with_size: bool) {
+    if rows.is_empty() {
+        println!("{}", t(Msg::DockerNoContainers));
+        return;
+    }
+    for row in rows {
+        let short = row.id.chars().take(12).collect::<String>();
+        let owner = row
+            .owner
+            .as_deref()
+            .map(|id| format!("  [{id}]"))
+            .unwrap_or_default();
+        println!("{short}  {}  {}{owner}", row.name, row.image);
+        println!("  {} — {}", row.state, row.status);
+        if !row.ports.is_empty() {
+            println!("  {}", row.ports.join(", "));
+        }
+        if with_size && let Some(bytes) = row.size_rw {
+            println!("  {}", monitor::human_bytes(bytes));
+        }
+    }
+}
+
+fn print_container_stats(rows: &[(String, f64, u64, Option<u64>)]) {
+    if rows.is_empty() {
+        println!("{}", t(Msg::DockerNoContainers));
+        return;
+    }
+    for (id, cpu, memory, limit) in rows {
+        let short = id.chars().take(12).collect::<String>();
+        let memory = match limit {
+            Some(limit) if *limit > 0 => format!(
+                "{} / {}",
+                monitor::human_bytes(*memory),
+                monitor::human_bytes(*limit)
+            ),
+            _ => monitor::human_bytes(*memory),
+        };
+        println!("{short}  {cpu:.1}%  {memory}");
     }
 }
 

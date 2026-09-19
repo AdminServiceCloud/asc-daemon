@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 use crate::daemon::apps::meta::AppMeta;
 use crate::daemon::apps::{AppManager, AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::config::Config;
+use crate::daemon::docker;
 use crate::daemon::files;
 use crate::daemon::monitor::Monitor;
 use crate::daemon::pkg;
@@ -52,6 +53,8 @@ pub const CAPABILITIES: &[&str] = &[
     "app.ports",
     "app.uptime",
     "users",
+    "docker.containers",
+    "docker.stats",
 ];
 
 /// Shared state behind both transports.
@@ -90,6 +93,69 @@ pub struct AppPortsRow {
     pub name: String,
     pub owner: String,
     pub ports: Vec<crate::daemon::docker::PublishedPort>,
+}
+
+/// Milliseconds between the two readings a CPU percentage is derived from.
+/// The same window `AppManager::stats_for` uses, so `asc docker stats` and
+/// `asc stats` are directly comparable.
+const STATS_SAMPLE_MILLIS: u64 = 500;
+
+/// One container of [`ApiState::list_containers`], with the ASC app it
+/// belongs to resolved (if any).
+pub struct ContainerRow {
+    pub info: docker::ContainerInfo,
+    /// Id of the installed app whose runtime is this container.
+    pub app_id: Option<String>,
+    /// That app's stable uuid; absent for apps installed before DMN-044.
+    pub app_uuid: Option<String>,
+}
+
+/// One container's live resource usage — see
+/// [`ApiState::list_container_stats`].
+pub struct ContainerStatsRow {
+    pub id: String,
+    /// Percent of one host CPU; can exceed 100 on a multi-core host.
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
+    /// `None` when the container has no memory limit — the common case, and
+    /// why a caller must not render it as 0.
+    pub memory_limit_bytes: Option<u64>,
+    pub net_rx_bytes: Option<u64>,
+    pub net_tx_bytes: Option<u64>,
+    pub block_read_bytes: Option<u64>,
+    pub block_write_bytes: Option<u64>,
+}
+
+/// One counter reading of a container, or `None` with a warning logged.
+///
+/// A container that vanished mid-sample, or an Engine hiccup on one
+/// container out of fifty, must not fail the whole listing: the row is
+/// simply dropped further up.
+fn usage_or_warn(
+    cfg: &crate::daemon::config::DockerConfig,
+    id: &str,
+) -> Option<docker::ContainerUsage> {
+    match docker::stats_usage(cfg, id) {
+        Ok(usage) => usage,
+        Err(err) => {
+            warn!(container = %id, error = %format!("{err:#}"), "cannot query container stats");
+            None
+        }
+    }
+}
+
+/// CPU percentage from two cumulative readings over a wall-clock interval —
+/// the same arithmetic `apps::cpu_percent` does for apps.
+fn cpu_percent_between(
+    first: &docker::ContainerUsage,
+    second: &docker::ContainerUsage,
+    elapsed_micros: u64,
+) -> f64 {
+    if elapsed_micros == 0 {
+        return 0.0;
+    }
+    let delta = second.cpu_time_micros.saturating_sub(first.cpu_time_micros);
+    delta as f64 / elapsed_micros as f64 * 100.0
 }
 
 /// One event of [`ApiState::install_stream`]: a progress line, or the
@@ -203,6 +269,30 @@ impl ApiState {
         tokio::task::spawn_blocking(move || f(&state))
             .await
             .context("api worker task panicked")?
+    }
+
+    /// Map of container name -> (app id, app uuid) for every installed
+    /// docker app the caller can see.
+    ///
+    /// Built from each app's own `AppMeta.runtime`, never by looking for an
+    /// `asc-` prefix on the container name: that prefix is a naming
+    /// convention the daemon happens to use, not a claim of ownership, and
+    /// an operator is free to name a hand-made container the same way.
+    fn container_owners(
+        &self,
+        ctx: &UserContext,
+    ) -> Result<std::collections::HashMap<String, (String, Option<String>)>> {
+        let mut owners = std::collections::HashMap::new();
+        for app in self.manager.list(ctx)? {
+            if let crate::daemon::apps::meta::Runtime::Docker { container, .. } = &app.meta.runtime
+            {
+                owners.insert(
+                    container.clone(),
+                    (app.meta.id.clone(), app.meta.uuid.clone()),
+                );
+            }
+        }
+        Ok(owners)
     }
 
     pub async fn status(self: &Arc<Self>, ctx: UserContext) -> Result<(usize, usize)> {
@@ -1130,7 +1220,104 @@ impl ApiState {
         .await
     }
 
-    // ── Local account management (DMN-099, see docs/user-management.md) ──
+    // ── Docker host inventory (DMN-102/DMN-112, see docs/app-management.md) ──
+
+    /// Every container on the node's Docker Engine, with the ones belonging
+    /// to installed ASC apps identified.
+    ///
+    /// Root-only: a container ASC did not create has no owner for
+    /// [`AppManager::get_authorized`] to check against, so there is nothing
+    /// to scope a non-root caller to. TCP callers always present
+    /// [`api_context`], so in practice this only bites the unix socket.
+    pub async fn list_containers(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        all: bool,
+        with_size: bool,
+    ) -> Result<Vec<ContainerRow>> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let containers = docker::list_containers(&s.config.docker, all, with_size)?;
+            let owners = s.container_owners(&ctx)?;
+            Ok(containers
+                .into_iter()
+                .map(|info| {
+                    let owner = info
+                        .names
+                        .iter()
+                        .find_map(|name| owners.get(name.as_str()))
+                        .cloned();
+                    ContainerRow {
+                        app_id: owner.as_ref().map(|(id, _)| id.clone()),
+                        app_uuid: owner.and_then(|(_, uuid)| uuid),
+                        info,
+                    }
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Live resource usage of `ids` (empty = every running container), like
+    /// `docker stats --no-stream`.
+    ///
+    /// Two readings around one shared sleep, exactly as
+    /// [`AppManager::stats_for`] does it: every container's first counter is
+    /// taken, the thread sleeps once, then every second counter is taken. The
+    /// sampling window is therefore ~500 ms in total rather than 500 ms per
+    /// container, and the filter is applied *before* it — asking about one
+    /// container must not cost the sampling time of all of them.
+    pub async fn list_container_stats(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        ids: Vec<String>,
+    ) -> Result<Vec<ContainerStatsRow>> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let cfg = &s.config.docker;
+            // Resolve the id set from the live container list so that a name
+            // works as well as an id, and so that "empty means all running"
+            // needs no special case further down.
+            let targets: Vec<String> = if ids.is_empty() {
+                docker::list_containers(cfg, false, false)?
+                    .into_iter()
+                    .map(|info| info.id)
+                    .collect()
+            } else {
+                ids
+            };
+
+            let first: Vec<Option<docker::ContainerUsage>> =
+                targets.iter().map(|id| usage_or_warn(cfg, id)).collect();
+            let started = std::time::Instant::now();
+            std::thread::sleep(std::time::Duration::from_millis(STATS_SAMPLE_MILLIS));
+            let elapsed_micros = started.elapsed().as_micros() as u64;
+
+            let mut rows = Vec::with_capacity(targets.len());
+            for (id, first) in targets.into_iter().zip(first) {
+                let (Some(first), Some(second)) = (first, usage_or_warn(cfg, &id)) else {
+                    // The container stopped or was removed between the two
+                    // readings — an ordinary race, not a failed call. Leave
+                    // it out rather than reporting zeroes.
+                    continue;
+                };
+                rows.push(ContainerStatsRow {
+                    id,
+                    cpu_percent: cpu_percent_between(&first, &second, elapsed_micros),
+                    memory_bytes: second.memory_bytes,
+                    memory_limit_bytes: second.memory_limit_bytes,
+                    net_rx_bytes: second.net_rx_bytes,
+                    net_tx_bytes: second.net_tx_bytes,
+                    block_read_bytes: second.disk_read_bytes,
+                    block_write_bytes: second.disk_write_bytes,
+                });
+            }
+            Ok(rows)
+        })
+        .await
+    }
+
+    // ── Local account management (DMN-100, see docs/user-management.md) ──
 
     pub async fn list_users(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<users::ManagedUser>> {
         self.blocking(move |_| {

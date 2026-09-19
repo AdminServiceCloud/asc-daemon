@@ -1,4 +1,4 @@
-//! Local Linux account management (DMN-099): list every local account
+//! Local Linux account management (DMN-100): list every local account
 //! (including root), create/delete accounts, lock/unlock, change shell,
 //! manage supplementary groups (sudo, docker, ...), and deploy an SSH
 //! public key into an account's `~/.ssh/authorized_keys`. See

@@ -1350,3 +1350,114 @@ message RemoveAuthorizedKeyRequest {
 }
 
 message RemoveAuthorizedKeyResponse {}
+// Everything on the node's Docker Engine — ASC-owned or not (DMN-102). A
+// separate service rather than more methods on AppService: AppService is
+// about *ASC applications*, this is host inventory, and the platform gates
+// the whole family on one capability.
+//
+// Root context only. A container ASC did not create has no owner for
+// AppManager::get_authorized to check against, so there is nothing to scope
+// a non-root caller to — the same reasoning FileService uses.
+//
+// Read-only by design. Lifecycle control over arbitrary containers is
+// deliberately *not* here: an ASC app's container must not be stopped behind
+// AppManager's back (desired_state would bring it straight back after a
+// daemon restart, which reads as a bug), and a container ASC does not own has
+// no authorization model at all. That is its own task, behind its own
+// capability.
+service DockerService {
+  rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
+  // Live resource usage of the requested containers (DMN-112), like
+  // `docker stats --no-stream`. Kept separate from ListContainers because a
+  // CPU percentage needs two readings ~500ms apart, and the container list
+  // must not pay that cost every time it is opened — the same split
+  // AppService.ListApps/GetAppStats already makes.
+  rpc ListContainerStats(ListContainerStatsRequest) returns (ListContainerStatsResponse);
+}
+
+message ListContainersRequest {
+  // False = running containers only, like `docker ps`.
+  bool all = 1;
+  // Ask the Engine for SizeRw/SizeRootFs (`docker ps -s`). Off by default:
+  // it makes the Engine walk every container's writable layer, which is a
+  // visible pause on a node with dozens of containers and pointless for a
+  // caller that only wants the list.
+  bool with_size = 2;
+}
+
+message ListContainersResponse {
+  repeated Container containers = 1;
+}
+
+message Container {
+  // Full 64-hex id, never the short form: the caller decides how to abbreviate.
+  string id = 1;
+  // Container names with the Engine's leading '/' stripped.
+  repeated string names = 2;
+  string image = 3;
+  string image_id = 4;
+  // created | running | paused | restarting | removing | exited | dead.
+  // Free-form on purpose — the Engine's vocabulary is not ours to freeze.
+  string state = 5;
+  // Human-readable Engine status line ("Up 3 hours", "Exited (0) 2 days ago").
+  string status = 6;
+  // Creation time, unix seconds.
+  int64 created = 7;
+  repeated ContainerPort ports = 8;
+  map<string, string> labels = 9;
+  // Set when this container belongs to an installed ASC app. Resolved by
+  // matching the container name against the app's own AppMeta.runtime, never
+  // by parsing the "asc-" prefix out of the name: that prefix is a naming
+  // convention, not a claim of ownership, and an operator can name anything
+  // that way.
+  optional string app_id = 10;
+  optional string app_uuid = 11;
+  // com.docker.compose.project / .service, lifted out of `labels` so callers
+  // do not have to know how Compose spells its own keys.
+  optional string compose_project = 12;
+  optional string compose_service = 13;
+  // Writable-layer and total sizes; only set when with_size was requested.
+  optional uint64 size_rw = 14;
+  optional uint64 size_root_fs = 15;
+  // Names of the networks the container is attached to.
+  repeated string networks = 16;
+}
+
+message ContainerPort {
+  uint32 private_port = 1;
+  // Absent for a port that is exposed but not published to the host.
+  optional uint32 public_port = 2;
+  // tcp | udp | sctp.
+  string protocol = 3;
+  // Host bind address of a published port ("0.0.0.0", "::", "127.0.0.1").
+  string ip = 4;
+}
+
+message ListContainerStatsRequest {
+  // Container ids or names; empty = every running container. Applied
+  // *before* the sampling window, not after — asking for one container must
+  // not cost the sampling time of every container on the node.
+  repeated string ids = 1;
+}
+
+message ListContainerStatsResponse {
+  // One entry per container that was still alive for both readings. A
+  // container that disappeared mid-sample is simply absent: that is an
+  // ordinary race, not a failure of the call.
+  repeated ContainerStats stats = 1;
+}
+
+message ContainerStats {
+  // Full id, matching Container.id.
+  string id = 1;
+  // Percent of one host CPU, like `docker stats` — can exceed 100 on a
+  // multi-core host.
+  double cpu_percent = 2;
+  uint64 memory_bytes = 3;
+  // 0 when the container has no memory limit.
+  uint64 memory_limit_bytes = 4;
+  uint64 network_rx_bytes = 5;
+  uint64 network_tx_bytes = 6;
+  uint64 block_read_bytes = 7;
+  uint64 block_write_bytes = 8;
+}

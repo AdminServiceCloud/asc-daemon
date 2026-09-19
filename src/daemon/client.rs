@@ -29,7 +29,7 @@ use crate::daemon::api::uds::{SUDO_UID_HEADER, SUDO_USER_HEADER};
 use crate::daemon::apps::disk::DiskUsage;
 use crate::daemon::config::Config;
 use crate::daemon::docker::PublishedPort;
-use crate::daemon::i18n::{Msg, tf};
+use crate::daemon::i18n::{Msg, t, tf};
 use crate::daemon::pkg;
 use crate::daemon::pkg::settings::{SettingValues, SettingsFile};
 
@@ -98,6 +98,57 @@ pub struct RemotePortsRow {
     pub name: String,
     pub owner: String,
     pub ports: Vec<PublishedPort>,
+}
+
+/// One published or exposed port of a container, as the Engine reports it
+/// in the container list (DMN-102). Unlike [`PublishedPort`], which is what
+/// an app's manifest *asks for*, a merely exposed port has no host side.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteContainerPort {
+    pub private: u16,
+    pub public: Option<u16>,
+    pub protocol: String,
+    pub ip: String,
+}
+
+/// One container on the host — ASC-managed or not (DMN-102).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteContainer {
+    pub id: String,
+    pub names: Vec<String>,
+    pub image: String,
+    pub image_id: String,
+    pub state: String,
+    pub status: String,
+    pub created: i64,
+    pub ports: Vec<RemoteContainerPort>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+    /// Set when the container is the runtime of an installed ASC app.
+    pub app_id: Option<String>,
+    pub app_uuid: Option<String>,
+    pub compose_project: Option<String>,
+    pub compose_service: Option<String>,
+    pub size_rw: Option<u64>,
+    pub size_root_fs: Option<u64>,
+    #[serde(default)]
+    pub networks: Vec<String>,
+}
+
+/// One container's live resource usage (DMN-112).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteContainerStats {
+    pub id: String,
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
+    /// `None` when the container has no memory limit.
+    pub memory_limit_bytes: Option<u64>,
+    pub network_rx_bytes: Option<u64>,
+    pub network_tx_bytes: Option<u64>,
+    pub block_read_bytes: Option<u64>,
+    pub block_write_bytes: Option<u64>,
 }
 
 /// One app's resource counters, mirroring `AppStats` of the in-process path.
@@ -206,6 +257,38 @@ impl Daemon {
         let json = self.request(Method::GET, "/v1/ports", None)?;
         serde_json::from_value(json["apps"].clone())
             .context("malformed port report from the daemon")
+    }
+
+    /// Every container on the host, ASC-managed or not (DMN-102). Root
+    /// context only — over the unix socket a non-root peer is refused.
+    pub fn list_containers(&self, all: bool, with_size: bool) -> Result<Vec<RemoteContainer>> {
+        let path = format!("/v1/docker/containers?all={all}&size={with_size}");
+        let json = self.request(Method::GET, &path, None)?;
+        // A daemon predating DMN-102 has no such route and answers without
+        // the key; say so plainly instead of blaming the payload shape.
+        if json["containers"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerUnsupportedByDaemon));
+        }
+        serde_json::from_value(json["containers"].clone())
+            .context("malformed container list from the daemon")
+    }
+
+    /// Live container resource usage (DMN-112); empty `ids` means every
+    /// running container. The daemon samples twice ~500 ms apart once for
+    /// the whole set, so this call takes about that long regardless of how
+    /// many containers were asked about.
+    pub fn container_stats(&self, ids: &[String]) -> Result<Vec<RemoteContainerStats>> {
+        let path = if ids.is_empty() {
+            "/v1/docker/stats".to_string()
+        } else {
+            format!("/v1/docker/stats?ids={}", ids.join(","))
+        };
+        let json = self.request(Method::GET, &path, None)?;
+        if json["stats"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerUnsupportedByDaemon));
+        }
+        serde_json::from_value(json["stats"].clone())
+            .context("malformed container stats from the daemon")
     }
 
     /// Resource consumption per app. The daemon samples twice ~500 ms apart,

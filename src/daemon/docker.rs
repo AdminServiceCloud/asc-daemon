@@ -18,13 +18,13 @@ use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::moby::buildkit::v1::{StatusResponse, Vertex};
 use bollard::models::{
-    BuildInfoAux, ContainerCreateBody, HostConfig, PortBinding, ResourcesUlimits, RestartPolicy,
-    RestartPolicyNameEnum,
+    BuildInfoAux, ContainerCreateBody, ContainerSummary, HostConfig, PortBinding, ResourcesUlimits,
+    RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     AttachContainerOptions, BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
-    CreateImageOptions, LogsOptions, RemoveContainerOptions, StartContainerOptions, StatsOptions,
-    StopContainerOptions,
+    CreateImageOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
+    StartContainerOptions, StatsOptions, StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -352,6 +352,142 @@ pub fn remove(cfg: &DockerConfig, container: &str) -> Result<()> {
     })
 }
 
+// ── Host inventory (DMN-102) ────────────────────────────────────────────────
+
+/// Compose writes the project and service names of every container it
+/// creates into these labels. Lifting them out of the raw label map here
+/// means no caller has to know how Compose spells its own keys.
+const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+/// One port row of a container as the Engine's container list reports it.
+/// Unlike [`PublishedPort`], which describes what an app's *manifest asks
+/// for*, this is what the Engine actually has: a port that is merely exposed
+/// carries no `public` side at all.
+pub struct ContainerPortInfo {
+    pub private: u16,
+    pub public: Option<u16>,
+    /// `tcp`, `udp` or `sctp`; empty when the Engine did not say.
+    pub protocol: String,
+    /// Host bind address of a published port; empty for an exposed-only one.
+    pub ip: String,
+}
+
+/// One container on the host — ASC-managed or not.
+///
+/// Deliberately not bollard's `ContainerSummary`: this module keeps its own
+/// types at its boundary (see [`AppliedConfig`], [`ContainerUsage`],
+/// [`PublishedPort`]), so the Engine's schema does not leak into the API
+/// layer and a bollard upgrade cannot silently reshape the daemon's own
+/// contract.
+pub struct ContainerInfo {
+    /// Full 64-hex id; abbreviating is the caller's business.
+    pub id: String,
+    /// Names with the Engine's leading `/` stripped.
+    pub names: Vec<String>,
+    pub image: String,
+    pub image_id: String,
+    /// `created`, `running`, `paused`, `restarting`, `removing`, `exited`,
+    /// `dead`, `stopping` — passed through as the Engine spells it.
+    pub state: String,
+    /// Human-readable status line ("Up 3 hours").
+    pub status: String,
+    /// Creation time, unix seconds; 0 when the Engine omitted it.
+    pub created: i64,
+    pub ports: Vec<ContainerPortInfo>,
+    pub labels: HashMap<String, String>,
+    pub compose_project: Option<String>,
+    pub compose_service: Option<String>,
+    /// Only present when the caller asked for sizes.
+    pub size_rw: Option<u64>,
+    pub size_root_fs: Option<u64>,
+    /// Networks the container is attached to.
+    pub networks: Vec<String>,
+}
+
+/// Every container on the host, like `docker ps` (`all` = `docker ps -a`).
+///
+/// `with_size` maps to the Engine's `size=1`, which makes it walk each
+/// container's writable layer — a visible pause on a busy node, so it stays
+/// opt-in and off by default.
+pub fn list_containers(
+    cfg: &DockerConfig,
+    all: bool,
+    with_size: bool,
+) -> Result<Vec<ContainerInfo>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let opts = ListContainersOptions {
+            all,
+            size: with_size,
+            ..Default::default()
+        };
+        let summaries = docker
+            .list_containers(Some(opts))
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        Ok(summaries
+            .into_iter()
+            .map(|summary| container_info(summary, with_size))
+            .collect())
+    })
+}
+
+/// Map one Engine container summary onto [`ContainerInfo`].
+fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
+    let labels = summary.labels.unwrap_or_default();
+    let networks = summary
+        .network_settings
+        .and_then(|settings| settings.networks)
+        .map(|map| {
+            let mut names: Vec<String> = map.into_keys().collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default();
+    ContainerInfo {
+        id: summary.id.unwrap_or_default(),
+        names: summary
+            .names
+            .unwrap_or_default()
+            .into_iter()
+            // The Engine prefixes every name with '/' for historic reasons
+            // ("links"); nobody downstream wants to see it.
+            .map(|name| name.trim_start_matches('/').to_string())
+            .collect(),
+        image: summary.image.unwrap_or_default(),
+        image_id: summary.image_id.unwrap_or_default(),
+        state: summary.state.map(|s| s.to_string()).unwrap_or_default(),
+        status: summary.status.unwrap_or_default(),
+        created: summary.created.unwrap_or(0),
+        ports: summary
+            .ports
+            .unwrap_or_default()
+            .into_iter()
+            .map(|port| ContainerPortInfo {
+                private: port.private_port,
+                public: port.public_port,
+                protocol: port.typ.map(|t| t.to_string()).unwrap_or_default(),
+                ip: port.ip.unwrap_or_default(),
+            })
+            .collect(),
+        compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
+        compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
+        labels,
+        // A negative size would mean the Engine sent something nonsensical;
+        // treat it as "not reported" rather than wrapping around on the cast.
+        size_rw: with_size
+            .then_some(summary.size_rw)
+            .flatten()
+            .and_then(|v| u64::try_from(v).ok()),
+        size_root_fs: with_size
+            .then_some(summary.size_root_fs)
+            .flatten()
+            .and_then(|v| u64::try_from(v).ok()),
+        networks,
+    }
+}
+
 /// One-shot resource counters of a container, straight off the Engine's
 /// stats endpoint.
 pub struct ContainerUsage {
@@ -359,6 +495,9 @@ pub struct ContainerUsage {
     pub cpu_time_micros: u64,
     /// Resident memory, bytes.
     pub memory_bytes: u64,
+    /// The container's memory limit, bytes. `None` when it has none — which
+    /// is the common case, and why the caller must not render it as 0.
+    pub memory_limit_bytes: Option<u64>,
     /// Bytes read from/written to block devices since the container started.
     /// `None` on a cgroup v1 host, where the Engine omits this field.
     pub disk_read_bytes: Option<u64>,
@@ -419,9 +558,11 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<Contain
         let mut stream = docker.stats(container, Some(opts));
         match stream.next().await {
             Some(Ok(stats)) => {
-                let Some(memory_bytes) = stats.memory_stats.and_then(|m| m.usage) else {
+                let memory = stats.memory_stats.unwrap_or_default();
+                let Some(memory_bytes) = memory.usage else {
                     return Ok(None);
                 };
+                let memory_limit_bytes = memory.limit;
                 // Engine reports CPU time in nanoseconds.
                 let Some(cpu_time_micros) = stats
                     .cpu_stats
@@ -436,6 +577,7 @@ pub fn stats_usage(cfg: &DockerConfig, container: &str) -> Result<Option<Contain
                 Ok(Some(ContainerUsage {
                     cpu_time_micros,
                     memory_bytes,
+                    memory_limit_bytes,
                     disk_read_bytes,
                     disk_write_bytes,
                     net_rx_bytes,

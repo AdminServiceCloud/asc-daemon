@@ -108,6 +108,64 @@ pub enum UpgradeStreamEvent {
     Done(Result<pkg::UpgradeOutcome>),
 }
 
+/// Send one progress line from the worker that produced it, whichever
+/// context that worker happens to be in.
+///
+/// The install/upgrade worker is a `spawn_blocking` thread, where
+/// `blocking_send` is the right call: a stream that outruns its reader
+/// waits for it instead of losing progress. Part of that progress, though,
+/// is reported from inside [`crate::daemon::docker::block_on`]'s
+/// current-thread runtime — an image pull or a BuildKit build reports layer
+/// by layer from within the async stream, on this very thread — and
+/// `blocking_send` panics outright when called from a runtime thread. That
+/// panic took the worker, its sender and the whole stream with it, leaving
+/// the platform to report "the daemon closed the install stream without a
+/// result" for every install that had to pull an image the node did not
+/// have yet. Inside a runtime the send therefore degrades to `try_send`,
+/// which drops a line only when the reader is already a full channel
+/// behind — exactly what the reporter's best-effort contract allows.
+fn send_progress_line<T>(tx: &tokio::sync::mpsc::Sender<T>, line: T) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let _ = tx.try_send(line);
+    } else {
+        let _ = tx.blocking_send(line);
+    }
+}
+
+/// Run an install/upgrade worker body, turning a panic into an ordinary
+/// failed outcome.
+///
+/// The terminal event is the stream's contract: the caller waits for a
+/// result or an error, and a panicking `spawn_blocking` task delivers
+/// neither — it drops its sender and the stream simply ends. The daemon
+/// survives such a panic either way (it never reaches the runtime's own
+/// threads), so the only thing lost is the reason, which is exactly what
+/// the caller needs.
+fn catching_panics<T>(operation: &str, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(outcome) => outcome,
+        Err(panic) => {
+            let reason = panic_message(panic);
+            // The panic hook has already logged the payload and its
+            // location; this records which operation died with it.
+            warn!(operation, reason, "worker panicked");
+            Err(anyhow::anyhow!("{operation} panicked: {reason}"))
+        }
+    }
+}
+
+/// The message carried by a caught panic (`panic!("…")`, `expect`, a failed
+/// assertion), or a placeholder for a payload that is not a string.
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = panic.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = panic.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Context of bearer-token (TCP) calls: full visibility — the platform
 /// performs its own per-user permission checks before reaching the daemon.
 /// Per-user API tokens are a follow-up (see docs/api.md). The unix-socket
@@ -300,9 +358,7 @@ impl ApiState {
         struct ChannelReporter(tokio::sync::mpsc::Sender<UpgradeStreamEvent>);
         impl progress::InstallReporter for ChannelReporter {
             fn line(&self, text: &str) {
-                let _ = self
-                    .0
-                    .blocking_send(UpgradeStreamEvent::Line(text.to_string()));
+                send_progress_line(&self.0, UpgradeStreamEvent::Line(text.to_string()));
             }
         }
 
@@ -310,7 +366,12 @@ impl ApiState {
         let result_tx = tx.clone();
         tokio::task::spawn_blocking(move || {
             let reporter = ChannelReporter(tx);
-            let outcome = pkg::upgrade(&state.config, &ctx, &spec, Some(&reporter));
+            let outcome = catching_panics("upgrade", || {
+                pkg::upgrade(&state.config, &ctx, &spec, Some(&reporter))
+            });
+            // The terminal event, unlike a progress line, is never sent
+            // from inside a runtime and must never be dropped: a full
+            // channel means a slow reader, not a lost result.
             let _ = result_tx.blocking_send(UpgradeStreamEvent::Done(outcome));
         });
         rx
@@ -460,9 +521,7 @@ impl ApiState {
                 // Best effort: a full or closed channel (a caller that
                 // stopped reading) must not slow down or panic the install
                 // that is still running.
-                let _ = self
-                    .0
-                    .blocking_send(InstallStreamEvent::Line(text.to_string()));
+                send_progress_line(&self.0, InstallStreamEvent::Line(text.to_string()));
             }
         }
 
@@ -470,7 +529,7 @@ impl ApiState {
         let result_tx = tx.clone();
         tokio::task::spawn_blocking(move || {
             let reporter = ChannelReporter(tx);
-            let outcome = (move || {
+            let outcome = catching_panics("install", move || {
                 if pkg::is_git_url(&spec) {
                     if source.is_some() {
                         anyhow::bail!("--source has no effect on a direct repository install");
@@ -511,7 +570,9 @@ impl ApiState {
                     force,
                     Some(&reporter),
                 )
-            })();
+            });
+            // See upgrade_stream: the terminal event is always sent from
+            // the blocking worker itself and always waits for the reader.
             let _ = result_tx.blocking_send(InstallStreamEvent::Done(outcome));
         });
         rx
@@ -1442,6 +1503,44 @@ fn is_grpc(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A progress line reported from inside an async context must reach the
+    /// stream instead of killing it: Docker pulls and builds report from
+    /// within `docker::block_on`'s current-thread runtime, entered on the
+    /// blocking worker's own thread, where `blocking_send` panics.
+    #[test]
+    fn a_progress_line_reported_from_inside_a_runtime_reaches_the_stream() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<InstallStreamEvent>(4);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            send_progress_line(&tx, InstallStreamEvent::Line("Pulling image".into()));
+        });
+        drop(runtime);
+        // And the plain blocking path (a git clone's own lines) still works.
+        send_progress_line(&tx, InstallStreamEvent::Line("$ git clone".into()));
+        drop(tx);
+
+        let mut lines = Vec::new();
+        while let Some(InstallStreamEvent::Line(line)) = rx.blocking_recv() {
+            lines.push(line);
+        }
+        assert_eq!(lines, ["Pulling image", "$ git clone"]);
+    }
+
+    /// A worker that panics still ends its stream with a terminal event —
+    /// a failed one naming the reason, not a stream that just stops.
+    #[test]
+    fn a_panicking_worker_ends_the_stream_with_an_error() {
+        let outcome: Result<()> = catching_panics("install", || panic!("blocking_send exploded"));
+        let message = outcome.unwrap_err().to_string();
+        assert!(message.contains("install panicked"), "{message}");
+        assert!(message.contains("blocking_send exploded"), "{message}");
+
+        // A non-panicking body is passed through untouched.
+        assert_eq!(catching_panics("install", || Ok(7)).unwrap(), 7);
+    }
 
     /// Generation, reuse and legacy migration of the API token. One test —
     /// it owns the `ASC_CONFIG` env var (parallel tests must not race it).

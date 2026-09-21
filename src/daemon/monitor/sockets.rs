@@ -334,7 +334,7 @@ mod tests {
     fn encode_ipv6_hex(ip: Ipv6Addr) -> String {
         let bytes = ip.octets();
         let mut hex = String::with_capacity(32);
-        for word in bytes.chunks_exact(4) {
+        for word in bytes.as_chunks::<4>().0 {
             let mut word_le = [0u8; 4];
             word_le.copy_from_slice(word);
             word_le.reverse();

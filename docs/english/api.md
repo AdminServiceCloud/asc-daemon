@@ -69,6 +69,7 @@ recognizes keeps working against a newer daemon.
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Disk usage: image, repository, data, custom volumes |
 | `GET /v1/apps/{id}/ports` | — (REST only for now) | The ports the app publishes (DMN-049), resolved from its settings — a stopped app reports what it will bind next start |
 | `POST /v1/apps/{id}/upgrade {"version"?}` | — (REST only for now) | Upgrade the app (DMN-003); without `version` — to the repository's newest tag, or the branch it tracks for a direct repository install (DMN-053). The app must be stopped. Answers `{"id", "up_to_date", "from", "to"}` |
+| `POST /v1/apps/{id}/clone {"name"?}` | `AppService.CloneApp`/`CloneAppStream` (DMN-113) | Full copy of the app under a new `<id>-N`, always stopped; the stream sibling reports the directory copy as progress lines. REST exposes only the unary form — the platform's clone dialog uses the gRPC stream, same split as install/upgrade. Answers `{"id", "name", "copied_bytes"}` |
 | `GET /v1/disk` | — (REST only for now) | Every visible app's footprint, largest first, plus the capacity of the filesystem holding the app store (DMN-053) |
 | `GET /v1/ports` | — (REST only for now) | Every visible app and the ports it publishes |
 | `GET /v1/stats?ids=a,b` | `AppService.GetAppStats` (DMN-080) | Resource consumption per app (CPU %, memory, disk, network); `ids` filters the set **before** sampling, not after — empty means every visible app. Costs the ~500 ms sampling interval per call |

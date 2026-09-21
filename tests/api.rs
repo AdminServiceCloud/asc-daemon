@@ -197,7 +197,8 @@ mod rest {
                 "docker.stats",
                 "ports.listening",
                 "docker.inventory",
-                "docker.prune"
+                "docker.prune",
+                "app.clone"
             ]
         );
 
@@ -589,7 +590,8 @@ mod grpc {
                 "docker.stats",
                 "ports.listening",
                 "docker.inventory",
-                "docker.prune"
+                "docker.prune",
+                "app.clone"
             ]
         );
 

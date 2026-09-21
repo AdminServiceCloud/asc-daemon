@@ -45,6 +45,11 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/apps/{id}/disk", get(app_disk))
         .route("/v1/apps/{id}/ports", get(app_ports))
         .route("/v1/apps/{id}/upgrade", post(upgrade_app))
+        // Full copy of an installed app under a new id (DMN-019/DMN-113) —
+        // no streamed REST sibling; the platform's clone dialog uses the
+        // gRPC CloneAppStream instead, the same split InstallApp/
+        // InstallAppStream already has.
+        .route("/v1/apps/{id}/clone", post(clone_app))
         .route("/v1/apps/{id}/name", put(rename_app))
         .route("/v1/apps/{id}/start", post(start_app))
         .route("/v1/apps/{id}/stop", post(stop_app))
@@ -1021,6 +1026,35 @@ async fn install_app(
         }),
     };
     Ok((StatusCode::CREATED, Json(json)).into_response())
+}
+
+#[derive(Deserialize)]
+struct CloneBody {
+    /// Custom name for the clone; absent — the new id doubles as the
+    /// display name.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Full copy of one app the caller owns (DMN-019/DMN-113), under the next
+/// free `<id>-N`. The clone always starts stopped.
+async fn clone_app(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    body: Option<Json<CloneBody>>,
+) -> Result<Response, ApiError> {
+    let name = body.and_then(|Json(body)| body.name);
+    let (meta, copied_bytes) = state.clone_app(ctx, id, name).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": meta.id,
+            "name": meta.custom_name,
+            "copied_bytes": copied_bytes,
+        })),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]

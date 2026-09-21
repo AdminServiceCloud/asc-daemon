@@ -155,6 +155,9 @@ fn to_pb(status: &AppStatus) -> pb::App {
             disk_bytes: q.disk_bytes,
         }),
         commit: status.commit.clone(),
+        package: status.meta.package.clone(),
+        repo_path: status.meta.repo_path.clone(),
+        branch: status.meta.branch.clone(),
     }
 }
 
@@ -606,12 +609,28 @@ fn upgrade_outcome_to_pb(outcome: pkg::UpgradeOutcome) -> pb::UpgradeAppResponse
     }
 }
 
+/// Shared by `clone_app` and `clone_app_stream`: both end in the same
+/// `CloneAppResponse` shape, one returned directly, the other as the last
+/// stream event.
+fn clone_outcome_to_pb(
+    meta: crate::daemon::apps::meta::AppMeta,
+    copied_bytes: u64,
+) -> pb::CloneAppResponse {
+    pb::CloneAppResponse {
+        id: meta.id,
+        name: meta.custom_name,
+        copied_bytes,
+    }
+}
+
 #[tonic::async_trait]
 impl AppService for Grpc {
     type InstallAppStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::InstallAppEvent, Status>> + Send>>;
     type UpgradeAppStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::UpgradeAppEvent, Status>> + Send>>;
+    type CloneAppStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::CloneAppEvent, Status>> + Send>>;
 
     async fn list_apps(
         &self,
@@ -830,6 +849,57 @@ impl AppService for Grpc {
                     rx,
                 )),
                 Some(super::UpgradeStreamEvent::Done(Err(err))) => Some((Err(to_status(err)), rx)),
+                None => None,
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn clone_app(
+        &self,
+        request: Request<pb::CloneAppRequest>,
+    ) -> Result<Response<pb::CloneAppResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let request = request.into_inner();
+        let (meta, copied_bytes) = self
+            .0
+            .clone_app(ctx, request.id, request.name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(clone_outcome_to_pb(meta, copied_bytes)))
+    }
+
+    /// Streamed sibling of `clone_app` (DMN-113), mirroring
+    /// `upgrade_app_stream` exactly: the danger-zone clone dialog watches
+    /// this one so a large copy doesn't look like a hang. A disconnect here
+    /// does not cancel the clone — see `ApiState::clone_app_stream`.
+    async fn clone_app_stream(
+        &self,
+        request: Request<pb::CloneAppRequest>,
+    ) -> Result<Response<Self::CloneAppStreamStream>, Status> {
+        let ctx = ctx_of(&request);
+        let request = request.into_inner();
+        let rx = self.0.clone_app_stream(ctx, request.id, request.name);
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(super::CloneStreamEvent::Line(line)) => Some((
+                    Ok(pb::CloneAppEvent {
+                        event: Some(pb::clone_app_event::Event::Line(line)),
+                    }),
+                    rx,
+                )),
+                Some(super::CloneStreamEvent::Done(outcome)) => Some((
+                    match *outcome {
+                        Ok((meta, copied_bytes)) => Ok(pb::CloneAppEvent {
+                            event: Some(pb::clone_app_event::Event::Result(clone_outcome_to_pb(
+                                meta,
+                                copied_bytes,
+                            ))),
+                        }),
+                        Err(err) => Err(to_status(err)),
+                    },
+                    rx,
+                )),
                 None => None,
             }
         });

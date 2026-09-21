@@ -59,6 +59,7 @@ pub const CAPABILITIES: &[&str] = &[
     "ports.listening",
     "docker.inventory",
     "docker.prune",
+    "app.clone",
 ];
 
 /// Shared state behind both transports.
@@ -536,6 +537,16 @@ pub enum UpgradeStreamEvent {
     Done(Result<pkg::UpgradeOutcome>),
 }
 
+/// One event of [`ApiState::clone_app_stream`]: a progress line, or the
+/// terminal result — the same `Result` the unary [`ApiState::clone_app`]
+/// returns (the clone's meta and the bytes copied). Boxed: `AppMeta` is
+/// large enough on its own to make `Line(String)` the small variant
+/// (clippy::large_enum_variant), and this event is created once per stream.
+pub enum CloneStreamEvent {
+    Line(String),
+    Done(Box<Result<(AppMeta, u64)>>),
+}
+
 /// Send one progress line from the worker that produced it, whichever
 /// context that worker happens to be in.
 ///
@@ -825,6 +836,94 @@ impl ApiState {
             // from inside a runtime and must never be dropped: a full
             // channel means a slow reader, not a lost result.
             let _ = result_tx.blocking_send(UpgradeStreamEvent::Done(outcome));
+        });
+        rx
+    }
+
+    /// Shared by [`Self::clone_app`]/[`Self::clone_app_stream`]: resolves
+    /// `reference` the caller owns and clones it under the next free
+    /// `<id>-N` (DMN-019/DMN-113), reporting the same `(copied, total)`
+    /// progress `pkg::clone_app` does. Returns the clone's meta and the
+    /// final bytes copied.
+    fn clone_one(
+        &self,
+        ctx: &UserContext,
+        reference: &str,
+        name: Option<&str>,
+        mut on_progress: impl FnMut(u64, u64),
+    ) -> Result<(AppMeta, u64)> {
+        let source = self.manager.get_authorized(ctx, reference)?;
+        let mut copied_bytes = 0u64;
+        let meta = pkg::clone_app(
+            &self.config,
+            ctx,
+            self.manager.store(),
+            &source,
+            name,
+            |copied, total| {
+                copied_bytes = copied;
+                on_progress(copied, total);
+            },
+        )?;
+        Ok((meta, copied_bytes))
+    }
+
+    /// Clone an app the caller owns (DMN-019/DMN-113) into a new instance
+    /// under the next free `<id>-N`, always stopped regardless of the
+    /// source's state. `reference` is the source's id or custom name.
+    pub async fn clone_app(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        reference: String,
+        name: Option<String>,
+    ) -> Result<(AppMeta, u64)> {
+        self.blocking(move |s| s.clone_one(&ctx, &reference, name.as_deref(), |_, _| {}))
+            .await
+    }
+
+    /// Streamed sibling of [`Self::clone_app`]: progress lines arrive as
+    /// [`CloneStreamEvent::Line`] (one per whole percentage point of the
+    /// directory copy, so a source with many small files does not flood the
+    /// stream), ending in one [`CloneStreamEvent::Done`] with the same
+    /// result `clone_app` would have returned. Mirrors
+    /// [`Self::install_stream`]/[`Self::upgrade_stream`] exactly — the clone
+    /// keeps running in the background regardless of whether the receiver is
+    /// still being read.
+    pub fn clone_app_stream(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        reference: String,
+        name: Option<String>,
+    ) -> tokio::sync::mpsc::Receiver<CloneStreamEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let state = Arc::clone(self);
+        let result_tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut last_percent: i64 = -1;
+            let outcome = catching_panics("clone", || {
+                state.clone_one(&ctx, &reference, name.as_deref(), |copied, total| {
+                    let percent: i64 = if total == 0 {
+                        100
+                    } else {
+                        ((copied as u128 * 100 / total as u128) as i64).min(100)
+                    };
+                    if percent != last_percent {
+                        last_percent = percent;
+                        send_progress_line(
+                            &tx,
+                            CloneStreamEvent::Line(format!(
+                                "Copying {} / {}",
+                                indicatif::HumanBytes(copied),
+                                indicatif::HumanBytes(total)
+                            )),
+                        );
+                    }
+                })
+            });
+            // The terminal event, unlike a progress line, is never sent from
+            // inside a runtime and must never be dropped: a full channel
+            // means a slow reader, not a lost result.
+            let _ = result_tx.blocking_send(CloneStreamEvent::Done(Box::new(outcome)));
         });
         rx
     }

@@ -124,6 +124,18 @@ service AppService {
   // would have returned — or, on failure, the stream ends with the same
   // error status. A disconnected caller does not cancel the upgrade.
   rpc UpgradeAppStream(UpgradeAppRequest) returns (stream UpgradeAppEvent);
+  // Full copy of an installed app under a new id (DMN-019/DMN-113): the
+  // repository, config and data are copied byte for byte, then a runtime is
+  // freshly provisioned from the copy — a clone always starts stopped,
+  // regardless of the source's state. Docker containers/systemd units
+  // cannot be copied, only recreated from the copied manifest and settings.
+  rpc CloneApp(CloneAppRequest) returns (CloneAppResponse);
+  // Same clone, as a live progress feed instead of one blocking call
+  // (mirrors InstallAppStream/DMN-090): a text line as the directory copy
+  // progresses, ending with the same result CloneApp would have returned —
+  // or, on failure, the stream ends with the same error status. A
+  // disconnected caller does not cancel the clone.
+  rpc CloneAppStream(CloneAppRequest) returns (stream CloneAppEvent);
 }
 
 enum AppState {
@@ -157,6 +169,24 @@ message App {
   // app installed before this field existed still resolves fine, just
   // without a commit to show).
   optional string commit = 11;
+  // Recorded package reference: "<stack>/<app>" for a stack member,
+  // "<package>" (with no slash) for a standalone install — see
+  // AppMeta.package and `asc stacks`' own use of the same field. Absent for
+  // an app installed before DMN-033. A "/" here is what NODE-045's transfer
+  // checks phase uses to refuse moving a single stack member.
+  optional string package = 12;
+  // In-repository subdirectory of the manifest (DMN-096) — a direct git
+  // install of a monorepo package only; absent for a registry install
+  // (whose entry carries its own path) or a repository with the manifest at
+  // its root. NODE-045's transfer install phase needs this to reinstall a
+  // direct monorepo install identically on the target.
+  optional string repo_path = 13;
+  // The branch a direct git install tracks across upgrades (DMN-053);
+  // absent for a tag-pinned install (every registry install, and a direct
+  // install of a specific tag). NODE-045's transfer install phase passes
+  // this through so the target keeps tracking the same branch instead of
+  // resolving to the default branch HEAD.
+  optional string branch = 14;
 }
 
 // Per-app resource limits; every field is optional — only set limits appear.
@@ -486,6 +516,34 @@ message UpgradeAppEvent {
   oneof event {
     string line = 1;
     UpgradeAppResponse result = 2;
+  }
+}
+
+message CloneAppRequest {
+  // The source app's id or custom name — same reference
+  // AppManager::get_authorized accepts everywhere else.
+  string id = 1;
+  // Custom name for the clone; absent — the new id (DMN-033 numbering,
+  // <source>-N) doubles as the display name.
+  optional string name = 2;
+}
+
+message CloneAppResponse {
+  // The clone's id.
+  string id = 1;
+  optional string name = 2;
+  // Bytes copied from the source's repository/config/data.
+  uint64 copied_bytes = 3;
+}
+
+// One event of a CloneAppStream call: either one more line of progress
+// text, or the terminal result — the same CloneAppResponse the unary
+// CloneApp call returns. A stream that ends without a `result` event ended
+// in a genuine error instead; the gRPC status carries the reason.
+message CloneAppEvent {
+  oneof event {
+    string line = 1;
+    CloneAppResponse result = 2;
   }
 }
 

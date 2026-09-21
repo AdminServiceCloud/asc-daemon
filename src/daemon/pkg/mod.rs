@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod clone;
+pub mod detect;
 pub mod gitref;
 pub mod inspect;
 pub mod install;
@@ -15,6 +16,7 @@ pub mod sources;
 pub mod upgrade;
 
 pub use clone::clone_app;
+pub use detect::{DetectedMethod, InstallMethod};
 pub use gitref::short_commit;
 pub use inspect::{PackageInfo, PackageKind, StackAppInfo, inspect_git};
 pub use install::{

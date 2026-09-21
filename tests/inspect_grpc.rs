@@ -148,3 +148,62 @@ async fn grpc_inspect_package_reads_a_stack_and_an_app() {
     assert!(!ws.path().join("apps/demo-server").exists());
     assert!(!ws.path().join("apps/solo").exists());
 }
+
+/// DMN-106: a repository with no `asc.yaml`/`asc.stack.yaml` used to fail the
+/// whole inspect (`Manifest::load` errors out); it must now come back as
+/// `PACKAGE_KIND_UNSPECIFIED` with whatever install methods were detected,
+/// so the install dialog can offer "found, not supported" instead of
+/// treating the repository as unrecognized.
+#[tokio::test]
+async fn grpc_inspect_package_without_a_manifest_reports_unknown_and_detected_methods() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not available");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let repo = ws.path().join("dockerfile-only");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("Dockerfile"), "FROM alpine\nEXPOSE 8080\n").unwrap();
+    fs::write(
+        repo.join("docker-compose.yml"),
+        "services:\n  web:\n    build: .\n",
+    )
+    .unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let url = repo.display().to_string().replace('\\', "/");
+
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    let state = ApiState::new(config, TOKEN.into());
+    let addr = spawn_server(state).await;
+    let mut apps = pb::app_service_client::AppServiceClient::new(channel(addr).await);
+
+    let response = apps
+        .inspect_package(with_auth(tonic::Request::new(pb::InspectPackageRequest {
+            git_url: url,
+            branch: None,
+            tag: None,
+            path: None,
+        })))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.kind, pb::PackageKind::Unspecified as i32);
+    assert!(response.auth_required.is_none());
+    assert!(response.apps.is_empty());
+
+    let kinds: Vec<i32> = response.methods.iter().map(|m| m.kind).collect();
+    assert!(kinds.contains(&(pb::InstallMethodKind::Dockerfile as i32)));
+    assert!(kinds.contains(&(pb::InstallMethodKind::DockerCompose as i32)));
+    let dockerfile = response
+        .methods
+        .iter()
+        .find(|m| m.kind == pb::InstallMethodKind::Dockerfile as i32)
+        .unwrap();
+    assert!(!dockerfile.supported);
+    assert!(!dockerfile.unsupported_reason.is_empty());
+    assert_eq!(dockerfile.files, vec!["Dockerfile"]);
+}

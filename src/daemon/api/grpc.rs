@@ -388,6 +388,7 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
             skipped: vec![],
             license_required: None,
             requirements_not_met: None,
+            auth_required: None,
         },
         InstallOutcome::Stack {
             stack,
@@ -409,6 +410,7 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
             skipped,
             license_required: None,
             requirements_not_met: None,
+            auth_required: None,
         },
     }
 }
@@ -417,6 +419,7 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
 fn package_info_to_pb(info: pkg::PackageInfo) -> pb::InspectPackageResponse {
     pb::InspectPackageResponse {
         kind: match info.kind {
+            pkg::PackageKind::Unknown => pb::PackageKind::Unspecified as i32,
             pkg::PackageKind::App => pb::PackageKind::App as i32,
             pkg::PackageKind::Stack => pb::PackageKind::Stack as i32,
         },
@@ -439,6 +442,67 @@ fn package_info_to_pb(info: pkg::PackageInfo) -> pb::InspectPackageResponse {
                 requirements: app.requirements.as_ref().map(requirements_to_pb),
             })
             .collect(),
+        methods: info
+            .methods
+            .into_iter()
+            .map(detected_method_to_pb)
+            .collect(),
+        auth_required: None,
+    }
+}
+
+fn detected_method_to_pb(method: pkg::DetectedMethod) -> pb::DetectedInstallMethod {
+    let kind = match method.kind {
+        pkg::InstallMethod::AscManifest => pb::InstallMethodKind::AscManifest,
+        pkg::InstallMethod::AscStack => pb::InstallMethodKind::AscStack,
+        pkg::InstallMethod::DockerCompose => pb::InstallMethodKind::DockerCompose,
+        pkg::InstallMethod::Dockerfile => pb::InstallMethodKind::Dockerfile,
+        pkg::InstallMethod::Swarm => pb::InstallMethodKind::Swarm,
+        pkg::InstallMethod::Kubernetes => pb::InstallMethodKind::Kubernetes,
+        pkg::InstallMethod::Helm => pb::InstallMethodKind::Helm,
+    };
+    let supported = method.kind.supported();
+    pb::DetectedInstallMethod {
+        kind: kind as i32,
+        files: method.files,
+        supported,
+        unsupported_reason: if supported {
+            String::new()
+        } else {
+            unsupported_reason(method.kind)
+        },
+        items: method.items,
+    }
+}
+
+/// Plain English, not translated through the daemon's CLI i18n system: this
+/// is API data the platform's own (already localized) UI reads, not a
+/// message the CLI ever prints on its own.
+fn unsupported_reason(kind: pkg::InstallMethod) -> String {
+    match kind {
+        pkg::InstallMethod::AscManifest | pkg::InstallMethod::AscStack => String::new(),
+        pkg::InstallMethod::DockerCompose => {
+            "docker compose projects cannot be installed yet".into()
+        }
+        pkg::InstallMethod::Dockerfile => {
+            "installing straight from a Dockerfile is not supported yet".into()
+        }
+        pkg::InstallMethod::Swarm => "Docker Swarm stacks are not supported".into(),
+        pkg::InstallMethod::Kubernetes => "Kubernetes manifests are not supported".into(),
+        pkg::InstallMethod::Helm => "Helm charts are not supported".into(),
+    }
+}
+
+/// See InspectPackageResponse.auth_required / InstallAppResponse.auth_required.
+fn auth_required_to_pb(required: &pkg::auth::AuthRequired) -> pb::AuthRequiredDetail {
+    pb::AuthRequiredDetail {
+        url: required.url.clone(),
+        pattern: pkg::auth::normalize(&required.url),
+        transport: if pkg::auth::is_ssh_url(&required.url) {
+            "ssh".into()
+        } else {
+            "https".into()
+        },
     }
 }
 
@@ -489,17 +553,26 @@ fn requirements_not_met_to_pb(not_met: pkg::RequirementsNotMet) -> pb::InstallAp
     }
 }
 
-/// Shared by `install_app` and `install_app_stream`: catches the two
+/// Shared by `install_app` and `install_app_stream`: catches the three
 /// "otherwise succeeded, needs one more round trip" install errors
-/// (`LicenseRequired`, `RequirementsNotMet`) before they would reach
-/// [`to_status`] and renders either as a normal, successful response.
+/// (`LicenseRequired`, `RequirementsNotMet`, `AuthRequired`) before they
+/// would reach [`to_status`] and renders each as a normal, successful
+/// response instead of a bare INTERNAL status (DMN-106 for the last one —
+/// `to_status` has no downcast for `pkg::auth::AuthRequired`).
 fn install_error_to_pb(err: anyhow::Error) -> Result<pb::InstallAppResponse, Status> {
     let err = match err.downcast::<pkg::LicenseRequired>() {
         Ok(required) => return Ok(license_required_to_pb(required)),
         Err(err) => err,
     };
-    match err.downcast::<pkg::RequirementsNotMet>() {
-        Ok(not_met) => Ok(requirements_not_met_to_pb(not_met)),
+    let err = match err.downcast::<pkg::RequirementsNotMet>() {
+        Ok(not_met) => return Ok(requirements_not_met_to_pb(not_met)),
+        Err(err) => err,
+    };
+    match err.downcast::<pkg::auth::AuthRequired>() {
+        Ok(required) => Ok(pb::InstallAppResponse {
+            auth_required: Some(auth_required_to_pb(&required)),
+            ..Default::default()
+        }),
         Err(err) => Err(to_status(err)),
     }
 }
@@ -691,7 +764,7 @@ impl AppService for Grpc {
     ) -> Result<Response<pb::InspectPackageResponse>, Status> {
         let ctx = ctx_of(&request);
         let request = request.into_inner();
-        let info = self
+        match self
             .0
             .inspect_package(
                 ctx,
@@ -701,8 +774,20 @@ impl AppService for Grpc {
                 request.path,
             )
             .await
-            .map_err(to_status)?;
-        Ok(Response::new(package_info_to_pb(info)))
+        {
+            Ok(info) => Ok(Response::new(package_info_to_pb(info))),
+            // The repository is private and nothing the caller configured
+            // opens it (DMN-062) — not a gRPC error, the same "otherwise
+            // succeeded, needs one more round trip" shape install_error_to_pb
+            // gives InstallAppResponse (DMN-106).
+            Err(err) => match err.downcast::<pkg::auth::AuthRequired>() {
+                Ok(required) => Ok(Response::new(pb::InspectPackageResponse {
+                    auth_required: Some(auth_required_to_pb(&required)),
+                    ..Default::default()
+                })),
+                Err(err) => Err(to_status(err)),
+            },
+        }
     }
 
     async fn upgrade_app(
@@ -1958,5 +2043,47 @@ fn container_stats_to_pb(row: &super::ContainerStatsRow) -> pb::ContainerStats {
         network_tx_bytes: row.net_tx_bytes.unwrap_or(0),
         block_read_bytes: row.block_read_bytes.unwrap_or(0),
         block_write_bytes: row.block_write_bytes.unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_required_reports_the_matching_transport_and_pattern() {
+        let https = pkg::auth::AuthRequired {
+            url: "https://github.com/Acme/private-app.git".into(),
+        };
+        let detail = auth_required_to_pb(&https);
+        assert_eq!(detail.url, "https://github.com/Acme/private-app.git");
+        assert_eq!(detail.pattern, "github.com/acme/private-app");
+        assert_eq!(detail.transport, "https");
+
+        let ssh = pkg::auth::AuthRequired {
+            url: "git@github.com:acme/private-app.git".into(),
+        };
+        assert_eq!(auth_required_to_pb(&ssh).transport, "ssh");
+    }
+
+    /// Before DMN-106, `to_status` had no branch for `pkg::auth::AuthRequired`
+    /// and this fell through to a bare `Status::internal` — the exact bug the
+    /// non-error `auth_required` field exists to fix.
+    #[test]
+    fn install_error_to_pb_renders_auth_required_instead_of_a_grpc_error() {
+        let err = anyhow::Error::new(pkg::auth::AuthRequired {
+            url: "https://github.com/acme/private-app".into(),
+        });
+        let response = install_error_to_pb(err).expect("must not become a Status");
+        let detail = response.auth_required.expect("auth_required must be set");
+        assert_eq!(detail.pattern, "github.com/acme/private-app");
+        assert!(response.license_required.is_none());
+        assert!(response.requirements_not_met.is_none());
+    }
+
+    #[test]
+    fn install_error_to_pb_still_maps_other_errors_to_a_status() {
+        let err = anyhow::anyhow!("boom");
+        assert!(install_error_to_pb(err).is_err());
     }
 }

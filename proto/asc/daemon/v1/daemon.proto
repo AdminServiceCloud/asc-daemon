@@ -273,6 +273,12 @@ message InstallAppResponse {
   // resources, install anyway?" screen and retries with force = true. Not a
   // gRPC error, same reasoning as license_required.
   optional RequirementsNotMetDetail requirements_not_met = 6;
+  // Set instead of every field above when a direct git install's repository
+  // is private and nothing the caller configured opens it (DMN-062/DMN-106)
+  // — same non-error shape as license_required/requirements_not_met above.
+  // A registry spec never sets this: BrowseAppRegistry already requires the
+  // index itself to be public.
+  optional AuthRequiredDetail auth_required = 7;
 }
 
 // See InstallAppResponse.license_required. Mirrors pkg::LicenseRequired
@@ -355,14 +361,74 @@ message InspectPackageResponse {
   PackageRequirements requirements = 6;
   // Stack packages: the apps it ships, in manifest order.
   repeated StackApp apps = 7;
+  // Every installation method detected in the repository (DMN-106),
+  // regardless of `kind` above — a repository can carry asc.yaml next to a
+  // Dockerfile it doesn't need, and that is still worth reporting. Empty
+  // when auth_required is set: nothing could be cloned to detect anything.
+  repeated DetectedInstallMethod methods = 8;
+  // Set instead of every field above (kind stays PACKAGE_KIND_UNSPECIFIED,
+  // methods stays empty) when the repository is private and nothing the
+  // caller configured opens it (DMN-062) — the same non-error, "one more
+  // round trip" shape as license_required on InstallAppResponse. Before this
+  // field existed the gRPC layer had no downcast for pkg::auth::AuthRequired
+  // and this case surfaced as a bare INTERNAL status.
+  optional AuthRequiredDetail auth_required = 9;
 }
 
 enum PackageKind {
+  // Neither asc.yaml nor asc.stack.yaml is present (DMN-106) — the
+  // repository may still be installable some other way, see
+  // InspectPackageResponse.methods.
   PACKAGE_KIND_UNSPECIFIED = 0;
   // asc.yaml — one application.
   PACKAGE_KIND_APP = 1;
   // asc.stack.yaml — several applications shipped together.
   PACKAGE_KIND_STACK = 2;
+}
+
+// DMN-106: what pkg::detect can find in a repository, beyond ASC's own
+// manifest/stack. Detection and install support are two different
+// questions — Swarm/Kubernetes/Helm are always `supported = false` today,
+// reported so the operator sees "found, not supported" instead of the
+// repository looking unrecognized.
+enum InstallMethodKind {
+  INSTALL_METHOD_KIND_UNSPECIFIED = 0;
+  INSTALL_METHOD_KIND_ASC_MANIFEST = 1;
+  INSTALL_METHOD_KIND_ASC_STACK = 2;
+  INSTALL_METHOD_KIND_DOCKER_COMPOSE = 3;
+  INSTALL_METHOD_KIND_DOCKERFILE = 4;
+  INSTALL_METHOD_KIND_SWARM = 5;
+  INSTALL_METHOD_KIND_KUBERNETES = 6;
+  INSTALL_METHOD_KIND_HELM = 7;
+}
+
+message DetectedInstallMethod {
+  InstallMethodKind kind = 1;
+  // Paths relative to the package directory (the repository root, or its
+  // manifest subdirectory for a monorepo package) that triggered detection.
+  repeated string files = 2;
+  bool supported = 3;
+  // Set when supported is false; empty otherwise. Plain English — this is
+  // API data for the platform's own localized UI, not CLI output, so it
+  // does not go through the daemon's i18n system.
+  string unsupported_reason = 4;
+  // Compose/Swarm service names, or Kubernetes `kind` values found — empty
+  // for methods with nothing further to summarize.
+  repeated string items = 5;
+}
+
+// See InspectPackageResponse.auth_required / InstallAppResponse.auth_required.
+message AuthRequiredDetail {
+  // The URL the caller passed, unmodified.
+  string url = 1;
+  // pkg::auth::normalize(url) — the host/prefix a credential must be
+  // configured for (REG-007's OrgCredential.pattern speaks the same
+  // language, so the platform can offer "add a credential for this pattern"
+  // directly).
+  string pattern = 2;
+  // "https" or "ssh" (pkg::auth::is_ssh_url(url)) — which credential shape
+  // (token vs. SSH key) actually authorizes this URL.
+  string transport = 3;
 }
 
 message StackApp {

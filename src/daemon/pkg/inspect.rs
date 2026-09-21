@@ -25,13 +25,17 @@ pub enum PackageKind {
     App,
     /// `asc.stack.yaml` — several applications shipped together.
     Stack,
+    /// Neither manifest is present (DMN-106) — the repository may still be
+    /// installable some other way, see [`PackageInfo::methods`].
+    Unknown,
 }
 
 /// A package as its repository describes it.
 #[derive(Debug, Clone)]
 pub struct PackageInfo {
     pub kind: PackageKind,
-    /// Package name: the app's own name, or the stack's.
+    /// Package name: the app's own name, the stack's, or (kind `Unknown`) a
+    /// best-effort guess from the repository URL.
     pub name: String,
     pub version: String,
     pub title: Option<String>,
@@ -41,6 +45,10 @@ pub struct PackageInfo {
     pub requirements: Option<Requirements>,
     /// Stacks only: the apps the stack ships, in manifest order.
     pub apps: Vec<StackAppInfo>,
+    /// Every installation method detected in the package directory (DMN-106),
+    /// regardless of `kind` — a repository can carry `asc.yaml` next to a
+    /// Dockerfile it doesn't need, and that is still worth reporting.
+    pub methods: Vec<super::detect::DetectedMethod>,
 }
 
 /// One app of a stack, merged from `asc.stack.yaml` and the app's own
@@ -92,15 +100,20 @@ pub fn inspect_git(
     };
     git_clone(url, checkout, &dir, ctx, None)?;
     let package_dir = super::install::manifest_dir(&dir, path)?;
-    let info = read_package(&package_dir);
+    let info = read_package(&package_dir, url);
     drop(cleanup);
     info
 }
 
 /// Read whichever manifest the directory holds, stack first: a stack root may
 /// not carry an `asc.yaml` of its own, an app directory never carries an
-/// `asc.stack.yaml`.
-fn read_package(dir: &Path) -> Result<PackageInfo> {
+/// `asc.stack.yaml`. Neither present is no longer an error (DMN-106): the
+/// repository may still be installable some other way (Dockerfile, compose,
+/// …), so it comes back as `PackageKind::Unknown` with whatever
+/// [`super::detect::detect`] found, rather than failing the whole inspect.
+/// `url` is only used for that unknown-kind fallback name.
+fn read_package(dir: &Path, url: &str) -> Result<PackageInfo> {
+    let methods = super::detect::detect(dir);
     if dir.join(StackManifest::FILE).exists() {
         let stack = StackManifest::load(dir)?;
         let mut apps = Vec::with_capacity(stack.apps.len());
@@ -128,16 +141,30 @@ fn read_package(dir: &Path) -> Result<PackageInfo> {
             description: stack.description,
             requirements: None,
             apps,
+            methods,
         });
     }
-    let manifest = Manifest::load(dir)?;
+    if dir.join(Manifest::FILE).exists() {
+        let manifest = Manifest::load(dir)?;
+        return Ok(PackageInfo {
+            kind: PackageKind::App,
+            name: manifest.name,
+            version: manifest.version,
+            title: manifest.title,
+            description: manifest.description,
+            requirements: manifest.requirements,
+            apps: Vec::new(),
+            methods,
+        });
+    }
     Ok(PackageInfo {
-        kind: PackageKind::App,
-        name: manifest.name,
-        version: manifest.version,
-        title: manifest.title,
-        description: manifest.description,
-        requirements: manifest.requirements,
+        kind: PackageKind::Unknown,
+        name: super::install::repo_name(url).unwrap_or_default(),
+        version: String::new(),
+        title: None,
+        description: None,
+        requirements: None,
         apps: Vec::new(),
+        methods,
     })
 }

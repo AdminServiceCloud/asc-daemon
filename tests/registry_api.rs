@@ -172,6 +172,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
                 secret: Some(pb::upsert_credential_request::Secret::Token(secret.into())),
                 username: None,
                 app: None,
+                managed_by: None,
             },
         )))
         .await
@@ -209,6 +210,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
                 )),
                 username: Some("me".into()),
                 app: None,
+                managed_by: None,
             },
         )))
         .await
@@ -228,6 +230,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
             pb::RemoveCredentialRequest {
                 kind: Some(pb::CredentialKind::Repo as i32),
                 target: "github.com/acme".into(),
+                managed_by: None,
             },
         )))
         .await
@@ -255,6 +258,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
                 )),
                 username: None,
                 app: None,
+                managed_by: None,
             },
         )))
         .await
@@ -287,11 +291,89 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
             pb::RemoveCredentialRequest {
                 kind: Some(pb::CredentialKind::Repo as i32),
                 target: "gitlab.com/acme".into(),
+                managed_by: None,
             },
         )))
         .await
         .unwrap();
     assert!(!std::path::Path::new(key_path).exists());
+
+    // DMN-110: a platform-managed entry and an operator-added one can share
+    // a pattern (different app bindings) — a harvest scoped to managed_by
+    // must remove only its own entry and never the operator's.
+    client
+        .upsert_credential(with_auth(tonic::Request::new(
+            pb::UpsertCredentialRequest {
+                kind: pb::CredentialKind::Repo as i32,
+                target: "bitbucket.org/acme".into(),
+                secret: Some(pb::upsert_credential_request::Secret::Token(
+                    "platform-token".into(),
+                )),
+                username: None,
+                app: None,
+                managed_by: Some("platform".into()),
+            },
+        )))
+        .await
+        .unwrap();
+    client
+        .upsert_credential(with_auth(tonic::Request::new(
+            pb::UpsertCredentialRequest {
+                kind: pb::CredentialKind::Repo as i32,
+                target: "bitbucket.org/acme".into(),
+                secret: Some(pb::upsert_credential_request::Secret::Token(
+                    "operator-token".into(),
+                )),
+                username: None,
+                app: Some("myapp".into()),
+                managed_by: None,
+            },
+        )))
+        .await
+        .unwrap();
+    // A harvest for a *different* platform generation must not match this
+    // entry at all — it stays untouched.
+    client
+        .remove_credential(with_auth(tonic::Request::new(
+            pb::RemoveCredentialRequest {
+                kind: Some(pb::CredentialKind::Repo as i32),
+                target: "bitbucket.org/acme".into(),
+                managed_by: Some("some-other-owner".into()),
+            },
+        )))
+        .await
+        .unwrap_err();
+    let listed = client
+        .list_credentials(with_auth(tonic::Request::new(
+            pb::ListCredentialsRequest {},
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.credentials.len(), 2, "nothing was removed yet");
+    client
+        .remove_credential(with_auth(tonic::Request::new(
+            pb::RemoveCredentialRequest {
+                kind: Some(pb::CredentialKind::Repo as i32),
+                target: "bitbucket.org/acme".into(),
+                managed_by: Some("platform".into()),
+            },
+        )))
+        .await
+        .unwrap();
+    let listed = client
+        .list_credentials(with_auth(tonic::Request::new(
+            pb::ListCredentialsRequest {},
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        listed.credentials.len(),
+        1,
+        "only the platform-managed entry was removed"
+    );
+    assert_eq!(listed.credentials[0].app.as_deref(), Some("myapp"));
 
     unsafe { std::env::remove_var("ASC_GIT_AUTH") };
     unsafe { std::env::remove_var("ASC_USER_GIT_AUTH") };

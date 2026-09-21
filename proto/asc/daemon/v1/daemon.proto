@@ -682,6 +682,10 @@ message CredentialSummary {
   optional string app = 4;
   string method_label = 5;
   bool has_secret = 6;
+  // Absent for anything the operator configured by hand (`asc auth add`).
+  // Set to "platform" for entries a platform push (REG-008) owns — see
+  // UpsertCredentialRequest.managed_by (DMN-110).
+  optional string managed_by = 7;
 }
 
 message ListCredentialsRequest {}
@@ -703,6 +707,13 @@ message UpsertCredentialRequest {
   }
   optional string username = 4;
   optional string app = 5;
+  // Ownership marker (DMN-110): a platform push sets this to "platform" so a
+  // later push can tell its own entries apart from ones the operator added
+  // by hand and harvest only the former when they stop being sent. Absent —
+  // the default for `asc auth add` — means "nobody manages this but the
+  // operator"; such entries are never touched by RemoveCredential on their
+  // behalf.
+  optional string managed_by = 7;
 }
 
 message UpsertCredentialResponse {
@@ -712,6 +723,13 @@ message UpsertCredentialResponse {
 message RemoveCredentialRequest {
   optional CredentialKind kind = 1;
   string target = 2;
+  // When set, only removes entries whose managed_by equals this value —
+  // used by a platform harvest (DMN-110) so it can never delete an entry the
+  // operator added by hand at the same (kind, pattern), even one the
+  // operator bound to a different app than the platform's own entry.
+  // Absent removes every matching entry regardless of ownership, same as
+  // before this field existed (`asc auth remove`'s own behavior).
+  optional string managed_by = 3;
 }
 
 message RemoveCredentialResponse {}

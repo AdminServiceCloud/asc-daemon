@@ -1075,6 +1075,7 @@ fn credential_to_summary(c: &pkg::auth::Credential) -> pb::CredentialSummary {
         // Every stored Credential has some Method — Token or SshKey — so a
         // secret is always configured once an entry exists at all.
         has_secret: true,
+        managed_by: c.managed_by.clone(),
     }
 }
 
@@ -1140,7 +1141,14 @@ impl CredentialService for Grpc {
         };
         let credential = self
             .0
-            .upsert_credential(kind, req.target, secret, req.username, req.app)
+            .upsert_credential(
+                kind,
+                req.target,
+                secret,
+                req.username,
+                req.app,
+                req.managed_by,
+            )
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::UpsertCredentialResponse {
@@ -1155,7 +1163,7 @@ impl CredentialService for Grpc {
         let req = request.into_inner();
         let kind = req.kind.map(credential_kind_from_pb).transpose()?;
         self.0
-            .remove_credential(kind, req.target)
+            .remove_credential(kind, req.target, req.managed_by)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::RemoveCredentialResponse {}))

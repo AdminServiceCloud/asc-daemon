@@ -92,6 +92,12 @@ pub struct Credential {
     /// credential applies to every app whose URL/image matches `pattern`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    /// Ownership marker (DMN-110): `Some("platform")` for an entry a
+    /// platform push installed; `None` for anything the operator added by
+    /// hand (`asc auth add`). Only the push that sets this ever removes an
+    /// entry on the operator's behalf — see `docs/*/org-credentials.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
     #[serde(flatten)]
     pub method: Method,
 }
@@ -409,6 +415,7 @@ impl GitAuth {
         method: Method,
         username: Option<String>,
         app: Option<String>,
+        managed_by: Option<String>,
     ) -> Result<&Credential> {
         let pattern = normalize(target);
         if pattern.is_empty() {
@@ -437,6 +444,7 @@ impl GitAuth {
             pattern,
             username,
             app,
+            managed_by,
             method,
         });
         Ok(list.last().expect("just pushed"))
@@ -460,6 +468,7 @@ impl GitAuth {
         pem: &[u8],
         username: Option<String>,
         app: Option<String>,
+        managed_by: Option<String>,
     ) -> Result<&Credential> {
         validate_private_key_pem(pem)?;
         let pattern = normalize(target);
@@ -469,19 +478,39 @@ impl GitAuth {
         let dir = self.ssh_key_dir()?;
         let path = dir.join(ssh_key_file_name(kind, &pattern, app.as_deref()));
         write_ssh_key_file(&dir, &path, pem)?;
-        self.add(kind, target, Method::SshKey { key: path }, username, app)
+        self.add(
+            kind,
+            target,
+            Method::SshKey { key: path },
+            username,
+            app,
+            managed_by,
+        )
     }
 
     /// Remove credentials for a host or prefix. `kind` narrows the removal to
-    /// one type; `None` removes every entry with that pattern. Also deletes
+    /// one type; `None` removes every entry with that pattern. `managed_by`,
+    /// when set, additionally narrows the removal to entries carrying that
+    /// exact marker — a platform harvest (DMN-110) passes its own marker so
+    /// it can never delete an operator-added entry that happens to share the
+    /// same `(kind, pattern)` under a different app binding. Also deletes
     /// the backing key file of any removed ssh-key credential.
-    pub fn remove(&mut self, kind: Option<Kind>, target: &str) -> Result<()> {
+    pub fn remove(
+        &mut self,
+        kind: Option<Kind>,
+        target: &str,
+        managed_by: Option<&str>,
+    ) -> Result<()> {
         let pattern = normalize(target);
         let list = match self.scope {
             Scope::System => &mut self.system,
             Scope::User => &mut self.user,
         };
-        let removes = |c: &Credential| c.pattern == pattern && kind.is_none_or(|k| c.kind == k);
+        let removes = |c: &Credential| {
+            c.pattern == pattern
+                && kind.is_none_or(|k| c.kind == k)
+                && managed_by.is_none_or(|m| c.managed_by.as_deref() == Some(m))
+        };
         let before = list.len();
         let removed: Vec<Credential> = list.iter().filter(|c| removes(c)).cloned().collect();
         list.retain(|c| !removes(c));
@@ -968,6 +997,7 @@ mod tests {
             pattern: pattern.into(),
             username: None,
             app: None,
+            managed_by: None,
             method: Method::Token {
                 token: token.into(),
             },
@@ -1108,6 +1138,7 @@ mod tests {
             },
             None,
             None,
+            None,
         )
         .unwrap();
         auth.add(
@@ -1116,6 +1147,7 @@ mod tests {
             Method::SshKey {
                 key: PathBuf::from("/home/u/.ssh/id_ed25519"),
             },
+            None,
             None,
             None,
         )
@@ -1128,6 +1160,7 @@ mod tests {
                 token: "ghp".into(),
             },
             Some("statebyte".into()),
+            None,
             None,
         )
         .unwrap();
@@ -1144,8 +1177,8 @@ mod tests {
         assert_eq!(hit.username.as_deref(), Some("statebyte"));
 
         let mut auth = auth;
-        auth.remove(None, "github.com/org/repo").unwrap();
-        assert!(auth.remove(None, "github.com/org/repo").is_err());
+        auth.remove(None, "github.com/org/repo", None).unwrap();
+        assert!(auth.remove(None, "github.com/org/repo", None).is_err());
 
         unsafe { std::env::remove_var("ASC_USER_GIT_AUTH") };
         unsafe { std::env::remove_var("ASC_GIT_AUTH") };
@@ -1203,6 +1236,7 @@ mod tests {
             Kind::Repo,
             "github.com",
             Method::Token { token: "t".into() },
+            None,
             None,
             None,
         )
@@ -1404,7 +1438,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut auth = user_scoped_auth(dir.path());
         let credential = auth
-            .add_ssh_key(Kind::Repo, "github.com/org/repo", valid_pem(), None, None)
+            .add_ssh_key(
+                Kind::Repo,
+                "github.com/org/repo",
+                valid_pem(),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let Method::SshKey { key } = &credential.method else {
             panic!("expected an ssh-key method");
@@ -1420,7 +1461,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut auth = user_scoped_auth(dir.path());
         let err = auth
-            .add_ssh_key(Kind::Repo, "github.com/org", b"not a key", None, None)
+            .add_ssh_key(Kind::Repo, "github.com/org", b"not a key", None, None, None)
             .unwrap_err();
         assert!(format!("{err:#}").contains("PEM"));
     }
@@ -1430,7 +1471,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut auth = user_scoped_auth(dir.path());
         let first = auth
-            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None)
+            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None, None)
             .unwrap()
             .clone();
         let Method::SshKey { key: first_path } = &first.method else {
@@ -1441,7 +1482,7 @@ mod tests {
         let second_pem =
             b"-----BEGIN OPENSSH PRIVATE KEY-----\nDIFFERENT\n-----END OPENSSH PRIVATE KEY-----\n";
         let second = auth
-            .add_ssh_key(Kind::Repo, "github.com/org", second_pem, None, None)
+            .add_ssh_key(Kind::Repo, "github.com/org", second_pem, None, None, None)
             .unwrap()
             .clone();
         let Method::SshKey { key: second_path } = &second.method else {
@@ -1464,7 +1505,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut auth = user_scoped_auth(dir.path());
         let credential = auth
-            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None)
+            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None, None)
             .unwrap()
             .clone();
         let Method::SshKey { key } = &credential.method else {
@@ -1479,6 +1520,7 @@ mod tests {
             Method::Token { token: "t".into() },
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(!key.exists(), "the orphaned ssh key file must be removed");
@@ -1489,7 +1531,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut auth = user_scoped_auth(dir.path());
         let credential = auth
-            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None)
+            .add_ssh_key(Kind::Repo, "github.com/org", valid_pem(), None, None, None)
             .unwrap()
             .clone();
         let Method::SshKey { key } = &credential.method else {
@@ -1497,7 +1539,7 @@ mod tests {
         };
         let key = key.clone();
 
-        auth.remove(None, "github.com/org").unwrap();
+        auth.remove(None, "github.com/org", None).unwrap();
         assert!(!key.exists());
     }
 }

@@ -1345,7 +1345,7 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
                     anyhow::bail!(t(Msg::AuthRegistryNeedsUsername));
                 }
             }
-            let saved = auth.add(kind, &target, method, username, app)?;
+            let saved = auth.add(kind, &target, method, username, app, None)?;
             let (pattern, label) = (saved.pattern.clone(), saved.method.label());
             auth.save()?;
             println!("{}", tf2(Msg::AuthSaved, pattern, label));
@@ -1364,20 +1364,25 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
                         Some(app) => format!("  app={app}"),
                         None => String::new(),
                     };
+                    let managed = match &cred.managed_by {
+                        Some(owner) => format!("  managed_by={owner}"),
+                        None => String::new(),
+                    };
                     println!(
-                        "{:<kind_w$}  {:<name_w$}  {:<6}  {}{}",
+                        "{:<kind_w$}  {:<name_w$}  {:<6}  {}{}{}",
                         cred.kind.label(),
                         cred.pattern,
                         scope.label(),
                         cred.method.label(),
                         bound,
+                        managed,
                     );
                 }
             }
         }
         AuthAction::Remove { target, kind } => {
             let kind = kind.as_deref().map(Kind::parse).transpose()?;
-            auth.remove(kind, &target)?;
+            auth.remove(kind, &target, None)?;
             auth.save()?;
             println!("{}", tf(Msg::AuthRemoved, normalize(&target)));
         }
@@ -1842,7 +1847,7 @@ fn offer_auth_setup(err: &anyhow::Error) -> bool {
         let mut store = GitAuth::load()?;
         // This recovery only ever runs for a git clone, so the credential is
         // a repo one, applying to every app under that host.
-        let saved = store.add(auth::Kind::Repo, &host, method, None, None)?;
+        let saved = store.add(auth::Kind::Repo, &host, method, None, None, None)?;
         let confirmation = tf2(Msg::AuthSaved, saved.pattern.clone(), saved.method.label());
         store.save()?;
         println!("{confirmation}");

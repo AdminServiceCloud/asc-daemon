@@ -1203,6 +1203,8 @@ struct CredentialJson {
     app: Option<String>,
     method: String,
     has_secret: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    managed_by: Option<String>,
 }
 
 fn credential_to_json(c: &pkg::auth::Credential) -> CredentialJson {
@@ -1215,6 +1217,7 @@ fn credential_to_json(c: &pkg::auth::Credential) -> CredentialJson {
         // Every stored Credential has some Method — Token or SshKey — so a
         // secret is always configured once an entry exists at all.
         has_secret: true,
+        managed_by: c.managed_by.clone(),
     }
 }
 
@@ -1257,7 +1260,9 @@ async fn upsert_credential(
         }
     };
     let credential = state
-        .upsert_credential(kind, body.target, secret, body.username, body.app)
+        // Not managed by anything pushed through the local REST API — that
+        // marker is reserved for the platform's own gRPC push (DMN-110).
+        .upsert_credential(kind, body.target, secret, body.username, body.app, None)
         .await?;
     Ok(Json(serde_json::json!({ "credential": credential_to_json(&credential) })).into_response())
 }
@@ -1278,7 +1283,7 @@ async fn remove_credential(
         .as_deref()
         .map(pkg::auth::Kind::parse)
         .transpose()?;
-    state.remove_credential(kind, pattern).await?;
+    state.remove_credential(kind, pattern, None).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

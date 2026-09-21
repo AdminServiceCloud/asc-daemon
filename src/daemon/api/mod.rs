@@ -1285,6 +1285,7 @@ impl ApiState {
         secret: pkg::auth::CredentialSecret,
         username: Option<String>,
         app: Option<String>,
+        managed_by: Option<String>,
     ) -> Result<pkg::auth::Credential> {
         self.blocking(move |_s| {
             let mut auth = pkg::auth::GitAuth::load_with(pkg::sources::Scope::System)?;
@@ -1296,10 +1297,11 @@ impl ApiState {
                         pkg::auth::Method::Token { token },
                         username,
                         app,
+                        managed_by,
                     )?
                     .clone(),
                 pkg::auth::CredentialSecret::SshKeyPem(pem) => auth
-                    .add_ssh_key(kind, &target, &pem, username, app)?
+                    .add_ssh_key(kind, &target, &pem, username, app, managed_by)?
                     .clone(),
             };
             auth.save()?;
@@ -1312,10 +1314,11 @@ impl ApiState {
         self: &Arc<Self>,
         kind: Option<pkg::auth::Kind>,
         target: String,
+        managed_by: Option<String>,
     ) -> Result<()> {
         self.blocking(move |_s| {
             let mut auth = pkg::auth::GitAuth::load_with(pkg::sources::Scope::System)?;
-            auth.remove(kind, &target)?;
+            auth.remove(kind, &target, managed_by.as_deref())?;
             auth.save()
         })
         .await

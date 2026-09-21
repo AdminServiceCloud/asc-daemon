@@ -4,6 +4,11 @@ version: '3'
 
 vars:
   TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
+  # cargo-sweep by --time is useless here: with daily builds every artifact's
+  # mtime is under 14 days old, so nothing ever looks "stale". --maxsize
+  # instead evicts the oldest artifacts first, whatever their age, until
+  # target/ fits under this cap.
+  TARGET_MAXSIZE: 8GB
 
 tasks:
   default:
@@ -37,6 +42,7 @@ tasks:
 
   lint:
     desc: 🔍 Clippy + formatting check
+    deps: [clean:sweep]
     cmds:
       - cargo clippy --all-targets --all-features -- -D warnings
       - cargo fmt --all -- --check
@@ -48,6 +54,7 @@ tasks:
 
   test:
     desc: 🧪 Tests
+    deps: [clean:sweep]
     cmds:
       - cargo test --all
 
@@ -57,15 +64,43 @@ tasks:
       - task: lint
       - task: test
 
+  # ── 🧹 Maintenance ───────────────────────────────────────────────
+
+  tools:sweep:
+    desc: 🧰 Install cargo-sweep if it's missing
+    status:
+      - command -v cargo-sweep
+    cmds:
+      - cargo install cargo-sweep --locked
+
+  clean:sweep:
+    desc: 🧹 Evict the oldest target/ artifacts until it fits under {{.TARGET_MAXSIZE}} (keeps the live cache, unlike `clean`)
+    deps: [tools:sweep]
+    cmds:
+      - cargo sweep --maxsize {{.TARGET_MAXSIZE}} .
+
+  clean:sweep:dry:
+    desc: 👀 Preview what clean:sweep would remove, without deleting anything
+    deps: [tools:sweep]
+    cmds:
+      - cargo sweep --dry-run --maxsize {{.TARGET_MAXSIZE}} .
+
+  clean:
+    desc: 🗑️ Wipe target/ entirely (full rebuild next time)
+    cmds:
+      - cargo clean
+
   # ── 📦 Build and release ──────────────────────────────────────────
 
   build:
     desc: 📦 Release build for the current platform (asc + asc-updater)
+    deps: [clean:sweep]
     cmds:
       - cargo build --release
 
   build:cross:
     desc: 🧬 Cross-compile for all supported architectures (requires cross)
+    deps: [clean:sweep]
     cmds:
       - for: { var: TARGETS }
         cmd: cross build --release --target {{.ITEM}}

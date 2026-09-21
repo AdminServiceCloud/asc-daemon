@@ -99,6 +99,43 @@ would come straight back and the operator would read that as a bug; use
 `asc app start|stop` instead. A container ASC does not own has no
 authorization model at all, which is a separate task with its own capability.
 
+### 🧹 Host inventory & cleanup (DMN-104/DMN-105)
+
+`asc docker images|volumes|networks|df` extend the host inventory beyond
+containers: every image, named volume and network the Engine knows about,
+plus a `df` summary mirroring `docker system df`. `asc docker prune
+images|volumes|build-cache [--dry-run] [--dangling]` removes what is unused —
+never anything an installed application still needs.
+
+- **An image or volume an installed app declares is protected — running or
+  stopped.** The protected set is computed from each app's own manifest and
+  settings (the image it currently resolves to via `runtime.image`/
+  `runtime.image-build`, and every named volume a `type: volumes` setting
+  declares), never from labels or naming conventions. `asc docker images`/
+  `volumes` mark a protected row and say which app is holding it.
+- **Removal is one item at a time, never the Engine's own bulk `/images/prune`
+  or `/volumes/prune`.** A container ASC did not create carries no ownership
+  label, so a filtered bulk prune would either miss nothing (no filter) and
+  risk removing something in active use through a race, or filter on a label
+  this daemon only started adding with DMN-105 and therefore leaves every
+  pre-existing container's image unprotected. Per-item removal makes the
+  protected-set check exact and makes `--dry-run` report precisely what would
+  happen, not an estimate.
+- **Networks are inventory-only — there is no `asc docker prune networks`.**
+  ASC never creates or deletes networks of its own, and the Engine's own
+  network prune removes any network with no *running* container attached,
+  including a stopped Compose stack's network — silently breaking its next
+  `up`. Showing networks without a delete path avoids that trap entirely.
+- **`asc docker df` is not cheap and is never polled.** Like `docker system
+  df`, answering it makes the Engine walk every image layer and volume; call
+  it when opening a cleanup view, not on a timer.
+- **Container labels** (`asc.managed`, `asc.app.id`, `asc.app.uuid`) are
+  written on every container ASC creates from DMN-105 onward, for a future
+  caller that wants to recognize an ASC-managed container without matching by
+  name. They are informational only: the settings-drift check
+  (`container_applied`) never reads labels back, so adding them cannot trigger
+  an unwanted recreate of an already-running container.
+
 ### ⚙️ Core
 
 - **Drivers**: the `AppDriver { start, stop, restart, state, logs, remove }` trait with implementations `DockerDriver` (via the **Docker Engine API over the unix socket** — not the `docker` CLI; the socket path is configurable — `[docker] socket`, default `/var/run/docker.sock`), `SystemdDriver` (units `asc-app-<id>.service`), `ProcessDriver` (supervised PID: a pid file and a log file in the application directory). Application installation (creating a container/unit from the manifest) is the package manager's job (DMN-003).
@@ -106,8 +143,8 @@ authorization model at all, which is a separate task with its own capability.
 - **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple *nodes* running the platform together. Multiple instances of one application on a single node already work (DMN-033/034, above).
-- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself), `asc docker ps|stats` (host containers).
+- **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself), `asc docker ps|stats|images|volumes|networks|df|prune` (host containers, images, volumes, networks and cleanup).
 
 ## 🔗 Related tasks
 
-DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, DMN-053, DMN-102, DMN-112, FE-005, FE-108 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-002, DMN-004, DMN-019, DMN-044, DMN-051, DMN-053, DMN-102, DMN-104, DMN-105, DMN-112, FE-005, FE-108, NODE-039, BE-040, FE-110 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

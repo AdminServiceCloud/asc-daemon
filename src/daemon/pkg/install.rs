@@ -4,6 +4,7 @@
 //! Installing is atomic from the user's point of view: any failure removes
 //! the half-created app directory, so a retry starts clean.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use tracing::{debug, info, warn};
 use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
 use super::resources;
-use super::settings::{SettingKind, SettingValues, SettingsFile};
+use super::settings::{SettingKind, SettingValues, SettingsFile, locate_installed};
 use crate::daemon::apps::meta::{
     AppMeta, DesiredState, ImageSource, Owner, Quota, Runtime, canonical_id, new_uuid,
 };
@@ -995,7 +996,10 @@ fn single_image_source(manifest: &Manifest) -> Option<ImageSource> {
 /// drift-recreate path to inspect the image owner (DMN-038) without deciding
 /// the source anew. `stored` is the source persisted in meta.json (set only
 /// for both-offered apps); single-option apps derive it from the manifest.
-pub(super) fn effective_image_ref(
+///
+/// `pub(crate)` rather than `pub(super)` since DMN-105 (see
+/// [`docker_footprint`]) needs it from `daemon::api`, outside `pkg` entirely.
+pub(crate) fn effective_image_ref(
     manifest: &Manifest,
     stored: Option<ImageSource>,
     id: &str,
@@ -1641,6 +1645,16 @@ fn docker_create(
         binds.push(volume_bind(volume, app_dir, owner)?);
     }
 
+    // DMN-105: informational labels only — never read back by
+    // `AppliedConfig`/the drift check (see the field doc on
+    // `docker::CreateSpec::labels`), so they cannot recreate the container.
+    let mut labels = HashMap::new();
+    labels.insert(docker::LABEL_MANAGED.to_string(), "true".to_string());
+    labels.insert(docker::LABEL_APP_ID.to_string(), id.to_string());
+    if let Some(uuid) = app_ids.get(1).copied().flatten() {
+        labels.insert(docker::LABEL_APP_UUID.to_string(), uuid.to_string());
+    }
+
     docker::create(
         docker_cfg,
         docker::CreateSpec {
@@ -1658,6 +1672,7 @@ fn docker_create(
             open_stdin: manifest.runtime.stdin,
             tty: manifest.runtime.tty,
             registry_auth,
+            labels,
         },
     )
     .context("cannot create docker container")
@@ -1833,6 +1848,59 @@ pub(super) fn volume_bind(
         .with_context(|| format!("cannot create volume directory {}", host.display()))?;
     open_volume_dir(&host, owner)?;
     Ok(format!("{}:{}", host.display(), target))
+}
+
+/// What DockerService's inventory and prune (DMN-104/DMN-105) must never
+/// remove for one installed app: the image it currently runs, and every
+/// named Docker volume its settings declare. `pub` (not `pub(crate)`) so both
+/// the daemon API (`daemon::api`) and the CLI's in-process fallback
+/// (`asc docker prune` without a running daemon) can share one
+/// implementation instead of the CLI re-deriving it from the manifest by hand.
+pub struct AppDockerFootprint {
+    pub image: Option<String>,
+    pub named_volumes: Vec<String>,
+}
+
+/// Resolve [`AppDockerFootprint`] for one installed app. Non-Docker runtimes
+/// have no footprint. A failure to read the manifest, settings or registry
+/// source degrades to an empty footprint (logged) rather than propagating —
+/// callers are scanning the whole app list for what to protect, and one
+/// unreadable app must not stop the daemon from protecting every other one
+/// (worse, must never be mistaken for "this app has nothing to protect" by
+/// an unwrapped error hiding the real image behind it).
+pub fn docker_footprint(config: &Config, meta: &AppMeta, app_dir: &Path) -> AppDockerFootprint {
+    let empty = || AppDockerFootprint {
+        image: None,
+        named_volumes: Vec::new(),
+    };
+    let Runtime::Docker { image_source, .. } = &meta.runtime else {
+        return empty();
+    };
+    let resolved = (|| -> Result<AppDockerFootprint> {
+        let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
+        let manifest = Manifest::load(&manifest_dir)?;
+        let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+        let image = effective_image_ref(&manifest, *image_source, &meta.id);
+        let inputs = runtime_inputs(settings.as_ref(), &app_dir.join("config"))?;
+        let mut named_volumes = Vec::new();
+        for volume in &inputs.volumes {
+            if let VolumeKind::Named(name) = classify_volume(volume, app_dir)? {
+                named_volumes.push(name);
+            }
+        }
+        Ok(AppDockerFootprint {
+            image,
+            named_volumes,
+        })
+    })();
+    resolved.unwrap_or_else(|err| {
+        warn!(
+            app = %meta.id,
+            error = %format!("{err:#}"),
+            "cannot resolve the docker footprint to protect for prune"
+        );
+        empty()
+    })
 }
 
 /// Run package install commands (native/utility) from the manifest directory.

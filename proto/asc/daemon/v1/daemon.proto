@@ -735,6 +735,52 @@ service MonitorService {
   // inventory, not a metric: MAC, MTU, state and every IPv4/IPv6 address
   // (DMN-074).
   rpc ListNetworkInterfaces(ListNetworkInterfacesRequest) returns (ListNetworkInterfacesResponse);
+  // Real host listening-port inventory (DMN-103) — what is actually bound,
+  // parsed from /proc/net/{tcp,tcp6,udp,udp6}, not what an app's settings
+  // merely declare (see AppService.ListAppPorts for that). Attribution to a
+  // process is best-effort: a non-root caller over the unix socket simply
+  // cannot read most other processes' fd tables, and the affected rows come
+  // back with pid/process/command absent rather than the call failing.
+  rpc ListListeningPorts(ListListeningPortsRequest) returns (ListListeningPortsResponse);
+}
+
+message ListListeningPortsRequest {}
+
+message ListListeningPortsResponse {
+  repeated ListeningPort ports = 1;
+}
+
+message ListeningPort {
+  uint32 port = 1;
+  // "tcp" or "udp".
+  string protocol = 2;
+  // "0.0.0.0", "::", "127.0.0.1" — the bind address exactly as /proc
+  // reports it, not normalized or deduplicated across families.
+  string address = 3;
+  // "ipv4" or "ipv6".
+  string family = 4;
+  optional uint32 pid = 5;
+  // /proc/<pid>/comm — short process name, absent when pid is absent.
+  optional string process = 6;
+  // /proc/<pid>/cmdline, argv joined with spaces; absent when pid is absent
+  // or the process has already exited by the time it is read.
+  optional string command = 7;
+  // Set when a Docker container publishes this exact (port, protocol) —
+  // resolved by cross-referencing DockerService.ListContainers, since
+  // /proc alone cannot say which container owns a docker-proxy or dockerd
+  // listener.
+  optional string container_id = 8;
+  optional string container_name = 9;
+  // Set when the container above belongs to an installed ASC app.
+  optional string app_id = 10;
+  optional string app_uuid = 11;
+  // Declared by an installed app'''s settings but nothing is bound right
+  // now (the app is stopped) — resolved from AppService.ListAppPorts'''s
+  // own source, not from /proc. Mutually exclusive with pid/container_id
+  // being set: a declared-only row is never also a live one.
+  bool declared_only = 12;
+  // The daemon'''s own API listener ([api] listen / acme_http_listen).
+  bool is_daemon = 13;
 }
 
 message SystemMetrics {
@@ -1373,6 +1419,28 @@ service DockerService {
   // must not pay that cost every time it is opened — the same split
   // AppService.ListApps/GetAppStats already makes.
   rpc ListContainerStats(ListContainerStatsRequest) returns (ListContainerStatsResponse);
+  // Host inventory beyond containers (DMN-104): every image, named volume
+  // and network the Engine knows about, ASC-owned or not. Each image/volume
+  // row says whether an installed app (running or not) still needs it, so a
+  // cleanup UI can explain *why* something is protected before the caller
+  // ever asks to remove anything.
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  // Networks are inventory-only here — never a prune target. See
+  // PruneDocker and docs/english/app-management.md for why.
+  rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+  // `docker system df`'s four categories (images/containers/volumes/build
+  // cache): counts and bytes, nothing else. Expensive — the Engine walks
+  // every layer and volume to answer — so callers ask for it only when a
+  // user opens the Docker settings section, never on a poll.
+  rpc GetDockerDiskUsage(GetDockerDiskUsageRequest) returns (GetDockerDiskUsageResponse);
+  // Remove unused images/volumes/build cache, one item at a time rather than
+  // the Engine's own bulk prune endpoints (DMN-105): an item an installed
+  // app still needs — running or stopped — is protected and reported in
+  // `skipped` with why, never silently removed. `dry_run` computes the exact
+  // same plan without deleting anything, so a caller can show it for
+  // confirmation before the real call.
+  rpc PruneDocker(PruneDockerRequest) returns (PruneDockerResponse);
 }
 
 message ListContainersRequest {
@@ -1460,4 +1528,121 @@ message ContainerStats {
   uint64 network_tx_bytes = 6;
   uint64 block_read_bytes = 7;
   uint64 block_write_bytes = 8;
+}
+
+// ── Host inventory & cleanup (DMN-104/DMN-105) ──────────────────────────────
+
+message ListImagesRequest {}
+
+message ListImagesResponse {
+  repeated DockerImage images = 1;
+}
+
+message DockerImage {
+  // Full "sha256:..." id.
+  string id = 1;
+  // "name:tag" references pointing at this image; empty for a dangling
+  // image (no tag references it any more — `docker images -f dangling=true`).
+  repeated string tags = 2;
+  uint64 size_bytes = 3;
+  int64 created = 4;
+  map<string, string> labels = 5;
+  bool dangling = 6;
+  // An installed app (running or not) still runs this image — PruneDocker
+  // never removes it, dry_run or not.
+  bool asc_protected = 7;
+  // Set together with asc_protected: which app, for the UI to explain the
+  // lock without a separate lookup.
+  optional string protected_reason = 8;
+}
+
+message ListVolumesRequest {}
+
+message ListVolumesResponse {
+  repeated DockerVolume volumes = 1;
+}
+
+message DockerVolume {
+  string name = 1;
+  string driver = 2;
+  string mountpoint = 3;
+  optional int64 created_at = 4;
+  map<string, string> labels = 5;
+  // Containers currently referencing this volume; absent when the Engine
+  // did not report usage data for it.
+  optional int32 ref_count = 6;
+  optional uint64 size_bytes = 7;
+  // An installed app (running or not) declares this named volume — see
+  // DockerImage.asc_protected for the same contract.
+  bool asc_protected = 8;
+  optional string protected_reason = 9;
+}
+
+message ListNetworksRequest {}
+
+message ListNetworksResponse {
+  repeated DockerNetwork networks = 1;
+}
+
+// Inventory-only — see PruneDocker for why networks are never a prune
+// target.
+message DockerNetwork {
+  string id = 1;
+  string name = 2;
+  string driver = 3;
+  // "local" or "swarm".
+  string scope = 4;
+  bool internal = 5;
+  optional int64 created = 6;
+  map<string, string> labels = 7;
+}
+
+message GetDockerDiskUsageRequest {}
+
+message GetDockerDiskUsageResponse {
+  DiskUsageGroup images = 1;
+  DiskUsageGroup containers = 2;
+  DiskUsageGroup volumes = 3;
+  DiskUsageGroup build_cache = 4;
+}
+
+// One `docker system df` category — counts and bytes, exactly as the Engine
+// reports them (no `layers_size`: the Engine's own `/system/df` response has
+// no such top-level field — see bollard's SystemDataUsageResponse).
+message DiskUsageGroup {
+  int64 active_count = 1;
+  int64 total_count = 2;
+  uint64 size_bytes = 3;
+  uint64 reclaimable_bytes = 4;
+}
+
+enum PruneTarget {
+  PRUNE_TARGET_UNSPECIFIED = 0;
+  PRUNE_TARGET_IMAGES = 1;
+  PRUNE_TARGET_VOLUMES = 2;
+  PRUNE_TARGET_BUILD_CACHE = 3;
+}
+
+message PruneDockerRequest {
+  PruneTarget target = 1;
+  // Compute and return the exact same plan without deleting anything.
+  bool dry_run = 2;
+  // Images only: limit to dangling (untagged) images. Ignored for other
+  // targets, which have no equivalent notion.
+  bool dangling_only = 3;
+}
+
+message PruneDockerResponse {
+  // Names/ids actually removed (or that would be, under dry_run) — never
+  // includes anything protected.
+  repeated string removed = 1;
+  uint64 reclaimed_bytes = 2;
+  // Everything considered but not removed, with why: still needed by an
+  // installed app, or (a real run only) the Engine refused the deletion.
+  repeated PruneSkip skipped = 3;
+}
+
+message PruneSkip {
+  string name = 1;
+  string reason = 2;
 }

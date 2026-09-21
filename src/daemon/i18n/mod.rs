@@ -93,6 +93,15 @@ pub enum Msg {
     DockerNoContainers,
     DockerRootRequired,
     DockerUnsupportedByDaemon,
+    PortsListeningEmpty,
+    PortsListeningUnsupportedByDaemon,
+    DockerInventoryUnsupportedByDaemon,
+    DockerNoImages,
+    DockerNoVolumes,
+    DockerNoNetworks,
+    DockerPruneProtectedByApp,
+    DockerPruneNothingToDo,
+    DockerBuildCacheInUse,
     AppNameAmbiguous,
     AttachHint,
     AttachDockerOnly,
@@ -348,6 +357,26 @@ pub fn t(msg: Msg) -> &'static str {
             "the daemon on this host is too old to list containers — update it (asc-updater)",
             "демон на этом хосте слишком старый, чтобы показать контейнеры — обновите его (asc-updater)",
         ),
+        Msg::PortsListeningEmpty => ("no listening ports", "занятых портов нет"),
+        Msg::PortsListeningUnsupportedByDaemon => (
+            "the daemon on this host is too old to list listening ports — update it (asc-updater)",
+            "демон на этом хосте слишком старый, чтобы показать занятые порты — обновите его (asc-updater)",
+        ),
+        Msg::DockerInventoryUnsupportedByDaemon => (
+            "the daemon on this host is too old for Docker inventory/cleanup — update it (asc-updater)",
+            "демон на этом хосте слишком старый для инвентаря и очистки Docker — обновите его (asc-updater)",
+        ),
+        Msg::DockerNoImages => ("no images", "образов нет"),
+        Msg::DockerNoVolumes => ("no volumes", "томов нет"),
+        Msg::DockerNoNetworks => ("no networks", "сетей нет"),
+        Msg::DockerPruneProtectedByApp => (
+            "in use by the installed app '{}'",
+            "используется установленным приложением '{}'",
+        ),
+        Msg::DockerPruneNothingToDo => ("nothing to remove", "нечего удалять"),
+        Msg::DockerBuildCacheInUse => {
+            ("in use by an active build", "используется активной сборкой")
+        }
         Msg::AppNameAmbiguous => (
             "several apps are named '{}' — use the app id instead",
             "названию '{}' соответствует несколько приложений — используйте id",

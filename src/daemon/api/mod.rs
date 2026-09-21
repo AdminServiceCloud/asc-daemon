@@ -31,6 +31,7 @@ use crate::daemon::apps::{AppManager, AppStatus, Outcome, RuntimeState, UserCont
 use crate::daemon::config::Config;
 use crate::daemon::docker;
 use crate::daemon::files;
+use crate::daemon::i18n::{Msg, t, tf};
 use crate::daemon::monitor::Monitor;
 use crate::daemon::pkg;
 use crate::daemon::progress;
@@ -55,6 +56,9 @@ pub const CAPABILITIES: &[&str] = &[
     "users",
     "docker.containers",
     "docker.stats",
+    "ports.listening",
+    "docker.inventory",
+    "docker.prune",
 ];
 
 /// Shared state behind both transports.
@@ -156,6 +160,364 @@ fn cpu_percent_between(
     }
     let delta = second.cpu_time_micros.saturating_sub(first.cpu_time_micros);
     delta as f64 / elapsed_micros as f64 * 100.0
+}
+
+// ── Host inventory & cleanup (DMN-104/DMN-105) ──────────────────────────────
+
+/// One row of [`ApiState::list_images`].
+pub struct DockerImageRow {
+    pub id: String,
+    pub tags: Vec<String>,
+    pub size_bytes: u64,
+    pub created: i64,
+    pub labels: std::collections::HashMap<String, String>,
+    pub dangling: bool,
+    /// An installed app (running or not) still runs this image.
+    pub asc_protected: bool,
+    /// Set together with `asc_protected`: which app, for the UI to explain
+    /// the lock without a separate lookup.
+    pub protected_reason: Option<String>,
+}
+
+/// One row of [`ApiState::list_volumes`].
+pub struct DockerVolumeRow {
+    pub name: String,
+    pub driver: String,
+    pub mountpoint: String,
+    pub created_at: Option<i64>,
+    pub labels: std::collections::HashMap<String, String>,
+    pub ref_count: Option<i32>,
+    pub size_bytes: Option<u64>,
+    pub asc_protected: bool,
+    pub protected_reason: Option<String>,
+}
+
+/// One row of [`ApiState::list_networks`]. Inventory-only — see
+/// [`ApiState::prune_docker`] for why networks are never a prune target.
+pub struct DockerNetworkRow {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    pub scope: String,
+    pub internal: bool,
+    pub created: Option<i64>,
+    pub labels: std::collections::HashMap<String, String>,
+}
+
+/// One `docker system df` category.
+#[derive(Default)]
+pub struct DiskUsageGroupRow {
+    pub active_count: i64,
+    pub total_count: i64,
+    pub size_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
+impl From<docker::DiskUsageGroup> for DiskUsageGroupRow {
+    fn from(group: docker::DiskUsageGroup) -> Self {
+        Self {
+            active_count: group.active_count,
+            total_count: group.total_count,
+            size_bytes: group.size_bytes,
+            reclaimable_bytes: group.reclaimable_bytes,
+        }
+    }
+}
+
+/// Result of [`ApiState::docker_disk_usage`].
+pub struct DockerDiskUsageRow {
+    pub images: DiskUsageGroupRow,
+    pub containers: DiskUsageGroupRow,
+    pub volumes: DiskUsageGroupRow,
+    pub build_cache: DiskUsageGroupRow,
+}
+
+/// A [`ApiState::prune_docker`] target — mirrors the proto enum without the
+/// `UNSPECIFIED` variant, which the gRPC/REST layers reject before this ever
+/// sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneTarget {
+    Images,
+    Volumes,
+    BuildCache,
+}
+
+/// One item [`ApiState::prune_docker`] considered but did not remove.
+pub struct PruneSkipRow {
+    pub name: String,
+    pub reason: String,
+}
+
+/// Result of [`ApiState::prune_docker`], real run or dry run alike.
+pub struct PruneDockerRow {
+    pub removed: Vec<String>,
+    pub reclaimed_bytes: u64,
+    pub skipped: Vec<PruneSkipRow>,
+}
+
+/// Images and named volumes that [`ApiState::list_images`]/
+/// [`ApiState::list_volumes`]/[`ApiState::prune_docker`] must never remove
+/// (DMN-105): every installed app's currently effective image, and every
+/// named volume its settings declare — regardless of whether the app is
+/// running. Protection matches on the exact reference string the app's
+/// manifest names (what [`docker::create`] actually passed to the Engine),
+/// which is why it can never diverge from what was actually run.
+struct DockerProtection {
+    /// image reference -> reason.
+    images: std::collections::HashMap<String, String>,
+    /// volume name -> reason.
+    volumes: std::collections::HashMap<String, String>,
+}
+
+impl DockerProtection {
+    fn scan(state: &ApiState, ctx: &UserContext) -> Result<Self> {
+        let mut images = std::collections::HashMap::new();
+        let mut volumes = std::collections::HashMap::new();
+        for app in state.manager.list(ctx)? {
+            let app_dir = state.manager.store().app_dir(&app.meta.id)?;
+            let footprint = pkg::docker_footprint(&state.config, &app.meta, &app_dir);
+            let label = app.meta.display_name().to_string();
+            if let Some(image) = footprint.image {
+                images
+                    .entry(image)
+                    .or_insert_with(|| tf(Msg::DockerPruneProtectedByApp, &label));
+            }
+            for volume in footprint.named_volumes {
+                volumes
+                    .entry(volume)
+                    .or_insert_with(|| tf(Msg::DockerPruneProtectedByApp, &label));
+            }
+        }
+        Ok(Self { images, volumes })
+    }
+
+    fn image_reason(&self, tags: &[String], id: &str) -> Option<&str> {
+        tags.iter()
+            .find_map(|tag| self.images.get(tag))
+            .or_else(|| self.images.get(id))
+            .map(String::as_str)
+    }
+
+    fn volume_reason(&self, name: &str) -> Option<&str> {
+        self.volumes.get(name).map(String::as_str)
+    }
+}
+
+/// First 12 characters of an image id, its `sha256:` prefix stripped — the
+/// same abbreviation `docker images` shows.
+fn short_image_id(id: &str) -> String {
+    id.trim_start_matches("sha256:").chars().take(12).collect()
+}
+
+/// [`ApiState::prune_docker`]'s `PruneTarget::Images` branch.
+fn prune_images(
+    state: &ApiState,
+    ctx: &UserContext,
+    dry_run: bool,
+    dangling_only: bool,
+) -> Result<PruneDockerRow> {
+    let images = docker::list_images(&state.config.docker)?;
+    let protection = DockerProtection::scan(state, ctx)?;
+    let mut removed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut reclaimed_bytes = 0u64;
+    for image in images {
+        if dangling_only && !image.dangling {
+            continue;
+        }
+        let label = image
+            .tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| short_image_id(&image.id));
+        if let Some(reason) = protection.image_reason(&image.tags, &image.id) {
+            skipped.push(PruneSkipRow {
+                name: label,
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+        if dry_run {
+            removed.push(label);
+            reclaimed_bytes += image.size;
+            continue;
+        }
+        match docker::remove_image(&state.config.docker, &image.id) {
+            Ok(()) => {
+                removed.push(label);
+                reclaimed_bytes += image.size;
+            }
+            Err(err) => skipped.push(PruneSkipRow {
+                name: label,
+                reason: format!("{err:#}"),
+            }),
+        }
+    }
+    Ok(PruneDockerRow {
+        removed,
+        reclaimed_bytes,
+        skipped,
+    })
+}
+
+/// [`ApiState::prune_docker`]'s `PruneTarget::Volumes` branch.
+fn prune_volumes(state: &ApiState, ctx: &UserContext, dry_run: bool) -> Result<PruneDockerRow> {
+    let volumes = docker::list_volumes(&state.config.docker)?;
+    let protection = DockerProtection::scan(state, ctx)?;
+    let mut removed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut reclaimed_bytes = 0u64;
+    for volume in volumes {
+        if let Some(reason) = protection.volume_reason(&volume.name) {
+            skipped.push(PruneSkipRow {
+                name: volume.name,
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+        let size = volume.size_bytes.unwrap_or(0);
+        if dry_run {
+            removed.push(volume.name);
+            reclaimed_bytes += size;
+            continue;
+        }
+        match docker::remove_volume(&state.config.docker, &volume.name) {
+            Ok(()) => {
+                removed.push(volume.name);
+                reclaimed_bytes += size;
+            }
+            Err(err) => skipped.push(PruneSkipRow {
+                name: volume.name,
+                reason: format!("{err:#}"),
+            }),
+        }
+    }
+    Ok(PruneDockerRow {
+        removed,
+        reclaimed_bytes,
+        skipped,
+    })
+}
+
+/// [`ApiState::prune_docker`]'s `PruneTarget::BuildCache` branch. No ASC
+/// ownership applies here (see the module doc on [`docker::prune_build_cache`]),
+/// so a dry run just reports what is not currently in use, and a real run is
+/// the Engine's own bulk prune rather than a per-record loop.
+fn prune_build_cache_target(state: &ApiState, dry_run: bool) -> Result<PruneDockerRow> {
+    if !dry_run {
+        let (removed, reclaimed_bytes) = docker::prune_build_cache(&state.config.docker)?;
+        return Ok(PruneDockerRow {
+            removed,
+            reclaimed_bytes,
+            skipped: Vec::new(),
+        });
+    }
+    let entries = docker::build_cache_entries(&state.config.docker)?;
+    let mut removed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut reclaimed_bytes = 0u64;
+    for entry in entries {
+        if entry.in_use {
+            skipped.push(PruneSkipRow {
+                name: entry.id,
+                reason: t(Msg::DockerBuildCacheInUse).to_string(),
+            });
+            continue;
+        }
+        reclaimed_bytes += entry.size_bytes;
+        removed.push(entry.id);
+    }
+    Ok(PruneDockerRow {
+        removed,
+        reclaimed_bytes,
+        skipped,
+    })
+}
+
+/// One row of [`ApiState::listening_ports`] (DMN-103): a real host socket,
+/// or a declared-but-unbound port of a stopped app.
+pub struct ListeningPortRow {
+    pub port: u16,
+    /// "tcp" or "udp".
+    pub protocol: &'static str,
+    pub address: String,
+    /// "ipv4" or "ipv6".
+    pub family: &'static str,
+    pub pid: Option<u32>,
+    pub process: Option<String>,
+    pub command: Option<String>,
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+    pub app_id: Option<String>,
+    pub app_uuid: Option<String>,
+    /// Declared by an installed app's settings but nothing is bound right
+    /// now — the app is stopped. Never set together with a container or pid.
+    pub declared_only: bool,
+    /// This daemon's own API listener ([api] listen / acme_http_listen).
+    pub is_daemon: bool,
+}
+
+/// Port number out of a `"host:port"` or `"[host]:port"` listen address —
+/// the shape every `[api]` listen field uses. `None` for a malformed value,
+/// which simply means nothing in the response gets flagged `is_daemon`.
+fn listen_port(address: &str) -> Option<u16> {
+    address.rsplit_once(':')?.1.parse().ok()
+}
+
+/// `(container id, first name, owning app id, owning app uuid)`.
+type ContainerPortOwner = (String, String, Option<String>, Option<String>);
+
+/// One container's published ports, keyed by `(host_port, transport)` — the
+/// same shape docker port cross-referencing needs, built once per
+/// [`ApiState::listening_ports`] call rather than per socket.
+struct ContainerPortIndex {
+    /// (port, "tcp"|"udp") -> (container id, first name, owning app).
+    by_port: std::collections::HashMap<(u16, &'static str), ContainerPortOwner>,
+}
+
+impl ContainerPortIndex {
+    /// `owners` is container name -> (app id, app uuid), the same map
+    /// [`ApiState::container_owners`] builds for [`ApiState::list_containers`] —
+    /// `docker::ContainerInfo` itself carries no app identity, only names.
+    fn build(
+        containers: &[docker::ContainerInfo],
+        owners: &std::collections::HashMap<String, (String, Option<String>)>,
+    ) -> Self {
+        let mut by_port = std::collections::HashMap::new();
+        for container in containers {
+            let name = container
+                .names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| container.id.clone());
+            let owner = container
+                .names
+                .iter()
+                .find_map(|n| owners.get(n.as_str()))
+                .cloned();
+            let (app_id, app_uuid) = match owner {
+                Some((app_id, app_uuid)) => (Some(app_id), app_uuid),
+                None => (None, None),
+            };
+            for port in &container.ports {
+                let Some(public) = port.public else { continue };
+                let transport: &'static str = if port.protocol == "udp" { "udp" } else { "tcp" };
+                by_port.entry((public, transport)).or_insert_with(|| {
+                    (
+                        container.id.clone(),
+                        name.clone(),
+                        app_id.clone(),
+                        app_uuid.clone(),
+                    )
+                });
+            }
+        }
+        Self { by_port }
+    }
+
+    fn lookup(&self, port: u16, protocol: &'static str) -> Option<&ContainerPortOwner> {
+        self.by_port.get(&(port, protocol))
+    }
 }
 
 /// One event of [`ApiState::install_stream`]: a progress line, or the
@@ -1312,6 +1674,261 @@ impl ApiState {
                     block_write_bytes: second.disk_write_bytes,
                 });
             }
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Every image on the host, ASC-owned or not (DMN-104), with the
+    /// protected ones (still run by an installed app) marked.
+    pub async fn list_images(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<DockerImageRow>> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let images = docker::list_images(&s.config.docker)?;
+            let protection = DockerProtection::scan(s, &ctx)?;
+            Ok(images
+                .into_iter()
+                .map(|image| {
+                    let row = DockerImageRow {
+                        id: image.id,
+                        tags: image.tags,
+                        size_bytes: image.size,
+                        created: image.created,
+                        labels: image.labels,
+                        dangling: image.dangling,
+                        asc_protected: false,
+                        protected_reason: None,
+                    };
+                    let reason = protection
+                        .image_reason(&row.tags, &row.id)
+                        .map(str::to_string);
+                    DockerImageRow {
+                        asc_protected: reason.is_some(),
+                        protected_reason: reason,
+                        ..row
+                    }
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Every named volume on the host (DMN-104), with the protected ones
+    /// (still declared by an installed app's settings) marked.
+    pub async fn list_volumes(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<DockerVolumeRow>> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let volumes = docker::list_volumes(&s.config.docker)?;
+            let protection = DockerProtection::scan(s, &ctx)?;
+            Ok(volumes
+                .into_iter()
+                .map(|volume| {
+                    let reason = protection.volume_reason(&volume.name).map(str::to_string);
+                    DockerVolumeRow {
+                        asc_protected: reason.is_some(),
+                        protected_reason: reason,
+                        name: volume.name,
+                        driver: volume.driver,
+                        mountpoint: volume.mountpoint,
+                        created_at: volume.created_at,
+                        labels: volume.labels,
+                        ref_count: volume.ref_count.and_then(|c| i32::try_from(c).ok()),
+                        size_bytes: volume.size_bytes,
+                    }
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Every network on the host (DMN-104), inventory-only — see
+    /// [`Self::prune_docker`] for why networks are never a prune target.
+    pub async fn list_networks(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<Vec<DockerNetworkRow>> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            Ok(docker::list_networks(&s.config.docker)?
+                .into_iter()
+                .map(|network| DockerNetworkRow {
+                    id: network.id,
+                    name: network.name,
+                    driver: network.driver,
+                    scope: network.scope,
+                    internal: network.internal,
+                    created: network.created,
+                    labels: network.labels,
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// `docker system df`'s four categories (DMN-104). Expensive — the
+    /// Engine walks every layer and volume to answer — so callers ask for it
+    /// only when a user opens the Docker settings section, never on a poll.
+    pub async fn docker_disk_usage(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<DockerDiskUsageRow> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let usage = docker::disk_usage(&s.config.docker)?;
+            Ok(DockerDiskUsageRow {
+                images: usage.images.into(),
+                containers: usage.containers.into(),
+                volumes: usage.volumes.into(),
+                build_cache: usage.build_cache.into(),
+            })
+        })
+        .await
+    }
+
+    /// Remove unused images/volumes/build cache, one item at a time rather
+    /// than the Engine's own bulk prune endpoints (DMN-105): an item an
+    /// installed app still needs — running or stopped — is protected and
+    /// reported in `skipped` with why, never silently removed. `dry_run`
+    /// computes the exact same plan without deleting anything.
+    ///
+    /// Networks are deliberately not a target here: unlike images and
+    /// volumes there is no ASC ownership signal to check a network against,
+    /// and the Engine's own network prune removes any network with no
+    /// *running* container attached — including a stopped compose stack's
+    /// network, which would silently break its next `up`.
+    pub async fn prune_docker(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        target: PruneTarget,
+        dry_run: bool,
+        dangling_only: bool,
+    ) -> Result<PruneDockerRow> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            match target {
+                PruneTarget::Images => prune_images(s, &ctx, dry_run, dangling_only),
+                PruneTarget::Volumes => prune_volumes(s, &ctx, dry_run),
+                PruneTarget::BuildCache => prune_build_cache_target(s, dry_run),
+            }
+        })
+        .await
+    }
+
+    /// Every real listening port on the host, merged with the two things
+    /// `/proc` cannot say (DMN-103): which Docker container owns a
+    /// `docker-proxy`/`dockerd` listener, and which ports a stopped app
+    /// would bind on its next start.
+    ///
+    /// The Docker cross-reference is non-fatal: an unreachable Engine
+    /// leaves every socket unattributed rather than failing the call — the
+    /// `/proc` inventory is still useful on its own.
+    pub async fn listening_ports(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<Vec<ListeningPortRow>> {
+        self.blocking(move |s| {
+            let sockets = crate::daemon::monitor::sockets::listening();
+
+            let containers = match docker::list_containers(&s.config.docker, false, false) {
+                Ok(containers) => containers,
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot query docker for port attribution");
+                    Vec::new()
+                }
+            };
+            let owners = s.container_owners(&ctx)?;
+            let container_ports = ContainerPortIndex::build(&containers, &owners);
+
+            let daemon_ports: Vec<u16> = [
+                listen_port(&s.config.api.listen),
+                s.config
+                    .api
+                    .acme_http_listen
+                    .as_deref()
+                    .and_then(listen_port),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            // (port, transport) already covered by a live socket — the
+            // declared-ports pass below must not duplicate these.
+            let mut live: std::collections::HashSet<(u16, &'static str)> =
+                std::collections::HashSet::new();
+
+            let mut rows: Vec<ListeningPortRow> = sockets
+                .into_iter()
+                .map(|socket| {
+                    live.insert((socket.port, socket.protocol));
+                    let attributed = container_ports.lookup(socket.port, socket.protocol);
+                    let (container_id, container_name, app_id, app_uuid) = match attributed {
+                        Some((id, name, app_id, app_uuid)) => {
+                            (Some(id.clone()), Some(name.clone()), app_id.clone(), app_uuid.clone())
+                        }
+                        None => (None, None, None, None),
+                    };
+                    ListeningPortRow {
+                        is_daemon: socket.protocol == "tcp" && daemon_ports.contains(&socket.port),
+                        port: socket.port,
+                        protocol: socket.protocol,
+                        address: socket.address,
+                        family: socket.family,
+                        pid: socket.pid,
+                        process: socket.process,
+                        command: socket.command,
+                        container_id,
+                        container_name,
+                        app_id,
+                        app_uuid,
+                        declared_only: false,
+                    }
+                })
+                .collect();
+
+            // Declared-but-unbound ports of stopped docker apps: a reserved
+            // port must still show up, or it silently looks free.
+            for app in s.manager.list(&ctx)? {
+                if !matches!(
+                    app.meta.runtime,
+                    crate::daemon::apps::meta::Runtime::Docker { .. }
+                ) {
+                    continue;
+                }
+                let declared = match crate::daemon::apps::ports::published(
+                    &s.config,
+                    s.manager.store(),
+                    &app.meta,
+                ) {
+                    Ok(ports) => ports,
+                    Err(err) => {
+                        warn!(app = %app.meta.id, error = %format!("{err:#}"), "cannot resolve declared ports");
+                        continue;
+                    }
+                };
+                for declared_port in declared {
+                    for transport in declared_port.protocol.transports() {
+                        if live.contains(&(declared_port.host, *transport)) {
+                            continue;
+                        }
+                        rows.push(ListeningPortRow {
+                            port: declared_port.host,
+                            protocol: transport,
+                            address: String::new(),
+                            family: "",
+                            pid: None,
+                            process: None,
+                            command: None,
+                            container_id: None,
+                            container_name: None,
+                            app_id: Some(app.meta.id.clone()),
+                            app_uuid: app.meta.uuid.clone(),
+                            declared_only: true,
+                            is_daemon: false,
+                        });
+                    }
+                }
+            }
+
             Ok(rows)
         })
         .await

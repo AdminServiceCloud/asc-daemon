@@ -18,9 +18,9 @@ pub use clone::clone_app;
 pub use gitref::short_commit;
 pub use inspect::{PackageInfo, PackageKind, StackAppInfo, inspect_git};
 pub use install::{
-    AmbiguousPackage, GitRef, ImageChoiceRequired, InstallOutcome, InstallReport, LicenseRequired,
-    StackPackage, VersionChoiceRequired, install, install_from_git, instance_id, is_git_url,
-    repo_name,
+    AmbiguousPackage, AppDockerFootprint, GitRef, ImageChoiceRequired, InstallOutcome,
+    InstallReport, LicenseRequired, StackPackage, VersionChoiceRequired, docker_footprint, install,
+    install_from_git, instance_id, is_git_url, repo_name,
 };
 pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};
 pub use registry::RegistryClient;

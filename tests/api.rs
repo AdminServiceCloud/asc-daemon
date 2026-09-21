@@ -194,7 +194,10 @@ mod rest {
                 "app.uptime",
                 "users",
                 "docker.containers",
-                "docker.stats"
+                "docker.stats",
+                "ports.listening",
+                "docker.inventory",
+                "docker.prune"
             ]
         );
 
@@ -583,7 +586,10 @@ mod grpc {
                 "app.uptime",
                 "users",
                 "docker.containers",
-                "docker.stats"
+                "docker.stats",
+                "ports.listening",
+                "docker.inventory",
+                "docker.prune"
             ]
         );
 

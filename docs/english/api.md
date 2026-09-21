@@ -81,8 +81,14 @@ recognizes keeps working against a newer daemon.
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Temporary console token |
 | `GET /v1/docker/containers?all=&size=` | `DockerService.ListContainers` (DMN-102) | Every container on the host, ASC-managed or not, with the owning application resolved where there is one. `size=1` makes the Engine walk each container's writable layer, so it is off by default. **Root context only** |
 | `GET /v1/docker/stats?ids=a,b` | `DockerService.ListContainerStats` (DMN-112) | Live CPU/memory/network/block usage of containers; `ids` filters **before** the sampling window, empty means every running container. Costs one ~500 ms window for the whole set. **Root context only** |
+| `GET /v1/docker/images` | `DockerService.ListImages` (DMN-104) | Every image on the host, ASC-managed or not, with `ascProtected`/`protectedReason` set when an installed app still runs it. **Root context only** |
+| `GET /v1/docker/volumes` | `DockerService.ListVolumes` (DMN-104) | Every named volume, with `ascProtected`/`protectedReason` set when an installed app's settings declare it. **Root context only** |
+| `GET /v1/docker/networks` | `DockerService.ListNetworks` (DMN-104) | Every network, inventory-only — see `PruneDocker` below for why there is no delete route. **Root context only** |
+| `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | `docker system df`'s four categories (images/containers/volumes/build cache): counts and bytes. Expensive — call on demand, never on a poll. **Root context only** |
+| `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Body `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Removes unused items one at a time; anything an installed app still needs comes back in `skipped` with why, `dryRun` computes the same plan without deleting. **Root context only** |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | Metrics history from the ring buffer, oldest → newest |
+| `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Real host listening ports parsed from `/proc/net/*`, merged with Docker/app attribution — distinct from `GET /v1/ports` above, which reports what apps *declare* |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Token state: kind, live access tokens, rotation window, the primary's truncated digest — never token material |
 | `POST /v1/system/reboot` | `SystemService.RebootSystem` | Requests a full host reboot after acknowledging the caller; primary token only |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Mint a short-lived access token (primary only) |

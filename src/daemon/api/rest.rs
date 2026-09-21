@@ -30,6 +30,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
         .route("/v1/network/interfaces", get(network_interfaces))
+        // Real host listening-port inventory (DMN-103), see
+        // docs/monitoring.md — distinct from /v1/ports above, which reports
+        // what apps *declare*, not what is actually bound.
+        .route("/v1/ports/listening", get(listening_ports))
         .route("/v1/apps", get(list_apps).post(install_app))
         // Apps-wide reports (DMN-053): the per-app routes below answer for
         // one app, these for every app the caller may see — the figures the
@@ -57,6 +61,13 @@ pub fn router(state: Arc<ApiState>) -> Router {
         // a container ASC did not create has no owner to authorize against.
         .route("/v1/docker/containers", get(list_containers))
         .route("/v1/docker/stats", get(container_stats))
+        // Host inventory beyond containers (DMN-104) and cleanup (DMN-105) —
+        // same root-only, service-layer-enforced pattern as the two above.
+        .route("/v1/docker/images", get(list_images))
+        .route("/v1/docker/volumes", get(list_volumes))
+        .route("/v1/docker/networks", get(list_networks))
+        .route("/v1/docker/disk-usage", get(docker_disk_usage))
+        .route("/v1/docker/prune", post(prune_docker))
         // Registry sources & credentials (DMN-083/084), pushed by the
         // platform — see docs/custom-registry.md, docs/package-manager.md.
         .route("/v1/sources", get(list_sources).put(replace_sources))
@@ -456,6 +467,33 @@ async fn network_interfaces() -> Response {
     .into_response()
 }
 
+/// Real host listening ports (DMN-103), merged with Docker/app attribution —
+/// see `ApiState::listening_ports`.
+async fn listening_ports(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let rows = state.listening_ports(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "ports": rows.iter().map(|row| serde_json::json!({
+            "port": row.port,
+            "protocol": row.protocol,
+            "address": row.address,
+            "family": row.family,
+            "pid": row.pid,
+            "process": row.process,
+            "command": row.command,
+            "containerId": row.container_id,
+            "containerName": row.container_name,
+            "appId": row.app_id,
+            "appUuid": row.app_uuid,
+            "declaredOnly": row.declared_only,
+            "isDaemon": row.is_daemon,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
 async fn system_metrics(State(state): State<Arc<ApiState>>) -> Response {
     match state.monitor.latest() {
         Some(m) => Json(serde_json::json!({ "metrics": metrics_json(&m) })).into_response(),
@@ -662,6 +700,140 @@ async fn container_stats(
             "networkTxBytes": row.net_tx_bytes,
             "blockReadBytes": row.block_read_bytes,
             "blockWriteBytes": row.block_write_bytes,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Every image on the host, ASC-owned or not (DMN-104). Root context only.
+async fn list_images(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let rows = state.list_images(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "images": rows.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "tags": row.tags,
+            "sizeBytes": row.size_bytes,
+            "created": row.created,
+            "labels": row.labels,
+            "dangling": row.dangling,
+            "ascProtected": row.asc_protected,
+            "protectedReason": row.protected_reason,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Every named volume on the host (DMN-104). Root context only.
+async fn list_volumes(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let rows = state.list_volumes(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "volumes": rows.iter().map(|row| serde_json::json!({
+            "name": row.name,
+            "driver": row.driver,
+            "mountpoint": row.mountpoint,
+            "createdAt": row.created_at,
+            "labels": row.labels,
+            "refCount": row.ref_count,
+            "sizeBytes": row.size_bytes,
+            "ascProtected": row.asc_protected,
+            "protectedReason": row.protected_reason,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Every network on the host (DMN-104), inventory-only. Root context only.
+async fn list_networks(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let rows = state.list_networks(ctx).await?;
+    Ok(Json(serde_json::json!({
+        "networks": rows.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "name": row.name,
+            "driver": row.driver,
+            "scope": row.scope,
+            "internal": row.internal,
+            "created": row.created,
+            "labels": row.labels,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// `docker system df`'s four categories (DMN-104). Root context only.
+async fn docker_disk_usage(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let usage = state.docker_disk_usage(ctx).await?;
+    let group = |g: &super::DiskUsageGroupRow| {
+        serde_json::json!({
+            "activeCount": g.active_count,
+            "totalCount": g.total_count,
+            "sizeBytes": g.size_bytes,
+            "reclaimableBytes": g.reclaimable_bytes,
+        })
+    };
+    Ok(Json(serde_json::json!({
+        "images": group(&usage.images),
+        "containers": group(&usage.containers),
+        "volumes": group(&usage.volumes),
+        "buildCache": group(&usage.build_cache),
+    }))
+    .into_response())
+}
+
+/// Body of `POST /v1/docker/prune` (DMN-105).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PruneDockerBody {
+    /// "images" | "volumes" | "build_cache".
+    target: String,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    dangling_only: bool,
+}
+
+/// Remove unused images/volumes/build cache, one item at a time — an item an
+/// installed app still needs is protected and reported in `skipped`, never
+/// silently removed. Root context only.
+async fn prune_docker(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<PruneDockerBody>,
+) -> Result<Response, ApiError> {
+    let target = match body.target.as_str() {
+        "images" => super::PruneTarget::Images,
+        "volumes" => super::PruneTarget::Volumes,
+        "build_cache" => super::PruneTarget::BuildCache,
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "target must be 'images', 'volumes' or 'build_cache'"
+                })),
+            )
+                .into_response());
+        }
+    };
+    let row = state
+        .prune_docker(ctx, target, body.dry_run, body.dangling_only)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "removed": row.removed,
+        "reclaimedBytes": row.reclaimed_bytes,
+        "skipped": row.skipped.iter().map(|s| serde_json::json!({
+            "name": s.name,
+            "reason": s.reason,
         })).collect::<Vec<_>>(),
     }))
     .into_response())

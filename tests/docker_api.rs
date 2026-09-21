@@ -95,6 +95,32 @@ fn spawn_mock(socket: PathBuf) -> Hits {
 /// until the image has been pulled, exercising the auto-pull retry.
 fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String) {
     let path = raw_path.split('?').next().unwrap_or(raw_path);
+    // DMN-104/DMN-105 host inventory & cleanup — matched before the
+    // `/containers/create` and generic `/json`/`DELETE` arms below, since
+    // `/images/json` would otherwise fall through to the container-inspect
+    // fallback and `DELETE /images/<id>` needs its own body shape
+    // (`remove_image` decodes a JSON array, unlike `remove_container`).
+    if path.ends_with("/images/json") {
+        return ("200 OK", IMAGE_LIST.into());
+    }
+    if path.ends_with("/volumes") {
+        return ("200 OK", VOLUME_LIST.into());
+    }
+    if path.ends_with("/networks") {
+        return ("200 OK", NETWORK_LIST.into());
+    }
+    if path.ends_with("/system/df") {
+        return ("200 OK", DISK_USAGE.into());
+    }
+    if path.contains("/build/prune") {
+        return (
+            "200 OK",
+            r#"{"CachesDeleted":["cache1"],"SpaceReclaimed":1048576}"#.into(),
+        );
+    }
+    if method == "DELETE" && path.contains("/images/") {
+        return ("200 OK", "[]".into());
+    }
     if path.contains("/images/create") {
         return (
             "200 OK",
@@ -191,6 +217,72 @@ const CONTAINER_LIST: &str = r#"[
     "Created": 1700000200
   }
 ]"#;
+
+/// Fixture for `GET /images/json` (DMN-104): one image an installed app
+/// would run, one dangling (untagged) image.
+const IMAGE_LIST: &str = r#"[
+  {
+    "Id": "sha256:aaaa111100000000000000000000000000000000000000000000000000000",
+    "ParentId": "",
+    "RepoTags": ["ghcr.io/acme/hello:1.0"],
+    "RepoDigests": [],
+    "Created": 1700000000,
+    "Size": 104857600,
+    "SharedSize": -1,
+    "Labels": {},
+    "Containers": -1
+  },
+  {
+    "Id": "sha256:bbbb222200000000000000000000000000000000000000000000000000000",
+    "ParentId": "",
+    "RepoTags": ["<none>:<none>"],
+    "RepoDigests": [],
+    "Created": 1699999000,
+    "Size": 52428800,
+    "SharedSize": -1,
+    "Labels": {},
+    "Containers": -1
+  }
+]"#;
+
+/// Fixture for `GET /volumes` (DMN-104): one volume an installed app would
+/// declare, one unrelated.
+const VOLUME_LIST: &str = r#"{
+  "Volumes": [
+    {
+      "Name": "shared-data",
+      "Driver": "local",
+      "Mountpoint": "/var/lib/docker/volumes/shared-data/_data",
+      "Labels": {},
+      "Options": {},
+      "Scope": "local",
+      "UsageData": {"Size": 2048, "RefCount": 1}
+    },
+    {
+      "Name": "orphan",
+      "Driver": "local",
+      "Mountpoint": "/var/lib/docker/volumes/orphan/_data",
+      "Labels": {},
+      "Options": {},
+      "Scope": "local",
+      "UsageData": {"Size": 4096, "RefCount": 0}
+    }
+  ]
+}"#;
+
+/// Fixture for `GET /networks` (DMN-104).
+const NETWORK_LIST: &str = r#"[
+  {"Id": "net1", "Name": "bridge", "Driver": "bridge", "Scope": "local", "Internal": false},
+  {"Id": "net2", "Name": "shop_default", "Driver": "bridge", "Scope": "local", "Internal": false}
+]"#;
+
+/// Fixture for `GET /system/df` (DMN-104).
+const DISK_USAGE: &str = r#"{
+  "ImageUsage": {"ActiveCount": 1, "TotalCount": 2, "Reclaimable": 52428800, "TotalSize": 157286400},
+  "ContainerUsage": {"ActiveCount": 2, "TotalCount": 3, "Reclaimable": 0, "TotalSize": 0},
+  "VolumeUsage": {"ActiveCount": 1, "TotalCount": 2, "Reclaimable": 4096, "TotalSize": 6144},
+  "BuildCacheUsage": {"ActiveCount": 0, "TotalCount": 1, "Reclaimable": 1048576, "TotalSize": 1048576}
+}"#;
 
 fn wait_for_socket(path: &Path) {
     for _ in 0..50 {
@@ -314,6 +406,7 @@ fn create_sends_container_spec() {
             open_stdin: true,
             tty: true,
             registry_auth: None,
+            labels: std::collections::HashMap::new(),
         },
     )
     .unwrap();
@@ -629,4 +722,259 @@ fn container_list_leaves_missing_sizes_unset() {
     let containers = docker::list_containers(&cfg, true, true).unwrap();
     assert!(containers.iter().all(|c| c.size_rw.is_none()));
     assert!(containers.iter().all(|c| c.size_root_fs.is_none()));
+}
+
+/// DMN-104: `GET /images/json`, `GET /volumes`, `GET /networks` and
+/// `GET /system/df` all parse into the daemon's own forms.
+#[test]
+fn host_inventory_parses_images_volumes_networks_and_disk_usage() {
+    let (cfg, _dir, _hits) = test_cfg();
+
+    let images = docker::list_images(&cfg).unwrap();
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].tags, vec!["ghcr.io/acme/hello:1.0".to_string()]);
+    assert!(!images[0].dangling);
+    assert!(images[1].tags.is_empty());
+    assert!(images[1].dangling);
+
+    let volumes = docker::list_volumes(&cfg).unwrap();
+    assert_eq!(volumes.len(), 2);
+    assert_eq!(volumes[0].name, "shared-data");
+    assert_eq!(volumes[0].size_bytes, Some(2048));
+    assert_eq!(volumes[0].ref_count, Some(1));
+
+    let networks = docker::list_networks(&cfg).unwrap();
+    assert_eq!(networks.len(), 2);
+    assert_eq!(networks[0].name, "bridge");
+
+    let usage = docker::disk_usage(&cfg).unwrap();
+    assert_eq!(usage.images.total_count, 2);
+    assert_eq!(usage.images.reclaimable_bytes, 52428800);
+    assert_eq!(usage.volumes.active_count, 1);
+    assert_eq!(usage.build_cache.reclaimable_bytes, 1048576);
+}
+
+/// Installs a minimal docker-runtime app for DMN-105's protected-set scan
+/// (`AppManager::list` + `pkg::docker_footprint`) to find — no settings, just
+/// the manifest's `runtime.image`.
+fn install_docker_app(config: &asc_daemon::daemon::config::Config, id: &str, image: &str) {
+    use asc_daemon::daemon::apps::AppStore;
+    use asc_daemon::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime};
+
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    store
+        .save(&AppMeta {
+            id: id.into(),
+            uuid: None,
+            name: id.into(),
+            custom_name: None,
+            owner: Owner {
+                uid: 0,
+                name: "root".into(),
+            },
+            version: Some("v1.0.0".into()),
+            source: Some("test:local".into()),
+            branch: None,
+            repo_path: None,
+            package: None,
+            desired_state: DesiredState::Stopped,
+            quota: None,
+            runtime: Runtime::Docker {
+                container: format!("asc-{id}"),
+                image_source: None,
+            },
+        })
+        .unwrap();
+    let app_dir = store.app_dir(id).unwrap();
+    std::fs::create_dir_all(app_dir.join("repository")).unwrap();
+    std::fs::create_dir_all(app_dir.join("config")).unwrap();
+    std::fs::write(
+        app_dir.join("repository/asc.yaml"),
+        format!("name: {id}\nversion: '1'\ntype: docker\nruntime:\n  image: {image}\n"),
+    )
+    .unwrap();
+}
+
+/// A test-only root context, mirroring the daemon's own `api_context()`
+/// (private to `daemon::api`, so the test builds its own).
+fn root_ctx() -> asc_daemon::daemon::apps::UserContext {
+    asc_daemon::daemon::apps::UserContext {
+        uid: 0,
+        name: "root".into(),
+        is_root: true,
+    }
+}
+
+/// DMN-105: an image an installed app runs — running or not — must never be
+/// removed, dry_run or not, and the dangling one is reported as removable.
+#[tokio::test]
+async fn prune_images_dry_run_protects_installed_apps_image() {
+    use asc_daemon::daemon::api::{ApiState, PruneTarget};
+
+    let (docker_cfg, dir, hits) = test_cfg();
+    let mut config = asc_daemon::daemon::config::Config::default();
+    config.daemon.apps_dir = dir.path().join("apps");
+    config.docker = docker_cfg;
+    install_docker_app(&config, "web", "ghcr.io/acme/hello:1.0");
+
+    let state = ApiState::new(config, "test-token".into());
+
+    let images = state.list_images(root_ctx()).await.unwrap();
+    let tagged = images
+        .iter()
+        .find(|i| i.tags.contains(&"ghcr.io/acme/hello:1.0".to_string()))
+        .unwrap();
+    assert!(
+        tagged.asc_protected,
+        "an installed app's image must be protected"
+    );
+    assert!(tagged.protected_reason.as_deref().unwrap().contains("web"));
+    let dangling = images.iter().find(|i| i.dangling).unwrap();
+    assert!(!dangling.asc_protected);
+
+    let plan = state
+        .prune_docker(root_ctx(), PruneTarget::Images, true, false)
+        .await
+        .unwrap();
+    assert!(
+        !plan.removed.contains(&"ghcr.io/acme/hello:1.0".to_string()),
+        "the protected image must never appear in removed, got {:?}",
+        plan.removed
+    );
+    assert!(
+        plan.skipped
+            .iter()
+            .any(|s| s.name == "ghcr.io/acme/hello:1.0"),
+        "the protected image must be explained in skipped, got {:?}",
+        plan.skipped.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+
+    let seen = hits.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|h| h.starts_with("DELETE")),
+        "dry_run must never delete anything, saw: {seen:?}"
+    );
+}
+
+/// DMN-105: a real prune removes an unprotected image one at a time (a
+/// per-id DELETE) and never calls the Engine's bulk `/images/prune`.
+#[tokio::test]
+async fn prune_images_real_run_removes_one_at_a_time() {
+    use asc_daemon::daemon::api::{ApiState, PruneTarget};
+
+    let (docker_cfg, dir, hits) = test_cfg();
+    let mut config = asc_daemon::daemon::config::Config::default();
+    config.daemon.apps_dir = dir.path().join("apps");
+    config.docker = docker_cfg;
+    install_docker_app(&config, "web", "ghcr.io/acme/hello:1.0");
+
+    let state = ApiState::new(config, "test-token".into());
+    let result = state
+        .prune_docker(root_ctx(), PruneTarget::Images, false, false)
+        .await
+        .unwrap();
+
+    assert!(
+        !result
+            .removed
+            .contains(&"ghcr.io/acme/hello:1.0".to_string()),
+        "the protected image must survive a real run too"
+    );
+    assert_eq!(
+        result.reclaimed_bytes, 52428800,
+        "only the dangling image's bytes"
+    );
+
+    let seen = hits.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|h| h.starts_with("DELETE") && h.contains("bbbb2222")),
+        "the unprotected image must be removed by its own id, saw: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|h| h.contains("/images/prune")),
+        "prune must never call the Engine's bulk endpoint, saw: {seen:?}"
+    );
+}
+
+/// DMN-105: a named volume an installed app declares must never be removed.
+#[tokio::test]
+async fn prune_volumes_protects_a_declared_named_volume() {
+    use asc_daemon::daemon::api::{ApiState, PruneTarget};
+
+    let (docker_cfg, dir, hits) = test_cfg();
+    let mut config = asc_daemon::daemon::config::Config::default();
+    config.daemon.apps_dir = dir.path().join("apps");
+    config.docker = docker_cfg;
+
+    // A docker app whose settings declare the fixture's "shared-data" named
+    // volume — the second fixture volume, "orphan", is declared by nothing.
+    use asc_daemon::daemon::apps::AppStore;
+    use asc_daemon::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime};
+    let store = AppStore::new(config.daemon.apps_dir.clone());
+    store
+        .save(&AppMeta {
+            id: "web".into(),
+            uuid: None,
+            name: "web".into(),
+            custom_name: None,
+            owner: Owner {
+                uid: 0,
+                name: "root".into(),
+            },
+            version: Some("v1.0.0".into()),
+            source: Some("test:local".into()),
+            branch: None,
+            repo_path: None,
+            package: None,
+            desired_state: DesiredState::Stopped,
+            quota: None,
+            runtime: Runtime::Docker {
+                container: "asc-web".into(),
+                image_source: None,
+            },
+        })
+        .unwrap();
+    let app_dir = store.app_dir("web").unwrap();
+    std::fs::create_dir_all(app_dir.join("repository")).unwrap();
+    std::fs::create_dir_all(app_dir.join("config")).unwrap();
+    std::fs::write(
+        app_dir.join("repository/asc.yaml"),
+        "name: web\nversion: '1'\ntype: docker\nsettings: ./asc.settings.yaml\n\
+         runtime:\n  image: ghcr.io/acme/hello:1.0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("repository/asc.settings.yaml"),
+        "settings:\n  - { key: shared, type: volumes, \
+         default: [\"shared-data:/data\"] }\n",
+    )
+    .unwrap();
+
+    let state = ApiState::new(config, "test-token".into());
+    let volumes = state.list_volumes(root_ctx()).await.unwrap();
+    let shared = volumes.iter().find(|v| v.name == "shared-data").unwrap();
+    assert!(shared.asc_protected);
+    let orphan = volumes.iter().find(|v| v.name == "orphan").unwrap();
+    assert!(!orphan.asc_protected);
+
+    let result = state
+        .prune_docker(root_ctx(), PruneTarget::Volumes, false, false)
+        .await
+        .unwrap();
+    assert!(!result.removed.contains(&"shared-data".to_string()));
+    assert!(result.removed.contains(&"orphan".to_string()));
+
+    let seen = hits.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|h| h.starts_with("DELETE") && h.contains("orphan")),
+        "the unprotected volume must be removed by name, saw: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|h| h.starts_with("DELETE") && h.contains("shared-data")),
+        "the protected volume must never be deleted, saw: {seen:?}"
+    );
 }

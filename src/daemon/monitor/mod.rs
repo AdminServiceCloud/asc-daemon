@@ -5,6 +5,7 @@
 
 pub mod gpu;
 pub mod network;
+pub mod sockets;
 pub mod system;
 
 use std::collections::VecDeque;

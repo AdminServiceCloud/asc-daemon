@@ -23,8 +23,9 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     AttachContainerOptions, BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
-    CreateImageOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, StatsOptions, StopContainerOptions,
+    CreateImageOptions, ListContainersOptions, ListImagesOptions, LogsOptions,
+    RemoveContainerOptions, RemoveImageOptions, StartContainerOptions, StatsOptions,
+    StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -488,6 +489,310 @@ fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
     }
 }
 
+// ── Images, volumes, networks, disk usage (DMN-104) ─────────────────────────
+
+/// One image on the host.
+pub struct ImageInfo {
+    /// Full 64-hex-with-`sha256:` id.
+    pub id: String,
+    /// `name:tag` references pointing at this image; empty for a "dangling"
+    /// image (an old build the Engine could no longer name after a
+    /// `docker build`/pull replaced its tag).
+    pub tags: Vec<String>,
+    /// Total size on disk, bytes.
+    pub size: u64,
+    /// Creation time, unix seconds.
+    pub created: i64,
+    pub labels: HashMap<String, String>,
+    /// No tag references it — `docker images -f dangling=true`'s definition.
+    pub dangling: bool,
+}
+
+/// Every image on the host (`docker images -a`'s full set, not just tagged
+/// ones — a caller that wants only tagged images filters on `!dangling`).
+pub fn list_images(cfg: &DockerConfig) -> Result<Vec<ImageInfo>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let opts = ListImagesOptions {
+            all: true,
+            ..Default::default()
+        };
+        let images = docker
+            .list_images(Some(opts))
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        Ok(images.into_iter().map(image_info).collect())
+    })
+}
+
+fn image_info(summary: bollard::models::ImageSummary) -> ImageInfo {
+    let tags: Vec<String> = summary
+        .repo_tags
+        .into_iter()
+        .filter(|t| t != "<none>:<none>")
+        .collect();
+    ImageInfo {
+        dangling: tags.is_empty(),
+        id: summary.id,
+        tags,
+        size: summary.size.max(0) as u64,
+        created: summary.created,
+        labels: summary.labels,
+    }
+}
+
+/// Remove one image by id or reference. A missing image (404) is success —
+/// the caller was trying to get rid of it either way. Never forces past an
+/// image still in use by a container: the daemon's own protected-set check
+/// happens before this is ever called, and an Engine-side "in use" refusal
+/// for anything else is a real reason to stop, not to override.
+pub fn remove_image(cfg: &DockerConfig, id_or_ref: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker
+            .remove_image(id_or_ref, None::<RemoveImageOptions>, None)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if status_of(&e) == Some(404) => Ok(()),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// One Docker named volume on the host.
+pub struct VolumeInfo {
+    pub name: String,
+    pub driver: String,
+    pub mountpoint: String,
+    /// Unix seconds; absent when the Engine did not report a parseable date.
+    pub created_at: Option<i64>,
+    pub labels: HashMap<String, String>,
+    /// Containers currently referencing this volume; `None` when the Engine
+    /// did not report usage data for it (the plain, non-verbose `/volumes`
+    /// listing does not compute it for every driver).
+    pub ref_count: Option<i64>,
+    /// Disk space used, bytes; `None` for the same reason as `ref_count`, or
+    /// when the driver does not support the figure (`-1` from the Engine).
+    pub size_bytes: Option<u64>,
+}
+
+/// Every named volume on the host.
+pub fn list_volumes(cfg: &DockerConfig) -> Result<Vec<VolumeInfo>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let response = docker
+            .list_volumes(None::<bollard::query_parameters::ListVolumesOptions>)
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        Ok(response
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(volume_info)
+            .collect())
+    })
+}
+
+fn volume_info(volume: bollard::models::Volume) -> VolumeInfo {
+    let usage = volume.usage_data;
+    VolumeInfo {
+        name: volume.name,
+        driver: volume.driver,
+        mountpoint: volume.mountpoint,
+        // The "time" bollard feature (enabled in Cargo.toml) makes
+        // `BollardDate` a `time::OffsetDateTime` directly — no string parse.
+        created_at: volume.created_at.map(|d| d.unix_timestamp()),
+        labels: volume.labels,
+        ref_count: usage.as_ref().map(|u| u.ref_count),
+        size_bytes: usage.and_then(|u| u64::try_from(u.size).ok()),
+    }
+}
+
+/// Remove one named volume. A missing volume (404) is success.
+pub fn remove_volume(cfg: &DockerConfig, name: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker
+            .remove_volume(name, None::<bollard::query_parameters::RemoveVolumeOptions>)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) if status_of(&e) == Some(404) => Ok(()),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// One Docker network on the host. Read-only in this API — see
+/// `docs/english/app-management.md` for why networks are never pruned here.
+pub struct NetworkInfo {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    /// `local` or `swarm`.
+    pub scope: String,
+    pub internal: bool,
+    /// Unix seconds; absent when the Engine did not report a parseable date.
+    pub created: Option<i64>,
+    pub labels: HashMap<String, String>,
+}
+
+/// Every network on the host, the three Engine-created defaults included.
+pub fn list_networks(cfg: &DockerConfig) -> Result<Vec<NetworkInfo>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let networks = docker
+            .list_networks(None::<bollard::query_parameters::ListNetworksOptions>)
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        Ok(networks.into_iter().map(network_info).collect())
+    })
+}
+
+fn network_info(network: bollard::models::Network) -> NetworkInfo {
+    NetworkInfo {
+        id: network.id.unwrap_or_default(),
+        name: network.name.unwrap_or_default(),
+        driver: network.driver.unwrap_or_default(),
+        scope: network.scope.unwrap_or_default(),
+        internal: network.internal.unwrap_or(false),
+        created: network.created.map(|d| d.unix_timestamp()),
+        labels: network.labels.unwrap_or_default(),
+    }
+}
+
+/// One category of `docker system df` (images, containers, volumes or build
+/// cache): counts plus bytes, exactly as the Engine reports them.
+#[derive(Default)]
+pub struct DiskUsageGroup {
+    pub active_count: i64,
+    pub total_count: i64,
+    pub size_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
+fn disk_usage_group(
+    active_count: Option<i64>,
+    total_count: Option<i64>,
+    total_size: Option<i64>,
+    reclaimable: Option<i64>,
+) -> DiskUsageGroup {
+    DiskUsageGroup {
+        active_count: active_count.unwrap_or(0),
+        total_count: total_count.unwrap_or(0),
+        size_bytes: total_size.unwrap_or(0).max(0) as u64,
+        reclaimable_bytes: reclaimable.unwrap_or(0).max(0) as u64,
+    }
+}
+
+/// `docker system df`'s four categories. Deliberately cheap to call is not a
+/// property this has — the Engine walks images, containers and volumes to
+/// answer, so callers only ask for it when a user opens the Docker settings
+/// section, never on a poll.
+#[derive(Default)]
+pub struct DiskUsage {
+    pub images: DiskUsageGroup,
+    pub containers: DiskUsageGroup,
+    pub volumes: DiskUsageGroup,
+    pub build_cache: DiskUsageGroup,
+}
+
+pub fn disk_usage(cfg: &DockerConfig) -> Result<DiskUsage> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let df = docker
+            .df(None::<bollard::query_parameters::DataUsageOptions>)
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        let images = df.image_usage.unwrap_or_default();
+        let containers = df.container_usage.unwrap_or_default();
+        let volumes = df.volume_usage.unwrap_or_default();
+        let build_cache = df.build_cache_usage.unwrap_or_default();
+        Ok(DiskUsage {
+            images: disk_usage_group(
+                images.active_count,
+                images.total_count,
+                images.total_size,
+                images.reclaimable,
+            ),
+            containers: disk_usage_group(
+                containers.active_count,
+                containers.total_count,
+                containers.total_size,
+                containers.reclaimable,
+            ),
+            volumes: disk_usage_group(
+                volumes.active_count,
+                volumes.total_count,
+                volumes.total_size,
+                volumes.reclaimable,
+            ),
+            build_cache: disk_usage_group(
+                build_cache.active_count,
+                build_cache.total_count,
+                build_cache.total_size,
+                build_cache.reclaimable,
+            ),
+        })
+    })
+}
+
+/// One BuildKit cache record, from `docker system df`'s own per-record
+/// listing — there is no dedicated "list build cache" endpoint, only this one
+/// nested inside `df`.
+pub struct BuildCacheEntry {
+    pub id: String,
+    /// Backing an in-progress or otherwise live build; never removed.
+    pub in_use: bool,
+    pub size_bytes: u64,
+}
+
+/// Every build cache record the Engine currently holds, for a prune's
+/// dry-run: unlike images/volumes, cache records carry no ASC ownership to
+/// protect — plain in-use is the whole story.
+pub fn build_cache_entries(cfg: &DockerConfig) -> Result<Vec<BuildCacheEntry>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let df = docker
+            .df(None::<bollard::query_parameters::DataUsageOptions>)
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        let items = df
+            .build_cache_usage
+            .and_then(|u| u.items)
+            .unwrap_or_default();
+        Ok(items
+            .into_iter()
+            .filter_map(|value| serde_json::from_value::<bollard::models::BuildCache>(value).ok())
+            .map(|entry| BuildCacheEntry {
+                id: entry.id.unwrap_or_default(),
+                in_use: entry.in_use.unwrap_or(false),
+                size_bytes: entry.size.unwrap_or(0).max(0) as u64,
+            })
+            .collect())
+    })
+}
+
+/// Prune the whole build cache in one Engine call (`docker builder prune`).
+/// Unlike images/volumes, there is no per-record delete endpoint and no ASC
+/// ownership to protect here, so a bulk call is the Engine's only option and
+/// carries none of the risk the images/volumes' one-at-a-time removal guards
+/// against. Returns the ids removed and bytes reclaimed.
+pub fn prune_build_cache(cfg: &DockerConfig) -> Result<(Vec<String>, u64)> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let result = docker
+            .prune_build(None::<bollard::query_parameters::PruneBuildOptions>)
+            .await
+            .map_err(|e| friendly(cfg, e))?;
+        Ok((
+            result.caches_deleted.unwrap_or_default(),
+            result.space_reclaimed.unwrap_or(0).max(0) as u64,
+        ))
+    })
+}
+
 /// One-shot resource counters of a container, straight off the Engine's
 /// stats endpoint.
 pub struct ContainerUsage {
@@ -716,7 +1021,21 @@ pub struct CreateSpec<'a> {
     pub tty: bool,
     /// Credentials for the image's registry (DMN-046); `None` = anonymous.
     pub registry_auth: Option<RegistryAuth>,
+    /// Container labels (DMN-105): `asc.managed`/`asc.app.id`/`asc.app.uuid`,
+    /// see the constants below. Purely informational — [`AppliedConfig`]
+    /// deliberately does not read labels back, so adding or changing one here
+    /// never trips the settings-drift recreate.
+    pub labels: HashMap<String, String>,
 }
+
+/// Set to `"true"` on every container ASC creates (DMN-105): lets a future
+/// caller recognize an ASC-managed container without guessing from its name.
+pub const LABEL_MANAGED: &str = "asc.managed";
+/// The installed app's `id` (DMN-105) — a cheaper cross-reference than
+/// matching on container name, kept alongside it rather than instead of it.
+pub const LABEL_APP_ID: &str = "asc.app.id";
+/// The installed app's `uuid` (DMN-105), when it has one (DMN-044+).
+pub const LABEL_APP_UUID: &str = "asc.app.uuid";
 
 /// Credentials for one image registry, resolved from the `asc auth` store.
 ///
@@ -1168,6 +1487,7 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             tty: spec.tty.then_some(true),
             exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
             host_config: Some(host_config),
+            labels: (!spec.labels.is_empty()).then(|| spec.labels.clone()),
             ..Default::default()
         };
 

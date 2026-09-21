@@ -81,8 +81,14 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Временный токен консоли |
 | `GET /v1/docker/containers?all=&size=` | `DockerService.ListContainers` (DMN-102) | Все контейнеры хоста — и ASC-овские, и чужие, — с определённым приложением-владельцем там, где оно есть. `size=1` заставляет Engine обойти writable-слой каждого контейнера, поэтому по умолчанию выключено. **Только root-контекст** |
 | `GET /v1/docker/stats?ids=a,b` | `DockerService.ListContainerStats` (DMN-112) | Живые CPU/память/сеть/диск контейнеров; `ids` фильтрует **до** окна сэмплирования, пусто — все запущенные. Стоит одного окна ~500 мс на весь набор. **Только root-контекст** |
+| `GET /v1/docker/images` | `DockerService.ListImages` (DMN-104) | Все образы хоста — и ASC-овские, и чужие, — с `ascProtected`/`protectedReason`, когда образ всё ещё запускает установленное приложение. **Только root-контекст** |
+| `GET /v1/docker/volumes` | `DockerService.ListVolumes` (DMN-104) | Все именованные тома, с `ascProtected`/`protectedReason`, когда том объявлен настройками установленного приложения. **Только root-контекст** |
+| `GET /v1/docker/networks` | `DockerService.ListNetworks` (DMN-104) | Все сети, только инвентарь — почему нет маршрута удаления, см. `PruneDocker` ниже. **Только root-контекст** |
+| `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | Четыре категории `docker system df` (образы/контейнеры/тома/build cache): счётчики и байты. Дорогой вызов — только по требованию, никогда по таймеру. **Только root-контекст** |
+| `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Тело `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Удаляет неиспользуемое поштучно; то, что всё ещё нужно установленному приложению, возвращается в `skipped` с причиной, `dryRun` считает тот же план без удаления. **Только root-контекст** |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
+| `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Состояние токенов: вид, число живых временных, окно ротации, усечённый дайджест основного — никогда сам токен |
 | `POST /v1/system/reboot` | `SystemService.RebootSystem` | Запрашивает полную перезагрузку хоста после подтверждения вызова; только основной токен |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Выпуск временного токена (только по основному) |

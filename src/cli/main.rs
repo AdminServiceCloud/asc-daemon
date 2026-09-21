@@ -92,7 +92,12 @@ enum Command {
     /// Show published ports per app, shorthand for `asc app ports` (root sees
     /// all users' apps): each app and the host ports it publishes, with the
     /// container port after `->` when the two differ
-    Ports,
+    Ports {
+        /// Real listening ports on the host (DMN-103), not just what apps
+        /// declare: merges /proc with Docker and app attribution
+        #[arg(short, long)]
+        listening: bool,
+    },
     /// Show disk usage, shorthand for `asc app disk` (root sees all users'
     /// apps): total space occupied by apps as a bar against the store's
     /// filesystem capacity, then each app's own usage, largest first
@@ -243,6 +248,42 @@ enum DockerAction {
         /// Container ids or names; all running containers when omitted
         ids: Vec<String>,
     },
+    /// List images on this host, ASC-managed or not (DMN-104)
+    Images,
+    /// List named volumes on this host (DMN-104)
+    Volumes,
+    /// List networks on this host, inventory-only (DMN-104)
+    Networks,
+    /// Disk usage summary, like `docker system df` (DMN-104)
+    Df,
+    /// Remove unused images/volumes/build cache, one at a time (DMN-105) —
+    /// never removes anything an installed app still needs
+    Prune {
+        target: PruneTargetArg,
+        /// Compute the plan without removing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Images only: limit to dangling (untagged) images
+        #[arg(long)]
+        dangling: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum PruneTargetArg {
+    Images,
+    Volumes,
+    BuildCache,
+}
+
+impl PruneTargetArg {
+    fn as_wire(self) -> &'static str {
+        match self {
+            PruneTargetArg::Images => "images",
+            PruneTargetArg::Volumes => "volumes",
+            PruneTargetArg::BuildCache => "build_cache",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -760,7 +801,8 @@ fn run() -> anyhow::Result<()> {
             Some(LsAction::Disk) => app_cmd(AppAction::Disk { id: None }, &config),
             Some(LsAction::Stats) => stats_cmd(StatsSort::Cpu, false, &config),
         },
-        Command::Ports => app_cmd(AppAction::Ports { id: None }, &config),
+        Command::Ports { listening } if listening => listening_ports_cmd(&config),
+        Command::Ports { .. } => app_cmd(AppAction::Ports { id: None }, &config),
         Command::Disk => app_cmd(AppAction::Disk { id: None }, &config),
         Command::Stacks => stacks_cmd(&config),
         Command::Install {
@@ -2459,6 +2501,15 @@ fn docker_cmd(action: DockerAction, config: &Config) -> anyhow::Result<()> {
     match action {
         DockerAction::Ps { all, size } => docker_ps_cmd(all, size, config),
         DockerAction::Stats { ids } => docker_stats_cmd(&ids, config),
+        DockerAction::Images => docker_images_cmd(config),
+        DockerAction::Volumes => docker_volumes_cmd(config),
+        DockerAction::Networks => docker_networks_cmd(config),
+        DockerAction::Df => docker_df_cmd(config),
+        DockerAction::Prune {
+            target,
+            dry_run,
+            dangling,
+        } => docker_prune_cmd(target, dry_run, dangling, config),
     }
 }
 
@@ -2666,6 +2717,441 @@ fn print_container_stats(rows: &[(String, f64, u64, Option<u64>)]) {
     }
 }
 
+/// Images/volumes an installed app (running or not) still needs (DMN-105):
+/// image reference -> reason, volume name -> reason. The daemon computes the
+/// same protection through `daemon::api::DockerProtection`; this is the
+/// in-process fallback used when `asc docker` talks to no running daemon, so
+/// both paths refuse to remove the same things.
+fn docker_protection(
+    config: &Config,
+) -> anyhow::Result<(
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, String>,
+)> {
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+    let mut images = std::collections::HashMap::new();
+    let mut volumes = std::collections::HashMap::new();
+    for app in manager.list(&ctx)? {
+        let app_dir = manager.store().app_dir(&app.meta.id)?;
+        let footprint = pkg::docker_footprint(config, &app.meta, &app_dir);
+        let label = app.meta.display_name().to_string();
+        if let Some(image) = footprint.image {
+            images
+                .entry(image)
+                .or_insert_with(|| tf(Msg::DockerPruneProtectedByApp, &label));
+        }
+        for volume in footprint.named_volumes {
+            volumes
+                .entry(volume)
+                .or_insert_with(|| tf(Msg::DockerPruneProtectedByApp, &label));
+        }
+    }
+    Ok((images, volumes))
+}
+
+/// One row of `asc docker images`, from either backend.
+struct DockerImageRow {
+    id: String,
+    tags: Vec<String>,
+    size_bytes: u64,
+    dangling: bool,
+    protected_reason: Option<String>,
+}
+
+/// `asc docker images` (DMN-104): every image on the host, ASC-managed or
+/// not, through the daemon when its socket is there, in-process otherwise.
+fn docker_images_cmd(config: &Config) -> anyhow::Result<()> {
+    let rows: Vec<DockerImageRow> = if let Some(daemon) = daemon_backend(config)? {
+        daemon
+            .list_images()?
+            .into_iter()
+            .map(|i| DockerImageRow {
+                id: i.id,
+                tags: i.tags,
+                size_bytes: i.size_bytes,
+                dangling: i.dangling,
+                protected_reason: i.protected_reason,
+            })
+            .collect()
+    } else {
+        require_root_for_docker()?;
+        let (protection, _) = docker_protection(config)?;
+        docker::list_images(&config.docker)?
+            .into_iter()
+            .map(|i| {
+                let reason = i
+                    .tags
+                    .iter()
+                    .find_map(|tag| protection.get(tag))
+                    .or_else(|| protection.get(&i.id))
+                    .cloned();
+                DockerImageRow {
+                    id: i.id,
+                    tags: i.tags,
+                    size_bytes: i.size,
+                    dangling: i.dangling,
+                    protected_reason: reason,
+                }
+            })
+            .collect()
+    };
+    if rows.is_empty() {
+        println!("{}", t(Msg::DockerNoImages));
+        return Ok(());
+    }
+    for row in &rows {
+        let short = row
+            .id
+            .trim_start_matches("sha256:")
+            .chars()
+            .take(12)
+            .collect::<String>();
+        let name = if row.tags.is_empty() {
+            "<none>".to_string()
+        } else {
+            row.tags.join(", ")
+        };
+        let flag = if row.dangling { "  (dangling)" } else { "" };
+        println!(
+            "{short}  {name}  {}{flag}",
+            monitor::human_bytes(row.size_bytes)
+        );
+        if let Some(reason) = &row.protected_reason {
+            println!("  {reason}");
+        }
+    }
+    Ok(())
+}
+
+/// One row of `asc docker volumes`, from either backend.
+struct DockerVolumeRow {
+    name: String,
+    driver: String,
+    ref_count: Option<i32>,
+    size_bytes: Option<u64>,
+    protected_reason: Option<String>,
+}
+
+/// `asc docker volumes` (DMN-104): every named volume on the host, through
+/// the daemon when its socket is there, in-process otherwise.
+fn docker_volumes_cmd(config: &Config) -> anyhow::Result<()> {
+    let rows: Vec<DockerVolumeRow> = if let Some(daemon) = daemon_backend(config)? {
+        daemon
+            .list_volumes()?
+            .into_iter()
+            .map(|v| DockerVolumeRow {
+                name: v.name,
+                driver: v.driver,
+                ref_count: v.ref_count,
+                size_bytes: v.size_bytes,
+                protected_reason: v.protected_reason,
+            })
+            .collect()
+    } else {
+        require_root_for_docker()?;
+        let (_, protection) = docker_protection(config)?;
+        docker::list_volumes(&config.docker)?
+            .into_iter()
+            .map(|v| {
+                let reason = protection.get(&v.name).cloned();
+                DockerVolumeRow {
+                    name: v.name,
+                    driver: v.driver,
+                    ref_count: v.ref_count.and_then(|c| i32::try_from(c).ok()),
+                    size_bytes: v.size_bytes,
+                    protected_reason: reason,
+                }
+            })
+            .collect()
+    };
+    if rows.is_empty() {
+        println!("{}", t(Msg::DockerNoVolumes));
+        return Ok(());
+    }
+    for row in &rows {
+        let size = row
+            .size_bytes
+            .map(monitor::human_bytes)
+            .unwrap_or_else(|| "-".to_string());
+        let refs = row
+            .ref_count
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!("{}  {}  {size}  refs={refs}", row.name, row.driver);
+        if let Some(reason) = &row.protected_reason {
+            println!("  {reason}");
+        }
+    }
+    Ok(())
+}
+
+/// `asc docker networks` (DMN-104): every network on the host, inventory
+/// only — through the daemon when its socket is there, in-process otherwise.
+fn docker_networks_cmd(config: &Config) -> anyhow::Result<()> {
+    struct Row {
+        name: String,
+        driver: String,
+        scope: String,
+        internal: bool,
+    }
+    let rows: Vec<Row> = if let Some(daemon) = daemon_backend(config)? {
+        daemon
+            .list_networks()?
+            .into_iter()
+            .map(|n| Row {
+                name: n.name,
+                driver: n.driver,
+                scope: n.scope,
+                internal: n.internal,
+            })
+            .collect()
+    } else {
+        require_root_for_docker()?;
+        docker::list_networks(&config.docker)?
+            .into_iter()
+            .map(|n| Row {
+                name: n.name,
+                driver: n.driver,
+                scope: n.scope,
+                internal: n.internal,
+            })
+            .collect()
+    };
+    if rows.is_empty() {
+        println!("{}", t(Msg::DockerNoNetworks));
+        return Ok(());
+    }
+    for row in &rows {
+        let internal = if row.internal { "  (internal)" } else { "" };
+        println!("{}  {}  {}{internal}", row.name, row.driver, row.scope);
+    }
+    Ok(())
+}
+
+/// `asc docker df` (DMN-104): disk usage summary, like `docker system df`.
+fn docker_df_cmd(config: &Config) -> anyhow::Result<()> {
+    struct Group {
+        active: i64,
+        total: i64,
+        size: u64,
+        reclaimable: u64,
+    }
+    let (images, containers, volumes, build_cache) = if let Some(daemon) = daemon_backend(config)? {
+        let usage = daemon.docker_disk_usage()?;
+        let g = |u: client::RemoteDiskUsageGroup| Group {
+            active: u.active_count,
+            total: u.total_count,
+            size: u.size_bytes,
+            reclaimable: u.reclaimable_bytes,
+        };
+        (
+            g(usage.images),
+            g(usage.containers),
+            g(usage.volumes),
+            g(usage.build_cache),
+        )
+    } else {
+        require_root_for_docker()?;
+        let usage = docker::disk_usage(&config.docker)?;
+        let g = |u: docker::DiskUsageGroup| Group {
+            active: u.active_count,
+            total: u.total_count,
+            size: u.size_bytes,
+            reclaimable: u.reclaimable_bytes,
+        };
+        (
+            g(usage.images),
+            g(usage.containers),
+            g(usage.volumes),
+            g(usage.build_cache),
+        )
+    };
+    println!(
+        "{:<14}  {:>8}  {:>8}  {:>10}  {:>12}",
+        "TYPE", "ACTIVE", "TOTAL", "SIZE", "RECLAIMABLE"
+    );
+    for (label, group) in [
+        ("Images", &images),
+        ("Containers", &containers),
+        ("Local Volumes", &volumes),
+        ("Build Cache", &build_cache),
+    ] {
+        println!(
+            "{:<14}  {:>8}  {:>8}  {:>10}  {:>12}",
+            label,
+            group.active,
+            group.total,
+            monitor::human_bytes(group.size),
+            monitor::human_bytes(group.reclaimable),
+        );
+    }
+    Ok(())
+}
+
+/// `asc docker prune <target>` (DMN-105): remove unused images/volumes/build
+/// cache one item at a time — never anything an installed app still needs.
+fn docker_prune_cmd(
+    target: PruneTargetArg,
+    dry_run: bool,
+    dangling: bool,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let result = if let Some(daemon) = daemon_backend(config)? {
+        let r = daemon.prune_docker(target.as_wire(), dry_run, dangling)?;
+        PruneCmdResult {
+            removed: r.removed,
+            reclaimed_bytes: r.reclaimed_bytes,
+            skipped: r.skipped.into_iter().map(|s| (s.name, s.reason)).collect(),
+        }
+    } else {
+        require_root_for_docker()?;
+        in_process_prune(target, dry_run, dangling, config)?
+    };
+    if dry_run {
+        println!("Plan (dry run, nothing removed):");
+    }
+    if result.removed.is_empty() && result.skipped.is_empty() {
+        println!("{}", t(Msg::DockerPruneNothingToDo));
+        return Ok(());
+    }
+    for name in &result.removed {
+        println!(
+            "{} {name}",
+            if dry_run { "would remove" } else { "removed" }
+        );
+    }
+    println!(
+        "reclaimed: {}",
+        monitor::human_bytes(result.reclaimed_bytes)
+    );
+    for (name, reason) in &result.skipped {
+        println!("skipped {name}: {reason}");
+    }
+    Ok(())
+}
+
+/// In-process fallback of [`docker_prune_cmd`], the same per-item logic the
+/// daemon's `ApiState::prune_docker` runs, duplicated here because there is
+/// no daemon socket to call through (DMN-041's two-backend shape).
+fn in_process_prune(
+    target: PruneTargetArg,
+    dry_run: bool,
+    dangling_only: bool,
+    config: &Config,
+) -> anyhow::Result<PruneCmdResult> {
+    let cfg = &config.docker;
+    match target {
+        PruneTargetArg::Images => {
+            let (protection, _) = docker_protection(config)?;
+            let mut removed = Vec::new();
+            let mut skipped = Vec::new();
+            let mut reclaimed_bytes = 0u64;
+            for image in docker::list_images(cfg)? {
+                if dangling_only && !image.dangling {
+                    continue;
+                }
+                let label = image.tags.first().cloned().unwrap_or_else(|| {
+                    image
+                        .id
+                        .trim_start_matches("sha256:")
+                        .chars()
+                        .take(12)
+                        .collect()
+                });
+                let reason = image
+                    .tags
+                    .iter()
+                    .find_map(|tag| protection.get(tag))
+                    .or_else(|| protection.get(&image.id));
+                if let Some(reason) = reason {
+                    skipped.push((label, reason.clone()));
+                    continue;
+                }
+                if dry_run {
+                    removed.push(label);
+                    reclaimed_bytes += image.size;
+                    continue;
+                }
+                match docker::remove_image(cfg, &image.id) {
+                    Ok(()) => {
+                        removed.push(label);
+                        reclaimed_bytes += image.size;
+                    }
+                    Err(err) => skipped.push((label, format!("{err:#}"))),
+                }
+            }
+            Ok(PruneCmdResult {
+                removed,
+                reclaimed_bytes,
+                skipped,
+            })
+        }
+        PruneTargetArg::Volumes => {
+            let (_, protection) = docker_protection(config)?;
+            let mut removed = Vec::new();
+            let mut skipped = Vec::new();
+            let mut reclaimed_bytes = 0u64;
+            for volume in docker::list_volumes(cfg)? {
+                if let Some(reason) = protection.get(&volume.name) {
+                    skipped.push((volume.name, reason.clone()));
+                    continue;
+                }
+                let size = volume.size_bytes.unwrap_or(0);
+                if dry_run {
+                    removed.push(volume.name);
+                    reclaimed_bytes += size;
+                    continue;
+                }
+                match docker::remove_volume(cfg, &volume.name) {
+                    Ok(()) => {
+                        removed.push(volume.name);
+                        reclaimed_bytes += size;
+                    }
+                    Err(err) => skipped.push((volume.name, format!("{err:#}"))),
+                }
+            }
+            Ok(PruneCmdResult {
+                removed,
+                reclaimed_bytes,
+                skipped,
+            })
+        }
+        PruneTargetArg::BuildCache => {
+            if !dry_run {
+                let (removed, reclaimed_bytes) = docker::prune_build_cache(cfg)?;
+                return Ok(PruneCmdResult {
+                    removed,
+                    reclaimed_bytes,
+                    skipped: Vec::new(),
+                });
+            }
+            let mut removed = Vec::new();
+            let mut skipped = Vec::new();
+            let mut reclaimed_bytes = 0u64;
+            for entry in docker::build_cache_entries(cfg)? {
+                if entry.in_use {
+                    skipped.push((entry.id, t(Msg::DockerBuildCacheInUse).to_string()));
+                    continue;
+                }
+                reclaimed_bytes += entry.size_bytes;
+                removed.push(entry.id);
+            }
+            Ok(PruneCmdResult {
+                removed,
+                reclaimed_bytes,
+                skipped,
+            })
+        }
+    }
+}
+
+struct PruneCmdResult {
+    removed: Vec<String>,
+    reclaimed_bytes: u64,
+    skipped: Vec<(String, String)>,
+}
+
 /// `asc ports [<app>]` / `asc app ports [<app>]` (DMN-049): with an id, the
 /// app's published ports one per line; without one, a table of every visible
 /// app and its ports (root sees all users' apps, like [`print_app_list`]).
@@ -2702,6 +3188,188 @@ fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     let list = ports::published(config, manager.store(), &meta)?;
     print_app_ports(&meta.id, meta.display_name(), &list);
     Ok(())
+}
+
+/// `asc ports --listening` (DMN-103): real host listening ports, merged
+/// with Docker and app attribution — through the daemon when its socket is
+/// there, in-process otherwise, the same two-backend shape [`ports_cmd`]
+/// uses.
+fn listening_ports_cmd(config: &Config) -> anyhow::Result<()> {
+    if let Some(daemon) = daemon_backend(config)? {
+        let rows: Vec<ListeningPortRow> = daemon
+            .listening_ports()?
+            .iter()
+            .map(remote_listening_port_row)
+            .collect();
+        print_listening_ports(&rows);
+        return Ok(());
+    }
+
+    let manager = AppManager::new(config);
+    let ctx = UserContext::current();
+
+    let sockets = asc_daemon::daemon::monitor::sockets::listening();
+    let containers = docker::list_containers(&config.docker, false, false).unwrap_or_default();
+
+    // Container name -> owning app id, the same cross-reference
+    // `docker_ps_cmd` builds: `docker::ContainerInfo` itself carries no app
+    // identity, only names, so ownership is resolved from the app store.
+    let apps_for_owners = manager.list(&ctx)?;
+    let owners: std::collections::HashMap<String, String> = apps_for_owners
+        .iter()
+        .filter_map(|app| match &app.meta.runtime {
+            asc_daemon::daemon::apps::meta::Runtime::Docker { container, .. } => {
+                Some((container.clone(), app.meta.id.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // (port, transport) -> (container name, owning app id), first match wins.
+    let mut container_ports: std::collections::HashMap<
+        (u16, &'static str),
+        (String, Option<String>),
+    > = std::collections::HashMap::new();
+    for container in &containers {
+        let name = container
+            .names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| container.id.clone());
+        let owner_app_id = container.names.iter().find_map(|n| owners.get(n).cloned());
+        for port in &container.ports {
+            let Some(public) = port.public else { continue };
+            let transport = if port.protocol == "udp" { "udp" } else { "tcp" };
+            container_ports
+                .entry((public, transport))
+                .or_insert_with(|| (name.clone(), owner_app_id.clone()));
+        }
+    }
+
+    let daemon_ports: Vec<u16> = [listen_port(&config.api.listen)]
+        .into_iter()
+        .flatten()
+        .collect();
+
+    let mut live: std::collections::HashSet<(u16, &'static str)> = std::collections::HashSet::new();
+    let mut rows: Vec<ListeningPortRow> = sockets
+        .into_iter()
+        .map(|socket| {
+            live.insert((socket.port, socket.protocol));
+            let attributed = container_ports.get(&(socket.port, socket.protocol));
+            ListeningPortRow {
+                is_daemon: socket.protocol == "tcp" && daemon_ports.contains(&socket.port),
+                port: socket.port,
+                protocol: socket.protocol.to_string(),
+                address: socket.address,
+                pid: socket.pid,
+                process: socket.process,
+                container_name: attributed.map(|(name, _)| name.clone()),
+                app_id: attributed.and_then(|(_, app_id)| app_id.clone()),
+                declared_only: false,
+            }
+        })
+        .collect();
+
+    for app in &apps_for_owners {
+        if !matches!(
+            app.meta.runtime,
+            asc_daemon::daemon::apps::meta::Runtime::Docker { .. }
+        ) {
+            continue;
+        }
+        let Ok(declared) =
+            asc_daemon::daemon::apps::ports::published(config, manager.store(), &app.meta)
+        else {
+            continue;
+        };
+        for declared_port in declared {
+            for transport in declared_port.protocol.transports() {
+                if live.contains(&(declared_port.host, *transport)) {
+                    continue;
+                }
+                rows.push(ListeningPortRow {
+                    port: declared_port.host,
+                    protocol: transport.to_string(),
+                    address: String::new(),
+                    pid: None,
+                    process: None,
+                    container_name: None,
+                    app_id: Some(app.meta.id.clone()),
+                    declared_only: true,
+                    is_daemon: false,
+                });
+            }
+        }
+    }
+
+    print_listening_ports(&rows);
+    Ok(())
+}
+
+/// Port number out of a `"host:port"` or `"[host]:port"` listen address —
+/// mirrors `asc_daemon::daemon::api::listen_port` (not exported; the CLI's
+/// in-process path has no `ApiState` to call it through).
+fn listen_port(address: &str) -> Option<u16> {
+    address.rsplit_once(':')?.1.parse().ok()
+}
+
+/// One row of `asc ports --listening`, from either backend.
+struct ListeningPortRow {
+    port: u16,
+    protocol: String,
+    address: String,
+    pid: Option<u32>,
+    process: Option<String>,
+    container_name: Option<String>,
+    app_id: Option<String>,
+    declared_only: bool,
+    is_daemon: bool,
+}
+
+fn remote_listening_port_row(row: &client::RemoteListeningPort) -> ListeningPortRow {
+    ListeningPortRow {
+        port: row.port,
+        protocol: row.protocol.clone(),
+        address: row.address.clone(),
+        pid: row.pid,
+        process: row.process.clone(),
+        container_name: row.container_name.clone(),
+        app_id: row.app_id.clone(),
+        declared_only: row.declared_only,
+        is_daemon: row.is_daemon,
+    }
+}
+
+fn print_listening_ports(rows: &[ListeningPortRow]) {
+    if rows.is_empty() {
+        println!("{}", t(Msg::PortsListeningEmpty));
+        return;
+    }
+    for row in rows {
+        let owner = if row.is_daemon {
+            "  [asc-daemon]".to_string()
+        } else if let Some(app_id) = &row.app_id {
+            format!("  [{app_id}]")
+        } else if let Some(name) = &row.container_name {
+            format!("  ({name})")
+        } else if let Some(process) = &row.process {
+            format!("  {process}")
+        } else {
+            String::new()
+        };
+        let pid = row.pid.map(|pid| format!(" pid={pid}")).unwrap_or_default();
+        let reserved = if row.declared_only { " (reserved)" } else { "" };
+        let address = if row.address.is_empty() {
+            String::new()
+        } else {
+            format!("{}:", row.address)
+        };
+        println!(
+            "{address}{}/{}{pid}{owner}{reserved}",
+            row.port, row.protocol
+        );
+    }
 }
 
 /// One app's published ports, one per line.

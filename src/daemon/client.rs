@@ -151,6 +151,107 @@ pub struct RemoteContainerStats {
     pub block_write_bytes: Option<u64>,
 }
 
+/// One real listening port on the host (DMN-103), merged with Docker/app
+/// attribution where the daemon could resolve it.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteListeningPort {
+    pub port: u16,
+    pub protocol: String,
+    pub address: String,
+    pub family: String,
+    pub pid: Option<u32>,
+    pub process: Option<String>,
+    pub command: Option<String>,
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+    pub app_id: Option<String>,
+    pub app_uuid: Option<String>,
+    pub declared_only: bool,
+    pub is_daemon: bool,
+}
+
+/// One image on the host (DMN-104).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDockerImage {
+    pub id: String,
+    pub tags: Vec<String>,
+    pub size_bytes: u64,
+    pub created: i64,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+    pub dangling: bool,
+    pub asc_protected: bool,
+    pub protected_reason: Option<String>,
+}
+
+/// One named volume on the host (DMN-104).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDockerVolume {
+    pub name: String,
+    pub driver: String,
+    pub mountpoint: String,
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+    pub ref_count: Option<i32>,
+    pub size_bytes: Option<u64>,
+    pub asc_protected: bool,
+    pub protected_reason: Option<String>,
+}
+
+/// One network on the host (DMN-104), inventory-only.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDockerNetwork {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    pub scope: String,
+    pub internal: bool,
+    pub created: Option<i64>,
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+}
+
+/// One `docker system df` category.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDiskUsageGroup {
+    pub active_count: i64,
+    pub total_count: i64,
+    pub size_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
+/// `docker system df`'s four categories (DMN-104).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RemoteDockerDiskUsage {
+    pub images: RemoteDiskUsageGroup,
+    pub containers: RemoteDiskUsageGroup,
+    pub volumes: RemoteDiskUsageGroup,
+    #[serde(rename = "buildCache")]
+    pub build_cache: RemoteDiskUsageGroup,
+}
+
+/// One item a prune (DMN-105) considered but did not remove.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemotePruneSkip {
+    pub name: String,
+    pub reason: String,
+}
+
+/// Result of a prune (DMN-105), real run or dry run alike.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePruneResult {
+    pub removed: Vec<String>,
+    pub reclaimed_bytes: u64,
+    pub skipped: Vec<RemotePruneSkip>,
+}
+
 /// One app's resource counters, mirroring `AppStats` of the in-process path.
 #[derive(Debug, serde::Deserialize)]
 pub struct RemoteStats {
@@ -289,6 +390,79 @@ impl Daemon {
         }
         serde_json::from_value(json["stats"].clone())
             .context("malformed container stats from the daemon")
+    }
+
+    /// Real host listening-port inventory (DMN-103) — what is actually
+    /// bound, not what an app's settings merely declare.
+    pub fn listening_ports(&self) -> Result<Vec<RemoteListeningPort>> {
+        let json = self.request(Method::GET, "/v1/ports/listening", None)?;
+        // A daemon predating DMN-103 has no such route and answers without
+        // the key; say so plainly instead of blaming the payload shape.
+        if json["ports"].is_null() {
+            anyhow::bail!("{}", t(Msg::PortsListeningUnsupportedByDaemon));
+        }
+        serde_json::from_value(json["ports"].clone())
+            .context("malformed listening-port report from the daemon")
+    }
+
+    /// Every image on the host, ASC-owned or not (DMN-104). Root context only.
+    pub fn list_images(&self) -> Result<Vec<RemoteDockerImage>> {
+        let json = self.request(Method::GET, "/v1/docker/images", None)?;
+        if json["images"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerInventoryUnsupportedByDaemon));
+        }
+        serde_json::from_value(json["images"].clone())
+            .context("malformed image list from the daemon")
+    }
+
+    /// Every named volume on the host (DMN-104). Root context only.
+    pub fn list_volumes(&self) -> Result<Vec<RemoteDockerVolume>> {
+        let json = self.request(Method::GET, "/v1/docker/volumes", None)?;
+        if json["volumes"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerInventoryUnsupportedByDaemon));
+        }
+        serde_json::from_value(json["volumes"].clone())
+            .context("malformed volume list from the daemon")
+    }
+
+    /// Every network on the host (DMN-104), inventory-only. Root context only.
+    pub fn list_networks(&self) -> Result<Vec<RemoteDockerNetwork>> {
+        let json = self.request(Method::GET, "/v1/docker/networks", None)?;
+        if json["networks"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerInventoryUnsupportedByDaemon));
+        }
+        serde_json::from_value(json["networks"].clone())
+            .context("malformed network list from the daemon")
+    }
+
+    /// `docker system df`'s four categories (DMN-104). Root context only.
+    pub fn docker_disk_usage(&self) -> Result<RemoteDockerDiskUsage> {
+        let json = self.request(Method::GET, "/v1/docker/disk-usage", None)?;
+        if json["images"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerInventoryUnsupportedByDaemon));
+        }
+        serde_json::from_value(json).context("malformed disk usage from the daemon")
+    }
+
+    /// Remove unused images/volumes/build cache, one item at a time (DMN-105).
+    /// `target` is `"images"`, `"volumes"` or `"build_cache"`. Root context
+    /// only.
+    pub fn prune_docker(
+        &self,
+        target: &str,
+        dry_run: bool,
+        dangling_only: bool,
+    ) -> Result<RemotePruneResult> {
+        let body = serde_json::json!({
+            "target": target,
+            "dryRun": dry_run,
+            "danglingOnly": dangling_only,
+        });
+        let json = self.request(Method::POST, "/v1/docker/prune", Some(body))?;
+        if json["removed"].is_null() {
+            anyhow::bail!("{}", t(Msg::DockerInventoryUnsupportedByDaemon));
+        }
+        serde_json::from_value(json).context("malformed prune result from the daemon")
     }
 
     /// Resource consumption per app. The daemon samples twice ~500 ms apart,

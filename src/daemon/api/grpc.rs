@@ -346,6 +346,35 @@ impl MonitorService for Grpc {
             interfaces: interfaces.iter().map(interface_to_pb).collect(),
         }))
     }
+
+    async fn list_listening_ports(
+        &self,
+        request: Request<pb::ListListeningPortsRequest>,
+    ) -> Result<Response<pb::ListListeningPortsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let rows = self.0.listening_ports(ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::ListListeningPortsResponse {
+            ports: rows.iter().map(listening_port_to_pb).collect(),
+        }))
+    }
+}
+
+fn listening_port_to_pb(row: &super::ListeningPortRow) -> pb::ListeningPort {
+    pb::ListeningPort {
+        port: row.port as u32,
+        protocol: row.protocol.to_string(),
+        address: row.address.clone(),
+        family: row.family.to_string(),
+        pid: row.pid,
+        process: row.process.clone(),
+        command: row.command.clone(),
+        container_id: row.container_id.clone(),
+        container_name: row.container_name.clone(),
+        app_id: row.app_id.clone(),
+        app_uuid: row.app_uuid.clone(),
+        declared_only: row.declared_only,
+        is_daemon: row.is_daemon,
+    }
 }
 
 /// Shared by `install_app` and `install_app_stream`: both end in the same
@@ -1743,6 +1772,138 @@ impl DockerService for Grpc {
         Ok(Response::new(pb::ListContainerStatsResponse {
             stats: rows.iter().map(container_stats_to_pb).collect(),
         }))
+    }
+
+    async fn list_images(
+        &self,
+        request: Request<pb::ListImagesRequest>,
+    ) -> Result<Response<pb::ListImagesResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let rows = self.0.list_images(ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::ListImagesResponse {
+            images: rows.iter().map(docker_image_to_pb).collect(),
+        }))
+    }
+
+    async fn list_volumes(
+        &self,
+        request: Request<pb::ListVolumesRequest>,
+    ) -> Result<Response<pb::ListVolumesResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let rows = self.0.list_volumes(ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::ListVolumesResponse {
+            volumes: rows.iter().map(docker_volume_to_pb).collect(),
+        }))
+    }
+
+    async fn list_networks(
+        &self,
+        request: Request<pb::ListNetworksRequest>,
+    ) -> Result<Response<pb::ListNetworksResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let rows = self.0.list_networks(ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::ListNetworksResponse {
+            networks: rows.iter().map(docker_network_to_pb).collect(),
+        }))
+    }
+
+    async fn get_docker_disk_usage(
+        &self,
+        request: Request<pb::GetDockerDiskUsageRequest>,
+    ) -> Result<Response<pb::GetDockerDiskUsageResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let usage = self.0.docker_disk_usage(ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::GetDockerDiskUsageResponse {
+            images: Some(disk_usage_group_to_pb(&usage.images)),
+            containers: Some(disk_usage_group_to_pb(&usage.containers)),
+            volumes: Some(disk_usage_group_to_pb(&usage.volumes)),
+            build_cache: Some(disk_usage_group_to_pb(&usage.build_cache)),
+        }))
+    }
+
+    async fn prune_docker(
+        &self,
+        request: Request<pb::PruneDockerRequest>,
+    ) -> Result<Response<pb::PruneDockerResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let target = prune_target_from_pb(req.target)?;
+        let row = self
+            .0
+            .prune_docker(ctx, target, req.dry_run, req.dangling_only)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::PruneDockerResponse {
+            removed: row.removed,
+            reclaimed_bytes: row.reclaimed_bytes,
+            skipped: row
+                .skipped
+                .iter()
+                .map(|s| pb::PruneSkip {
+                    name: s.name.clone(),
+                    reason: s.reason.clone(),
+                })
+                .collect(),
+        }))
+    }
+}
+
+fn docker_image_to_pb(row: &super::DockerImageRow) -> pb::DockerImage {
+    pb::DockerImage {
+        id: row.id.clone(),
+        tags: row.tags.clone(),
+        size_bytes: row.size_bytes,
+        created: row.created,
+        labels: row.labels.clone(),
+        dangling: row.dangling,
+        asc_protected: row.asc_protected,
+        protected_reason: row.protected_reason.clone(),
+    }
+}
+
+fn docker_volume_to_pb(row: &super::DockerVolumeRow) -> pb::DockerVolume {
+    pb::DockerVolume {
+        name: row.name.clone(),
+        driver: row.driver.clone(),
+        mountpoint: row.mountpoint.clone(),
+        created_at: row.created_at,
+        labels: row.labels.clone(),
+        ref_count: row.ref_count,
+        size_bytes: row.size_bytes,
+        asc_protected: row.asc_protected,
+        protected_reason: row.protected_reason.clone(),
+    }
+}
+
+fn docker_network_to_pb(row: &super::DockerNetworkRow) -> pb::DockerNetwork {
+    pb::DockerNetwork {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        driver: row.driver.clone(),
+        scope: row.scope.clone(),
+        internal: row.internal,
+        created: row.created,
+        labels: row.labels.clone(),
+    }
+}
+
+fn disk_usage_group_to_pb(group: &super::DiskUsageGroupRow) -> pb::DiskUsageGroup {
+    pb::DiskUsageGroup {
+        active_count: group.active_count,
+        total_count: group.total_count,
+        size_bytes: group.size_bytes,
+        reclaimable_bytes: group.reclaimable_bytes,
+    }
+}
+
+/// `pb::PruneTarget` -> `super::PruneTarget`, refusing the zero value: there
+/// is no sensible default prune target, so a caller must say which one.
+fn prune_target_from_pb(target: i32) -> Result<super::PruneTarget, Status> {
+    match pb::PruneTarget::try_from(target) {
+        Ok(pb::PruneTarget::Images) => Ok(super::PruneTarget::Images),
+        Ok(pb::PruneTarget::Volumes) => Ok(super::PruneTarget::Volumes),
+        Ok(pb::PruneTarget::BuildCache) => Ok(super::PruneTarget::BuildCache),
+        _ => Err(Status::invalid_argument("target must be set")),
     }
 }
 

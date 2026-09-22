@@ -37,7 +37,9 @@ fn install_from_a_bare_compose_file_runs_the_project() {
         return;
     }
     if !docker_enabled() {
-        eprintln!("skipping: set ASC_DAEMON_TEST_DOCKER=1 to run (needs a live Docker daemon + compose plugin)");
+        eprintln!(
+            "skipping: set ASC_DAEMON_TEST_DOCKER=1 to run (needs a live Docker daemon + compose plugin)"
+        );
         return;
     }
 
@@ -93,7 +95,10 @@ fn install_from_a_bare_compose_file_runs_the_project() {
     assert_eq!(project.as_str(), "asc-demo");
     // Created but not started (DMN-108's provisioning contract, matching a
     // normal Docker app's `docker_create`).
-    assert_eq!(manager.status(&ctx, "demo").unwrap().state, RuntimeState::Stopped);
+    assert_eq!(
+        manager.status(&ctx, "demo").unwrap().state,
+        RuntimeState::Stopped
+    );
 
     // Ports come from the compose file itself, live or stopped alike.
     let ports = asc_daemon::daemon::apps::ports::published(&config, &store, &meta).unwrap();
@@ -107,14 +112,20 @@ fn install_from_a_bare_compose_file_runs_the_project() {
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         manager.start(&ctx, "demo").unwrap();
-        assert_eq!(manager.status(&ctx, "demo").unwrap().state, RuntimeState::Running);
+        assert_eq!(
+            manager.status(&ctx, "demo").unwrap().state,
+            RuntimeState::Running
+        );
 
         let logs = manager.logs(&ctx, "demo", 50, false).unwrap();
         // compose logs prefix each line with the service name.
         assert!(logs.contains("web"), "got: {logs}");
 
         manager.stop(&ctx, "demo").unwrap();
-        assert_eq!(manager.status(&ctx, "demo").unwrap().state, RuntimeState::Stopped);
+        assert_eq!(
+            manager.status(&ctx, "demo").unwrap().state,
+            RuntimeState::Stopped
+        );
     }));
     cleanup();
     result.unwrap();
@@ -127,7 +138,9 @@ fn a_compose_file_with_a_host_bind_mount_is_refused_at_install() {
         return;
     }
     if !docker_enabled() {
-        eprintln!("skipping: set ASC_DAEMON_TEST_DOCKER=1 to run (needs a live Docker daemon + compose plugin)");
+        eprintln!(
+            "skipping: set ASC_DAEMON_TEST_DOCKER=1 to run (needs a live Docker daemon + compose plugin)"
+        );
         return;
     }
 

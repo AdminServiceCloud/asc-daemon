@@ -23,7 +23,10 @@ use serde::Deserialize;
 use super::manifest::{Manifest, StackManifest};
 
 /// One way a repository could be installed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum InstallMethod {
     AscManifest,
     AscStack,
@@ -36,11 +39,15 @@ pub enum InstallMethod {
 
 impl InstallMethod {
     /// Whether `asc install`/the platform can actually install this method
-    /// today. Swarm/Kubernetes/Helm are detected so the operator sees "found,
-    /// not supported" instead of the repository looking unrecognized, but
-    /// none of the three has an install path yet.
+    /// today. DockerCompose/Swarm/Kubernetes/Helm are detected so the
+    /// operator sees "found, not supported" instead of the repository
+    /// looking unrecognized, but none of the four has an install path yet
+    /// (DockerCompose lands in DMN-108).
     pub fn supported(self) -> bool {
-        matches!(self, InstallMethod::AscManifest | InstallMethod::AscStack)
+        matches!(
+            self,
+            InstallMethod::AscManifest | InstallMethod::AscStack | InstallMethod::Dockerfile
+        )
     }
 }
 

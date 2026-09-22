@@ -92,7 +92,7 @@ fn install_direct_from_git_url() {
     // repository's own name, and the recorded version is the manifest's own
     // (no ref was explicitly checked out).
     let report = app(pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, false, None,
+        &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
     )
     .unwrap());
     assert_eq!(report.id, "demo");
@@ -119,6 +119,7 @@ fn install_direct_from_git_url() {
         None,
         false,
         None,
+        None,
     )
     .unwrap());
     assert_eq!(report.id, "demo-2", "a second instance gets the -2 suffix");
@@ -142,6 +143,7 @@ fn install_direct_from_git_url() {
         None,
         false,
         None,
+        None,
     )
     .unwrap());
     assert_eq!(report.id, "demo-3");
@@ -159,6 +161,7 @@ fn install_direct_from_git_url() {
         true,
         None,
         false,
+        None,
         None,
     )
     .unwrap_err();
@@ -204,7 +207,7 @@ runtime:
     };
 
     let report = app(pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, false, None,
+        &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
     )
     .unwrap());
     assert_eq!(report.id, "homebar");
@@ -252,7 +255,7 @@ fn install_direct_from_git_requires_license_acceptance() {
     };
 
     let err = pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, false, None, false, None,
+        &config, &ctx, &url, None, None, None, None, false, None, false, None, None,
     )
     .unwrap_err();
     let required = err
@@ -266,7 +269,7 @@ fn install_direct_from_git_requires_license_acceptance() {
 
     // Accepted: installs normally.
     pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, false, None,
+        &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
     )
     .unwrap();
     assert!(store.get("licensed").unwrap().is_some());
@@ -324,6 +327,7 @@ fn install_reports_progress_lines_when_given_a_reporter() {
         true,
         None,
         false,
+        None,
         Some(&reporter),
     )
     .unwrap();
@@ -397,6 +401,7 @@ fn install_direct_from_git_with_a_monorepo_path() {
         None,
         false,
         None,
+        None,
     )
     .unwrap());
     assert_eq!(report.id, "helloworld");
@@ -426,6 +431,7 @@ fn install_direct_from_git_with_a_monorepo_path() {
         true,
         None,
         false,
+        None,
         None,
     )
     .unwrap_err();

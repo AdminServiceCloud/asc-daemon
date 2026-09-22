@@ -198,12 +198,24 @@ async fn grpc_inspect_package_without_a_manifest_reports_unknown_and_detected_me
     let kinds: Vec<i32> = response.methods.iter().map(|m| m.kind).collect();
     assert!(kinds.contains(&(pb::InstallMethodKind::Dockerfile as i32)));
     assert!(kinds.contains(&(pb::InstallMethodKind::DockerCompose as i32)));
+    // Dockerfile is installable since DMN-107 — unlike the docker-compose
+    // project sitting right next to it in the same repository, which is not.
     let dockerfile = response
         .methods
         .iter()
         .find(|m| m.kind == pb::InstallMethodKind::Dockerfile as i32)
         .unwrap();
-    assert!(!dockerfile.supported);
-    assert!(!dockerfile.unsupported_reason.is_empty());
+    assert!(dockerfile.supported);
+    assert!(dockerfile.unsupported_reason.is_empty());
     assert_eq!(dockerfile.files, vec!["Dockerfile"]);
+    // Whether docker_compose itself is supported depends on whether this
+    // test host actually has the `docker compose` plugin (DMN-109) — outside
+    // this test's control, so it only checks that `supported` and
+    // `unsupported_reason` agree with each other, not which way.
+    let compose = response
+        .methods
+        .iter()
+        .find(|m| m.kind == pb::InstallMethodKind::DockerCompose as i32)
+        .unwrap();
+    assert_eq!(compose.supported, compose.unsupported_reason.is_empty());
 }

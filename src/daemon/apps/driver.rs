@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use super::compose::ComposeDriver;
 use super::docker::DockerDriver;
 use super::meta::{AppMeta, Runtime};
 use super::process::ProcessDriver;
@@ -80,6 +81,7 @@ pub fn for_runtime(runtime: &Runtime, docker: &DockerConfig) -> Box<dyn AppDrive
         Runtime::Docker { .. } => Box::new(DockerDriver::new(docker.clone())),
         Runtime::Systemd { .. } => Box::new(SystemdAppDriver),
         Runtime::Process { .. } => Box::new(ProcessDriver),
+        Runtime::Compose { .. } => Box::new(ComposeDriver::new(docker.clone())),
     }
 }
 

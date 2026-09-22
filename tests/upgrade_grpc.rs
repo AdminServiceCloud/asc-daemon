@@ -133,6 +133,7 @@ async fn grpc_upgrade_app_moves_to_a_newer_tag_and_reports_up_to_date_otherwise(
         None,
         false,
         None,
+        None,
     )
     .unwrap();
 

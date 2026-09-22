@@ -65,6 +65,7 @@ fn seed_app(store: &AppStore, id: &str) -> AppMeta {
         branch: None,
         repo_path: None,
         package: None,
+        install_method: None,
         desired_state: DesiredState::Stopped,
         quota: None,
         runtime: Runtime::Process {

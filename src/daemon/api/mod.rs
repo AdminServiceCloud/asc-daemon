@@ -62,6 +62,18 @@ pub const CAPABILITIES: &[&str] = &[
     "app.clone",
 ];
 
+/// The full capability list for this host, including "app.compose" when the
+/// `docker compose` plugin is actually available (DMN-109) — unlike every
+/// other entry in [`CAPABILITIES`], that one depends on a runtime probe, not
+/// just the daemon build, so it cannot live in the static list itself.
+pub fn capabilities(docker: &crate::daemon::config::DockerConfig) -> Vec<&'static str> {
+    let mut caps = CAPABILITIES.to_vec();
+    if crate::daemon::compose::available(docker) {
+        caps.push("app.compose");
+    }
+    caps
+}
+
 /// Shared state behind both transports.
 pub struct ApiState {
     pub config: Config,
@@ -993,6 +1005,7 @@ impl ApiState {
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
         force: bool,
+        install_method: Option<pkg::InstallMethod>,
     ) -> Result<pkg::InstallOutcome> {
         self.blocking(move |s| {
             if pkg::is_git_url(&spec) {
@@ -1016,12 +1029,18 @@ impl ApiState {
                     license_ack,
                     image_choice,
                     force,
+                    install_method,
                     None,
                 );
             }
             if branch.is_some() || tag.is_some() || path.is_some() || stack_app.is_some() {
                 anyhow::bail!(
                     "branch, tag, path and stack_app are only used for a direct repository install (a registry spec carries the version as '@version' and a stack app as '<stack>/<app>')"
+                );
+            }
+            if install_method.is_some() {
+                anyhow::bail!(
+                    "install_method is only used for a direct repository install — a registry package is always its own asc.yaml/asc.stack.yaml"
                 );
             }
             pkg::install(
@@ -1061,6 +1080,7 @@ impl ApiState {
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
         force: bool,
+        install_method: Option<pkg::InstallMethod>,
     ) -> tokio::sync::mpsc::Receiver<InstallStreamEvent> {
         // A line per subscriber's outstanding capacity: git/docker can emit
         // many lines quickly, and blocking the install itself on a slow
@@ -1102,12 +1122,18 @@ impl ApiState {
                         license_ack,
                         image_choice,
                         force,
+                        install_method,
                         Some(&reporter),
                     );
                 }
                 if branch.is_some() || tag.is_some() || path.is_some() || stack_app.is_some() {
                     anyhow::bail!(
                         "branch, tag, path and stack_app are only used for a direct repository install (a registry spec carries the version as '@version' and a stack app as '<stack>/<app>')"
+                    );
+                }
+                if install_method.is_some() {
+                    anyhow::bail!(
+                        "install_method is only used for a direct repository install — a registry package is always its own asc.yaml/asc.stack.yaml"
                     );
                 }
                 pkg::install(
@@ -1316,14 +1342,21 @@ impl ApiState {
         pkg::settings::SettingValues,
         std::path::PathBuf,
     )> {
-        use pkg::settings::{SettingValues, SettingsFile, manifest_dir_of};
+        use pkg::settings::{SettingValues, locate_installed};
         let meta = self.manager.get_authorized(ctx, id)?;
         let app_dir = self.manager.store().app_dir(&meta.id)?;
-        let manifest_dir = manifest_dir_of(&self.config, &app_dir)?;
-        let manifest = pkg::manifest::Manifest::load(&manifest_dir)?;
-        let file = SettingsFile::load_for(&manifest_dir, &manifest)?;
         let config_dir = app_dir.join("config");
         let values = SettingValues::load(&config_dir)?;
+        // A compose app declares no settings at all (DMN-108) — an empty
+        // schema, not an error, same as a manifest with no `settings:`.
+        if matches!(
+            meta.runtime,
+            crate::daemon::apps::meta::Runtime::Compose { .. }
+        ) {
+            return Ok((None, values, config_dir));
+        }
+        let (manifest_dir, _) = locate_installed(&self.config, &meta, &app_dir)?;
+        let (_, file) = pkg::dockerfile::resolve_installed(&meta, &manifest_dir)?;
         Ok((file, values, config_dir))
     }
 

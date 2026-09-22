@@ -582,6 +582,7 @@ impl Daemon {
         license_ack: bool,
         image_choice: Option<crate::daemon::apps::ImageSource>,
         force: bool,
+        install_method: Option<pkg::InstallMethod>,
     ) -> Result<pkg::InstallOutcome> {
         let body = serde_json::json!({
             "spec": spec,
@@ -594,6 +595,7 @@ impl Daemon {
             "license_ack": license_ack,
             "image_choice": image_choice,
             "force": force,
+            "install_method": install_method,
         });
         let json = self.request(Method::POST, "/v1/apps", Some(body))?;
         let report = |v: &Value| pkg::InstallReport {

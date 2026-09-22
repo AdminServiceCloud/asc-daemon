@@ -875,6 +875,24 @@ pub fn locate_installed(
     app_dir: &Path,
 ) -> Result<(PathBuf, Option<super::manifest::StackManifest>)> {
     let repo = app_dir.join("repository");
+    // A docker compose app (DMN-108) carries its own directory directly on
+    // `Runtime::Compose` — no need for a separate marker the way Dockerfile
+    // needs `install_method`, since `Runtime::Docker` doesn't carry one.
+    if let crate::daemon::apps::meta::Runtime::Compose { working_dir, .. } = &meta.runtime {
+        return Ok((app_dir.join(working_dir), None));
+    }
+    // A Dockerfile install (DMN-107) never writes an asc.yaml to the clone —
+    // the `Manifest::FILE` check below would otherwise fall through to
+    // resolving this app as a registry package, which it never was.
+    if matches!(
+        meta.install_method,
+        Some(crate::daemon::apps::meta::InstallMethod::Dockerfile { .. })
+    ) {
+        return Ok((
+            super::install::manifest_dir(&repo, meta.repo_path.as_deref())?,
+            None,
+        ));
+    }
     if repo.join(Manifest::FILE).exists() {
         return Ok((repo, None));
     }

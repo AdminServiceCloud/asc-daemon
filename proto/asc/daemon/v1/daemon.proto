@@ -280,6 +280,13 @@ message InstallAppRequest {
   // the CPU quota clamp, which always applies — the Engine rejects a quota
   // above the host's total core count outright, consent or not.
   bool force = 9;
+  // Install as one of InspectPackageResponse.methods instead of the
+  // package's own asc.yaml (DMN-107) — a direct git install only, since a
+  // registry entry is always its own asc.yaml/asc.stack.yaml. Unset,
+  // ASC_MANIFEST and ASC_STACK all mean "read the manifest normally";
+  // DOCKER_COMPOSE/SWARM/KUBERNETES/HELM are rejected (not installable yet —
+  // see InstallMethodKind).
+  optional InstallMethodKind install_method = 10;
 }
 
 message InstallAppResponse {

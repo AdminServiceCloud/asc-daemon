@@ -172,7 +172,10 @@ impl DaemonService for Grpc {
             version: crate::VERSION.to_string(),
             apps_total: total as u32,
             apps_running: running as u32,
-            capabilities: super::CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            capabilities: super::capabilities(&self.0.config.docker)
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
         }))
     }
 }
@@ -418,8 +421,14 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
     }
 }
 
-/// The inspected package (DMN-098) in its wire form.
-fn package_info_to_pb(info: pkg::PackageInfo) -> pb::InspectPackageResponse {
+/// The inspected package (DMN-098) in its wire form. `compose_available`
+/// reflects whether the `docker compose` plugin was found on this host
+/// (DMN-109) — unlike every other method, `DockerCompose.supported()` cannot
+/// be a pure function of the kind alone.
+fn package_info_to_pb(
+    info: pkg::PackageInfo,
+    compose_available: bool,
+) -> pb::InspectPackageResponse {
     pb::InspectPackageResponse {
         kind: match info.kind {
             pkg::PackageKind::Unknown => pb::PackageKind::Unspecified as i32,
@@ -448,13 +457,34 @@ fn package_info_to_pb(info: pkg::PackageInfo) -> pb::InspectPackageResponse {
         methods: info
             .methods
             .into_iter()
-            .map(detected_method_to_pb)
+            .map(|method| detected_method_to_pb(method, compose_available))
             .collect(),
         auth_required: None,
     }
 }
 
-fn detected_method_to_pb(method: pkg::DetectedMethod) -> pb::DetectedInstallMethod {
+/// Reverse of `detected_method_to_pb`'s kind mapping: which method the
+/// caller wants `InstallApp`/`InstallAppStream` to install as (DMN-107),
+/// rather than reading whatever manifest happens to be at the package root.
+/// `Unspecified`/`AscManifest`/`AscStack` all mean "read the package's own
+/// manifest normally" — `install_one` already does that when given `None`.
+fn install_method_from_pb(kind: i32) -> Option<pkg::InstallMethod> {
+    match pb::InstallMethodKind::try_from(kind).unwrap_or_default() {
+        pb::InstallMethodKind::Unspecified
+        | pb::InstallMethodKind::AscManifest
+        | pb::InstallMethodKind::AscStack => None,
+        pb::InstallMethodKind::DockerCompose => Some(pkg::InstallMethod::DockerCompose),
+        pb::InstallMethodKind::Dockerfile => Some(pkg::InstallMethod::Dockerfile),
+        pb::InstallMethodKind::Swarm => Some(pkg::InstallMethod::Swarm),
+        pb::InstallMethodKind::Kubernetes => Some(pkg::InstallMethod::Kubernetes),
+        pb::InstallMethodKind::Helm => Some(pkg::InstallMethod::Helm),
+    }
+}
+
+fn detected_method_to_pb(
+    method: pkg::DetectedMethod,
+    compose_available: bool,
+) -> pb::DetectedInstallMethod {
     let kind = match method.kind {
         pkg::InstallMethod::AscManifest => pb::InstallMethodKind::AscManifest,
         pkg::InstallMethod::AscStack => pb::InstallMethodKind::AscStack,
@@ -464,7 +494,12 @@ fn detected_method_to_pb(method: pkg::DetectedMethod) -> pb::DetectedInstallMeth
         pkg::InstallMethod::Kubernetes => pb::InstallMethodKind::Kubernetes,
         pkg::InstallMethod::Helm => pb::InstallMethodKind::Helm,
     };
-    let supported = method.kind.supported();
+    // DockerCompose is the one method whose support depends on the host, not
+    // just the kind — everything else is a pure function of `supported()`.
+    let supported = match method.kind {
+        pkg::InstallMethod::DockerCompose => compose_available,
+        other => other.supported(),
+    };
     pb::DetectedInstallMethod {
         kind: kind as i32,
         files: method.files,
@@ -483,12 +518,11 @@ fn detected_method_to_pb(method: pkg::DetectedMethod) -> pb::DetectedInstallMeth
 /// message the CLI ever prints on its own.
 fn unsupported_reason(kind: pkg::InstallMethod) -> String {
     match kind {
-        pkg::InstallMethod::AscManifest | pkg::InstallMethod::AscStack => String::new(),
+        pkg::InstallMethod::AscManifest
+        | pkg::InstallMethod::AscStack
+        | pkg::InstallMethod::Dockerfile => String::new(),
         pkg::InstallMethod::DockerCompose => {
-            "docker compose projects cannot be installed yet".into()
-        }
-        pkg::InstallMethod::Dockerfile => {
-            "installing straight from a Dockerfile is not supported yet".into()
+            "the docker compose plugin is not available on this host".into()
         }
         pkg::InstallMethod::Swarm => "Docker Swarm stacks are not supported".into(),
         pkg::InstallMethod::Kubernetes => "Kubernetes manifests are not supported".into(),
@@ -698,6 +732,7 @@ impl AppService for Grpc {
                 // interactive flow is the CLI/REST path.
                 None,
                 request.force,
+                request.install_method.and_then(install_method_from_pb),
             )
             .await
         {
@@ -719,6 +754,7 @@ impl AppService for Grpc {
         let ctx = ctx_of(&request);
         let request = request.into_inner();
         let source = Some(request.source).filter(|s| !s.is_empty());
+        let install_method = request.install_method.and_then(install_method_from_pb);
         let rx = self.0.install_stream(
             ctx,
             request.spec,
@@ -731,6 +767,7 @@ impl AppService for Grpc {
             request.license_ack,
             None,
             request.force,
+            install_method,
         );
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
             match rx.recv().await {
@@ -794,7 +831,10 @@ impl AppService for Grpc {
             )
             .await
         {
-            Ok(info) => Ok(Response::new(package_info_to_pb(info))),
+            Ok(info) => Ok(Response::new(package_info_to_pb(
+                info,
+                crate::daemon::compose::available(&self.0.config.docker),
+            ))),
             // The repository is private and nothing the caller configured
             // opens it (DMN-062) — not a gRPC error, the same "otherwise
             // succeeded, needs one more round trip" shape install_error_to_pb

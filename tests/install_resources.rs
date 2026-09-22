@@ -64,7 +64,7 @@ fn install_without_force_fails_and_with_force_succeeds() {
     let store = AppStore::new(config.daemon.apps_dir.clone());
 
     let err = pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, false, None,
+        &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
     )
     .unwrap_err();
     let not_met = err
@@ -83,7 +83,7 @@ fn install_without_force_fails_and_with_force_succeeds() {
 
     // --force skips the check and installs normally.
     pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, true, None,
+        &config, &ctx, &url, None, None, None, None, true, None, true, None, None,
     )
     .unwrap();
     assert!(store.get("demo").unwrap().is_some());
@@ -127,7 +127,7 @@ fn force_clamps_a_cpu_quota_above_host_capacity() {
     // Without force: the quota alone is enough to trip the same check, with
     // no `requirements` section in sight.
     let err = pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, false, None,
+        &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
     )
     .unwrap_err();
     assert!(
@@ -136,7 +136,7 @@ fn force_clamps_a_cpu_quota_above_host_capacity() {
     );
 
     pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, true, None,
+        &config, &ctx, &url, None, None, None, None, true, None, true, None, None,
     )
     .unwrap();
     let meta = store.get("demo").unwrap().expect("meta.json must exist");

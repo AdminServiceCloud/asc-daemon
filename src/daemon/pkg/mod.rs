@@ -3,7 +3,9 @@
 
 pub mod auth;
 pub mod clone;
+pub mod compose;
 pub mod detect;
+pub mod dockerfile;
 pub mod gitref;
 pub mod inspect;
 pub mod install;
@@ -24,7 +26,7 @@ pub use install::{
     InstallReport, LicenseRequired, StackPackage, VersionChoiceRequired, docker_footprint, install,
     install_from_git, instance_id, is_git_url, repo_name,
 };
-pub(crate) use install::{VolumeKind, classify_volume, runtime_inputs};
+pub(crate) use install::{VolumeKind, classify_volume, effective_image_ref, runtime_inputs};
 pub use registry::RegistryClient;
 pub use resources::{RequirementsNotMet, Shortage};
 pub use sources::SourceList;

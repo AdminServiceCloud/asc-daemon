@@ -11,6 +11,34 @@ use asc_daemon::daemon::config::Config;
 
 const TOKEN: &str = "test-token-1234";
 
+/// The base capability list, "app.compose" optionally appended (DMN-109):
+/// whether the test host actually has the `docker compose` plugin is outside
+/// this test's control, so it accepts either instead of hardcoding one.
+fn assert_base_capabilities(capabilities: &[&str]) {
+    const BASE: &[&str] = &[
+        "sources",
+        "credentials",
+        "ssh-credentials",
+        "console.exec",
+        "app.stats",
+        "app.ports",
+        "app.uptime",
+        "users",
+        "docker.containers",
+        "docker.stats",
+        "ports.listening",
+        "docker.inventory",
+        "docker.prune",
+        "app.clone",
+    ];
+    let without_compose: Vec<&str> = capabilities
+        .iter()
+        .copied()
+        .filter(|c| *c != "app.compose")
+        .collect();
+    assert_eq!(without_compose, BASE, "got: {capabilities:?}");
+}
+
 fn test_state() -> (Arc<ApiState>, tempfile::TempDir) {
     let ws = tempfile::tempdir().unwrap();
     let mut config = Config::default();
@@ -35,6 +63,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
             branch: None,
             repo_path: None,
             package: None,
+            install_method: None,
             desired_state: DesiredState::Stopped,
             quota: None,
             runtime: Runtime::Process {
@@ -182,25 +211,7 @@ mod rest {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(
-            capabilities,
-            vec![
-                "sources",
-                "credentials",
-                "ssh-credentials",
-                "console.exec",
-                "app.stats",
-                "app.ports",
-                "app.uptime",
-                "users",
-                "docker.containers",
-                "docker.stats",
-                "ports.listening",
-                "docker.inventory",
-                "docker.prune",
-                "app.clone"
-            ]
-        );
+        assert_base_capabilities(&capabilities);
 
         let (status, body) = call(&state, "GET", "/v1/apps", Some(TOKEN), None).await;
         assert_eq!(status, StatusCode::OK);
@@ -575,25 +586,8 @@ mod grpc {
             .into_inner();
         assert_eq!(status.version, asc_daemon::VERSION);
         assert_eq!(status.apps_total, 1);
-        assert_eq!(
-            status.capabilities,
-            vec![
-                "sources",
-                "credentials",
-                "ssh-credentials",
-                "console.exec",
-                "app.stats",
-                "app.ports",
-                "app.uptime",
-                "users",
-                "docker.containers",
-                "docker.stats",
-                "ports.listening",
-                "docker.inventory",
-                "docker.prune",
-                "app.clone"
-            ]
-        );
+        let capabilities: Vec<&str> = status.capabilities.iter().map(String::as_str).collect();
+        assert_base_capabilities(&capabilities);
 
         let mut apps = AppServiceClient::new(channel(addr).await);
         let list = apps

@@ -8,14 +8,14 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::info;
 
+use super::dockerfile;
 use super::install::{
     RemoveOnDrop, enforce_install_policy, load_quota, provision, validate_custom_name,
 };
-use super::manifest::Manifest;
-use super::settings::{SettingsFile, locate_installed};
+use super::settings::locate_installed;
 use crate::daemon::apps::disk;
 use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime, new_uuid};
 use crate::daemon::apps::{AppStore, UserContext};
@@ -71,6 +71,12 @@ pub fn clone_app(
     if let Some(name) = custom_name {
         validate_custom_name(config, ctx, name)?;
     }
+    // Same reasoning as the upgrade guard (DMN-108): a compose app has no
+    // manifest to re-provision the clone from, and cloning a whole compose
+    // project (a fresh project name, its own containers) is separate work.
+    if matches!(source.runtime, Runtime::Compose { .. }) {
+        bail!("cloning a docker compose app is not supported yet");
+    }
     let new_id = super::instance_id(store, &source.id)?;
     let source_dir = store.app_dir(&source.id)?;
     let dest_dir = store.app_dir(&new_id)?;
@@ -113,10 +119,8 @@ pub fn clone_app(
     // the source's own package/source fields (the new id plays no part in
     // that resolution).
     let (manifest_dir, _) = locate_installed(config, source, &dest_dir)?;
-    let manifest = Manifest::load(&manifest_dir)?;
+    let (manifest, settings) = dockerfile::resolve_installed(source, &manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, &new_id)?;
-
-    let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
     // Recomputed from the copied config/settings.json rather than trusting
     // `source.quota`: a `$quota` override edited via `asc app settings`
     // only lands in meta.json on the app's next start (DMN-017/030), so
@@ -172,6 +176,7 @@ pub fn clone_app(
         // Recorded like a suffixed install instance, so `asc app upgrade`
         // keeps resolving the clone against the same registry package.
         package: Some(source.package.clone().unwrap_or_else(|| source.id.clone())),
+        install_method: source.install_method.clone(),
         desired_state: DesiredState::Stopped,
         quota,
         runtime,

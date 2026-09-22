@@ -11,7 +11,7 @@ use tracing::warn;
 
 use crate::daemon::config::Config;
 use crate::daemon::docker;
-use crate::daemon::pkg::{self, manifest::Manifest, settings};
+use crate::daemon::pkg::{self, dockerfile, manifest::Manifest, settings};
 
 use super::meta::{AppMeta, Runtime};
 use super::store::AppStore;
@@ -70,8 +70,8 @@ pub fn usage(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<DiskUs
     let app_dir = store.app_dir(&meta.id)?;
 
     let located = match settings::locate_installed(config, meta, &app_dir) {
-        Ok((manifest_dir, _)) => match Manifest::load(&manifest_dir) {
-            Ok(manifest) => Some((manifest_dir, manifest)),
+        Ok((manifest_dir, _)) => match dockerfile::resolve_installed(meta, &manifest_dir) {
+            Ok((manifest, settings_file)) => Some((manifest, settings_file)),
             Err(err) => {
                 warn!(app = %meta.id, error = %format!("{err:#}"), "cannot load app manifest for disk usage");
                 None
@@ -84,13 +84,11 @@ pub fn usage(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<DiskUs
     };
 
     let image_bytes = match (&meta.runtime, &located) {
-        (Runtime::Docker { .. }, Some((_, manifest))) => image_bytes_of(config, meta, manifest),
+        (Runtime::Docker { .. }, Some((manifest, _))) => image_bytes_of(config, meta, manifest),
         _ => None,
     };
     let volumes = match &located {
-        Some((manifest_dir, manifest)) => {
-            volume_usages(config, meta, manifest_dir, manifest, &app_dir)
-        }
+        Some((_, settings_file)) => volume_usages(config, meta, settings_file.as_ref(), &app_dir),
         None => Vec::new(),
     };
 
@@ -106,8 +104,16 @@ pub fn usage(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<DiskUs
 }
 
 fn image_bytes_of(config: &Config, meta: &AppMeta, manifest: &Manifest) -> Option<u64> {
-    let image = manifest.runtime.image.as_deref()?;
-    match docker::image_size(&config.docker, image) {
+    // `manifest.runtime.image` alone misses every image-build-only manifest
+    // (DMN-050) — including every Dockerfile install (DMN-107), which never
+    // has one at all — so disk usage would silently omit the image size for
+    // exactly the apps most likely to have a sizeable locally built image.
+    let image_source = match &meta.runtime {
+        Runtime::Docker { image_source, .. } => *image_source,
+        _ => None,
+    };
+    let image = pkg::effective_image_ref(manifest, image_source, &meta.id)?;
+    match docker::image_size(&config.docker, &image) {
         Ok(size) => size,
         Err(err) => {
             warn!(app = %meta.id, error = %format!("{err:#}"), "cannot read image size");
@@ -119,18 +125,10 @@ fn image_bytes_of(config: &Config, meta: &AppMeta, manifest: &Manifest) -> Optio
 fn volume_usages(
     config: &Config,
     meta: &AppMeta,
-    manifest_dir: &Path,
-    manifest: &Manifest,
+    settings_file: Option<&settings::SettingsFile>,
     app_dir: &Path,
 ) -> Vec<VolumeUsage> {
-    let settings_file = match settings::SettingsFile::load_for(manifest_dir, manifest) {
-        Ok(settings_file) => settings_file,
-        Err(err) => {
-            warn!(app = %meta.id, error = %format!("{err:#}"), "cannot load app settings for disk usage");
-            return Vec::new();
-        }
-    };
-    let inputs = match pkg::runtime_inputs(settings_file.as_ref(), &app_dir.join("config")) {
+    let inputs = match pkg::runtime_inputs(settings_file, &app_dir.join("config")) {
         Ok(inputs) => inputs,
         Err(err) => {
             warn!(app = %meta.id, error = %format!("{err:#}"), "cannot resolve app settings for disk usage");
@@ -210,10 +208,10 @@ fn volume_usages(
 /// usable — even when the Docker daemon itself is unreachable.
 pub fn private_volume_roots(
     app_dir: &Path,
+    meta: &AppMeta,
     manifest_dir: &Path,
-    manifest: &Manifest,
 ) -> Vec<std::path::PathBuf> {
-    let Ok(settings_file) = settings::SettingsFile::load_for(manifest_dir, manifest) else {
+    let Ok((_, settings_file)) = dockerfile::resolve_installed(meta, manifest_dir) else {
         return Vec::new();
     };
     let Ok(inputs) = pkg::runtime_inputs(settings_file.as_ref(), &app_dir.join("config")) else {

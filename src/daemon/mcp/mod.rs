@@ -356,6 +356,7 @@ impl McpServer {
                     input.license_ack,
                     image_choice,
                     input.force,
+                    None,
                 )
             })
             .await

@@ -19,7 +19,6 @@ use anyhow::Context;
 
 use crate::daemon::apps::{AppMeta, AppStore};
 use crate::daemon::config::Config;
-use crate::daemon::pkg::manifest::Manifest;
 use crate::daemon::pkg::settings;
 
 use super::path::SafePath;
@@ -61,13 +60,11 @@ impl AppScope {
     pub fn for_app(config: &Config, store: &AppStore, meta: &AppMeta) -> anyhow::Result<Self> {
         let app_dir = store.app_dir(&meta.id)?;
         let mut roots = vec![app_dir.clone()];
-        if let Ok((manifest_dir, _)) = settings::locate_installed(config, meta, &app_dir)
-            && let Ok(manifest) = Manifest::load(&manifest_dir)
-        {
+        if let Ok((manifest_dir, _)) = settings::locate_installed(config, meta, &app_dir) {
             roots.extend(crate::daemon::apps::disk::private_volume_roots(
                 &app_dir,
+                meta,
                 &manifest_dir,
-                &manifest,
             ));
         }
         Self::new(roots).context("cannot build the app's file-manager scope")

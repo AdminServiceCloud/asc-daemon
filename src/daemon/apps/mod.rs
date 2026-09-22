@@ -4,6 +4,7 @@
 //! A regular user sees and controls only their own apps; root (incl. sudo)
 //! sees everyone's. The daemon API applies the same rule via request context.
 
+pub mod compose;
 pub mod disk;
 pub mod docker;
 pub mod driver;
@@ -610,6 +611,7 @@ mod tests {
                 branch: None,
                 repo_path: None,
                 package: None,
+                install_method: None,
                 desired_state: DesiredState::Stopped,
                 quota: None,
                 runtime: Runtime::Process {
@@ -732,6 +734,7 @@ mod tests {
                 branch: None,
                 repo_path: None,
                 package: None,
+                install_method: None,
                 desired_state: DesiredState::Stopped,
                 quota: None,
                 runtime: Runtime::Process {

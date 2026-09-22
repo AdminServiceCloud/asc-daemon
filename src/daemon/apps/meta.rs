@@ -57,6 +57,16 @@ pub struct AppMeta {
     /// upgrades resolve the package through it. `None` = the app id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    /// How the app was installed, when it wasn't the package's own
+    /// `asc.yaml` (DMN-107): `None` for every ordinary manifest install
+    /// (including every app installed before this field existed). Every
+    /// later reader of this app's manifest — refresh, upgrade, disk usage,
+    /// ports, `asc app clone` — goes through
+    /// [`crate::daemon::pkg::dockerfile::resolve_installed`] instead of
+    /// `Manifest::load` directly, because a Dockerfile install never writes
+    /// an `asc.yaml` to `repository/` for them to read back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_method: Option<InstallMethod>,
     /// What the app should be doing; enforced after daemon restart/reboot.
     #[serde(default)]
     pub desired_state: DesiredState,
@@ -108,6 +118,24 @@ pub enum ImageSource {
     Build,
 }
 
+/// A non-`asc.yaml` install method a running app was installed with
+/// (DMN-107) — the manifest that describes it was synthesized, not read from
+/// the package repository, and has to be re-synthesized identically on every
+/// later read. `#[serde(tag = "kind")]` so a second variant (compose,
+/// DMN-108) is additive on read: an old meta.json with no `install_method` at
+/// all already deserializes as `None` via the field's own `#[serde(default)]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum InstallMethod {
+    /// A bare Dockerfile with no `asc.yaml`. `dockerfile` is its path
+    /// relative to the manifest directory (repository root, or `repo_path`
+    /// for a monorepo package) — found once at install time via
+    /// [`crate::daemon::pkg::detect`] and pinned here so a later
+    /// re-synthesis (refresh/upgrade/disk/ports) always resolves the exact
+    /// same file even if the repository gained a second Dockerfile since.
+    Dockerfile { dockerfile: String },
+}
+
 /// How the app runs; determines which driver manages it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -128,6 +156,22 @@ pub enum Runtime {
         #[serde(default)]
         args: Vec<String>,
     },
+    /// A `docker compose` project (DMN-108) — an entirely different
+    /// provisioning path from `Docker` above: there is no single container
+    /// to create, only a project orchestrated through the `docker compose`
+    /// CLI plugin (see [`crate::daemon::compose`]).
+    Compose {
+        /// Compose project name (`asc-<id>`).
+        project: String,
+        /// Compose file(s), relative to `working_dir`.
+        files: Vec<String>,
+        /// Directory the compose command runs from, relative to the app's
+        /// own directory (`repository`, or a monorepo subdirectory of it) —
+        /// so relative paths inside the compose file (`build: .`, bind
+        /// mounts, `env_file:`) resolve exactly as the package author wrote
+        /// them.
+        working_dir: String,
+    },
 }
 
 impl Runtime {
@@ -137,6 +181,7 @@ impl Runtime {
             Runtime::Docker { .. } => "docker",
             Runtime::Systemd { .. } => "systemd",
             Runtime::Process { .. } => "process",
+            Runtime::Compose { .. } => "compose",
         }
     }
 }
@@ -269,6 +314,7 @@ mod tests {
             branch: None,
             repo_path: None,
             package: None,
+            install_method: None,
             desired_state: DesiredState::Running,
             quota: Some(Quota {
                 cpu_cores: Some(1.5),

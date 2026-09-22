@@ -13,12 +13,16 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
+use super::compose;
+use super::detect;
+use super::dockerfile;
 use super::manifest::{AppType, Manifest, StackManifest};
 use super::registry::{RegistryClient, ResolvedPackage};
 use super::resources;
 use super::settings::{SettingKind, SettingValues, SettingsFile, locate_installed};
 use crate::daemon::apps::meta::{
-    AppMeta, DesiredState, ImageSource, Owner, Quota, Runtime, canonical_id, new_uuid,
+    AppMeta, DesiredState, ImageSource, InstallMethod as StoredInstallMethod, Owner, Quota,
+    Runtime, canonical_id, new_uuid,
 };
 use crate::daemon::apps::{AppStore, UserContext};
 use crate::daemon::config::{Config, DockerConfig};
@@ -271,6 +275,9 @@ pub fn install(
         image_choice,
         force,
         report,
+        // A registry entry always carries a real asc.yaml — only a direct
+        // git install can point at a bare Dockerfile instead.
+        install_method: None,
     };
     let origin = Origin::Registry(&resolved);
     if resolved.entry.package_type == "stack" {
@@ -331,6 +338,12 @@ struct InstallOpts<'a> {
     /// Where to send progress lines as the install runs (DMN-090); `None`
     /// for a local `asc install` (its progress is the terminal bars instead).
     report: Option<&'a dyn InstallReporter>,
+    /// Install as something other than the package's own `asc.yaml`
+    /// (DMN-107) — right now, only a bare Dockerfile. `None` reads the
+    /// manifest normally; never propagated into a stack member's own
+    /// [`InstallOpts`] (a stack app always has its own `asc.yaml`, that being
+    /// what makes it a member of the stack in the first place).
+    install_method: Option<detect::InstallMethod>,
 }
 
 /// Validate a user-chosen app name (DMN-024): printable, sane length, and
@@ -523,6 +536,10 @@ fn install_stack(
         let app_opts = InstallOpts {
             custom_name: member_name.as_deref(),
             license_ack: true,
+            // Every stack member has its own asc.yaml — that's what makes it
+            // a stack member — regardless of what the whole-stack install
+            // was requested as.
+            install_method: None,
             ..opts
         };
         let report = install_one(config, ctx, origin, &id, Some(&app.name), app_opts)?;
@@ -564,6 +581,10 @@ fn install_one(
     // and restarts as a stack install, a registry entry that mislabels a
     // stack as `type: app` gets the error (DMN-097).
     if stack_app.is_none()
+        && !matches!(
+            opts.install_method,
+            Some(detect::InstallMethod::Dockerfile) | Some(detect::InstallMethod::DockerCompose)
+        )
         && !manifest_dir.join(Manifest::FILE).exists()
         && manifest_dir.join(StackManifest::FILE).exists()
     {
@@ -574,13 +595,61 @@ fn install_one(
         }));
     }
     require_license_ack(origin, name, &manifest_dir, &repo_dir, opts.license_ack)?;
-    let manifest = Manifest::load(&manifest_dir)?;
+
+    // A docker compose install (DMN-108) has no manifest at all — it is a
+    // `docker compose` project, not an app `provision()` creates — so it is
+    // handled entirely on its own, before the manifest-driven path below
+    // ever starts.
+    if matches!(
+        opts.install_method,
+        Some(detect::InstallMethod::DockerCompose)
+    ) {
+        return install_compose_one(
+            config,
+            ctx,
+            origin,
+            name,
+            &store,
+            &app_dir,
+            &manifest_dir,
+            cloned_tag,
+            opts,
+            cleanup,
+        );
+    }
+
+    // A requested method other than the package's own asc.yaml (DMN-107):
+    // right now the only one is a bare Dockerfile, synthesized into an
+    // in-memory manifest + settings instead of read from the repository —
+    // and recorded in `install_method` so every later reader of this app's
+    // manifest re-synthesizes the same way (see `dockerfile::resolve_installed`).
+    let (manifest, settings, install_method) = match opts.install_method {
+        Some(detect::InstallMethod::Dockerfile) => {
+            let dockerfile_rel = dockerfile::find(&manifest_dir)?;
+            let (manifest, settings) =
+                dockerfile::synthesize(&manifest_dir, name, &dockerfile_rel)?;
+            (
+                manifest,
+                settings,
+                Some(StoredInstallMethod::Dockerfile {
+                    dockerfile: dockerfile_rel,
+                }),
+            )
+        }
+        Some(requested) if !requested.supported() => {
+            bail!("install method {requested:?} is not supported yet")
+        }
+        _ => {
+            let manifest = Manifest::load(&manifest_dir)?;
+            let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+            (manifest, settings, None)
+        }
+    };
 
     // The app type is only known after reading the manifest; the cleanup
     // guard removes the cloned repository on this failure path too.
     enforce_install_policy(config, ctx, &manifest, name)?;
 
-    let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
     let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
 
     // Resource shortfall check (DMN-099), before anything is pulled or
@@ -645,7 +714,9 @@ fn install_one(
         opts.report,
     )?;
 
-    let effective_version = cloned_tag.unwrap_or_else(|| manifest.version.clone());
+    let effective_version = cloned_tag
+        .clone()
+        .unwrap_or_else(|| manifest.version.clone());
     // A suffixed instance id (second install of the same package, DMN-033)
     // records its package for upgrades and gets the id as its display name —
     // otherwise several instances would list under one identical title.
@@ -685,7 +756,14 @@ fn install_one(
             uid: ctx.uid,
             name: ctx.name.clone(),
         },
-        version: Some(effective_version.clone()),
+        // A Dockerfile install with no tag checked out has no meaningful
+        // version at all (the synthesized manifest's "0.0.0" is a schema
+        // placeholder, not a real one) — leave it unset rather than show it.
+        version: if install_method.is_some() && cloned_tag.is_none() {
+            None
+        } else {
+            Some(effective_version.clone())
+        },
         source: Some(origin.meta_source()),
         // Registry installs are pinned to a tag, never to a branch; a direct
         // install follows the branch it was given (`--branch`).
@@ -703,6 +781,7 @@ fn install_one(
             // are all an upgrade of a direct install reads.
             Origin::Git { .. } => None,
         },
+        install_method,
         desired_state: DesiredState::Stopped,
         quota,
         runtime,
@@ -710,6 +789,107 @@ fn install_one(
     store.save(&meta)?;
     cleanup.disarm();
     info!(app = name, version = %effective_version, "app installed");
+    Ok(InstallReport {
+        id: name.to_string(),
+        version: effective_version,
+    })
+}
+
+/// Install a `docker compose` project (DMN-108) — entirely separate from
+/// [`install_one`]'s manifest-driven path above: there is no `asc.yaml` to
+/// read, no settings, no quota, and provisioning is `docker compose create`
+/// (containers exist but are not started, matching `provision()`'s own
+/// "created, still stopped" contract for a normal Docker app) rather than
+/// anything routed through `docker_create`. Always a direct git install —
+/// a registry entry is always its own `asc.yaml`/`asc.stack.yaml`.
+#[allow(clippy::too_many_arguments)]
+fn install_compose_one(
+    config: &Config,
+    ctx: &UserContext,
+    origin: Origin<'_>,
+    name: &str,
+    store: &AppStore,
+    app_dir: &Path,
+    manifest_dir: &Path,
+    cloned_tag: Option<String>,
+    opts: InstallOpts<'_>,
+    mut cleanup: RemoveOnDrop,
+) -> Result<InstallReport> {
+    if !crate::daemon::compose::available(&config.docker) {
+        bail!("the docker compose plugin is not installed on this host");
+    }
+    let Origin::Git { url, path, .. } = origin else {
+        bail!("a registry package cannot be installed as a docker compose project");
+    };
+
+    let compose_rel = compose::find(manifest_dir)?;
+    let compose_path = safe_join(manifest_dir, &compose_rel)?;
+    // The single most important check in this install path: refuse a
+    // service that bind-mounts a host path outside the package directory,
+    // before a single container is ever created from it.
+    compose::check_bind_mounts(&compose_path, manifest_dir)?;
+
+    // install_one's own invariant (config/ and data/ always exist) holds
+    // here too, even though a compose app has no settings to seed into them.
+    for sub in ["config", "data"] {
+        fs::create_dir_all(app_dir.join(sub))
+            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
+    }
+
+    let working_dir = manifest_dir
+        .strip_prefix(app_dir)
+        .with_context(|| {
+            format!(
+                "manifest {} is outside the app directory",
+                manifest_dir.display()
+            )
+        })?
+        .to_string_lossy()
+        .into_owned();
+    let project = format!("asc-{name}");
+    let files = vec![compose_rel];
+    crate::daemon::compose::create(&config.docker, &project, manifest_dir, &files)
+        .context("cannot create the compose project")?;
+
+    let base = install_from_git_app_base(url, path)?;
+    let suffixed = name != base;
+    // A bare Dockerfile/compose install with no tag checked out has no
+    // meaningful version at all — see the matching comment in `install_one`.
+    let effective_version = cloned_tag.clone().unwrap_or_else(|| "0.0.0".to_string());
+
+    let meta = AppMeta {
+        id: name.to_string(),
+        uuid: Some(new_uuid()?),
+        name: name.to_string(),
+        custom_name: opts
+            .custom_name
+            .map(str::to_string)
+            .or_else(|| suffixed.then(|| name.to_string())),
+        owner: Owner {
+            uid: ctx.uid,
+            name: ctx.name.clone(),
+        },
+        version: if cloned_tag.is_none() {
+            None
+        } else {
+            Some(effective_version.clone())
+        },
+        source: Some(origin.meta_source()),
+        branch: origin.branch(),
+        repo_path: path.map(str::to_string),
+        package: None,
+        install_method: None,
+        desired_state: DesiredState::Stopped,
+        quota: None,
+        runtime: Runtime::Compose {
+            project,
+            files,
+            working_dir,
+        },
+    };
+    store.save(&meta)?;
+    cleanup.disarm();
+    info!(app = name, "compose app installed");
     Ok(InstallReport {
         id: name.to_string(),
         version: effective_version,
@@ -804,6 +984,7 @@ pub fn install_from_git(
     license_ack: bool,
     image_choice: Option<ImageSource>,
     force: bool,
+    install_method: Option<detect::InstallMethod>,
     report: Option<&dyn InstallReporter>,
 ) -> Result<InstallOutcome> {
     if let Some(name) = custom_name {
@@ -819,6 +1000,7 @@ pub fn install_from_git(
         image_choice,
         force,
         report,
+        install_method,
     };
     let base = install_from_git_app_base(url, path)?;
 
@@ -1878,8 +2060,7 @@ pub fn docker_footprint(config: &Config, meta: &AppMeta, app_dir: &Path) -> AppD
     };
     let resolved = (|| -> Result<AppDockerFootprint> {
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
-        let manifest = Manifest::load(&manifest_dir)?;
-        let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+        let (manifest, settings) = dockerfile::resolve_installed(meta, &manifest_dir)?;
         let image = effective_image_ref(&manifest, *image_source, &meta.id);
         let inputs = runtime_inputs(settings.as_ref(), &app_dir.join("config"))?;
         let mut named_volumes = Vec::new();

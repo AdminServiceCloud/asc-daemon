@@ -117,6 +117,7 @@ mod tests {
             branch: None,
             repo_path: None,
             package: None,
+            install_method: None,
             desired_state: DesiredState::Stopped,
             quota: None,
             runtime: Runtime::Process {

@@ -146,6 +146,10 @@ enum Command {
         /// interactive prompt
         #[arg(long)]
         force: bool,
+        /// Install as one of the methods `asc inspect` reports instead of
+        /// the package's own asc.yaml (direct repository installs only)
+        #[arg(long, value_enum)]
+        method: Option<InstallMethodArg>,
     },
     /// Attach to an app's console: live output + stdin (Docker apps)
     Attach { id: String },
@@ -208,6 +212,25 @@ enum Command {
 enum StatsSort {
     Cpu,
     Mem,
+}
+
+/// `asc install <url> --method <kind>` (DMN-107): install as something other
+/// than the package's own asc.yaml. Only one kind is installable so far —
+/// kept as its own clap enum rather than `pkg::detect::InstallMethod` itself,
+/// so the flag's accepted values don't grow the moment detection learns a new
+/// kind (Swarm/Kubernetes/Helm are detected, not installable, and have no
+/// business showing up as a value here).
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum InstallMethodArg {
+    Dockerfile,
+}
+
+impl From<InstallMethodArg> for pkg::InstallMethod {
+    fn from(arg: InstallMethodArg) -> Self {
+        match arg {
+            InstallMethodArg::Dockerfile => pkg::InstallMethod::Dockerfile,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -502,6 +525,10 @@ enum AppAction {
         /// interactive prompt
         #[arg(long)]
         force: bool,
+        /// Install as one of the methods `asc inspect` reports instead of
+        /// the package's own asc.yaml (direct repository installs only)
+        #[arg(long, value_enum)]
+        method: Option<InstallMethodArg>,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
     Attach {
@@ -816,6 +843,7 @@ fn run() -> anyhow::Result<()> {
             image,
             build,
             force,
+            method,
         } => install_cmd(
             &spec,
             source.as_deref(),
@@ -826,6 +854,7 @@ fn run() -> anyhow::Result<()> {
             stack_app.as_deref(),
             image_choice_flag(image, build),
             force,
+            method.map(pkg::InstallMethod::from),
             &config,
         ),
         Command::Attach { id } => attach_anywhere(&id, &config),
@@ -911,6 +940,7 @@ fn install_cmd(
     stack_app: Option<&str>,
     image_choice: Option<ImageSource>,
     force: bool,
+    install_method: Option<pkg::InstallMethod>,
     config: &Config,
 ) -> anyhow::Result<()> {
     let daemon = daemon_backend(config)?;
@@ -925,6 +955,7 @@ fn install_cmd(
             stack_app,
             image_choice,
             force,
+            install_method,
             config,
             daemon,
         );
@@ -937,6 +968,11 @@ fn install_cmd(
     if stack_app.is_some() {
         anyhow::bail!(
             "--app is only used for a direct repository install (a git URL as the spec); a registry stack app is installed as <stack>/<app>"
+        );
+    }
+    if install_method.is_some() {
+        anyhow::bail!(
+            "--method is only used for a direct repository install (a git URL as the spec); a registry package is always its own asc.yaml/asc.stack.yaml"
         );
     }
     let name = match name {
@@ -956,6 +992,7 @@ fn install_cmd(
             None,
             image_choice,
             force,
+            None,
         )?,
         None => {
             let ctx = UserContext::current();
@@ -1044,6 +1081,7 @@ fn install_daemon_loop(
     stack_app: Option<&str>,
     image_choice: Option<ImageSource>,
     force: bool,
+    install_method: Option<pkg::InstallMethod>,
 ) -> anyhow::Result<pkg::InstallOutcome> {
     let mut spec = spec.to_string();
     let mut source = source.map(str::to_string);
@@ -1069,6 +1107,7 @@ fn install_daemon_loop(
                 license_ack,
                 image_choice,
                 force,
+                install_method,
             )
         }) {
             Ok(outcome) => return Ok(outcome),
@@ -1143,6 +1182,7 @@ fn install_from_git_cmd(
     stack_app: Option<&str>,
     image_choice: Option<ImageSource>,
     force: bool,
+    install_method: Option<pkg::InstallMethod>,
     config: &Config,
     daemon: Option<client::Daemon>,
 ) -> anyhow::Result<()> {
@@ -1166,6 +1206,7 @@ fn install_from_git_cmd(
             stack_app,
             image_choice,
             force,
+            install_method,
         )?;
         print_install_outcome(&outcome);
         return Ok(());
@@ -1194,6 +1235,7 @@ fn install_from_git_cmd(
             license_ack,
             image_choice,
             force,
+            install_method,
             None,
         ) {
             Ok(outcome) => break outcome,
@@ -2129,6 +2171,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             image,
             build,
             force,
+            method,
         } => install_cmd(
             &spec,
             source.as_deref(),
@@ -2139,6 +2182,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             stack_app.as_deref(),
             image_choice_flag(image, build),
             force,
+            method.map(pkg::InstallMethod::from),
             config,
         )?,
         AppAction::Attach { id } => attach_cmd(&id, config)?,
@@ -2208,7 +2252,7 @@ fn confirm_start_resources(
     reference: &str,
     config: &Config,
 ) -> anyhow::Result<()> {
-    use asc_daemon::daemon::pkg::manifest::Manifest;
+    use asc_daemon::daemon::pkg::dockerfile;
     use asc_daemon::daemon::pkg::settings::locate_installed;
 
     // Missing/foreign apps: let `start` report the proper error.
@@ -2221,7 +2265,7 @@ fn confirm_start_resources(
     let Ok((manifest_dir, _)) = locate_installed(config, &meta, &app_dir) else {
         return Ok(());
     };
-    let Ok(manifest) = Manifest::load(&manifest_dir) else {
+    let Ok((manifest, _)) = dockerfile::resolve_installed(&meta, &manifest_dir) else {
         return Ok(());
     };
     let Some(req) = &manifest.requirements else {
@@ -3561,18 +3605,27 @@ fn clone_cmd(reference: &str, name: Option<String>, config: &Config) -> anyhow::
 /// app-level overrides on top of the package values. Everything lands in
 /// `config/settings.json`; the runtime picks it up on the next restart.
 fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
-    use asc_daemon::daemon::pkg::manifest::Manifest;
-    use asc_daemon::daemon::pkg::settings::{SettingValues, SettingsFile, manifest_dir_of};
+    use asc_daemon::daemon::pkg::dockerfile;
+    use asc_daemon::daemon::pkg::settings::{SettingValues, locate_installed};
 
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
     // The canonical id: `reference` may have been the app's custom name.
-    let id = manager.get_authorized(&ctx, reference)?.id;
+    let meta = manager.get_authorized(&ctx, reference)?;
+    let id = meta.id.clone();
     let app_dir = manager.store().app_dir(&id)?;
 
-    let manifest_dir = manifest_dir_of(config, &app_dir)?;
-    let manifest = Manifest::load(&manifest_dir)?;
-    let file = SettingsFile::load_for(&manifest_dir, &manifest)?;
+    // A compose app declares no settings at all (DMN-108) — an empty schema,
+    // not an error, same as a manifest with no `settings:`.
+    let file = if matches!(
+        meta.runtime,
+        asc_daemon::daemon::apps::meta::Runtime::Compose { .. }
+    ) {
+        None
+    } else {
+        let (manifest_dir, _) = locate_installed(config, &meta, &app_dir)?;
+        dockerfile::resolve_installed(&meta, &manifest_dir)?.1
+    };
 
     let config_dir = app_dir.join("config");
     let mut values = SettingValues::load(&config_dir)?;

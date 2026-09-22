@@ -104,6 +104,7 @@ apps:
             None,
             false,
             None,
+            None,
         )
         .unwrap(),
     );
@@ -145,6 +146,7 @@ apps:
             None,
             false,
             None,
+            None,
         )
         .unwrap(),
     );
@@ -164,6 +166,7 @@ apps:
             None,
             false,
             None,
+            None,
         )
         .unwrap(),
     );
@@ -182,6 +185,7 @@ apps:
         true,
         None,
         false,
+        None,
         None,
     )
     .unwrap_err();
@@ -246,7 +250,7 @@ fn install_stack_directly_from_a_repository_root() {
     // The same detection without a `--path`: a stack at the repository root.
     let (installed, _) = stack(
         pkg::install_from_git(
-            &config, &ctx, &url, None, None, None, None, true, None, false, None,
+            &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
         )
         .unwrap(),
     );

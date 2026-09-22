@@ -387,7 +387,7 @@ async fn status(
         "version": crate::VERSION,
         "apps_total": total,
         "apps_running": running,
-        "capabilities": super::CAPABILITIES,
+        "capabilities": super::capabilities(&state.config.docker),
     }))
     .into_response())
 }
@@ -981,6 +981,12 @@ struct InstallBody {
     /// fails with the structured `requirements_not_met` error.
     #[serde(default)]
     force: bool,
+    /// Install as one of InspectPackageResponse's detected methods instead
+    /// of the package's own asc.yaml (DMN-107) — direct repository installs
+    /// only. Absent, `asc_manifest` and `asc_stack` all read the manifest
+    /// normally.
+    #[serde(default)]
+    install_method: Option<crate::daemon::pkg::InstallMethod>,
 }
 
 async fn install_app(
@@ -1002,6 +1008,7 @@ async fn install_app(
             body.license_ack,
             body.image_choice,
             body.force,
+            body.install_method,
         )
         .await?
     {

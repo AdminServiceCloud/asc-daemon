@@ -94,7 +94,7 @@ async fn handle(
             Runtime::Docker { container, .. } => {
                 stream_docker_logs(socket, docker_cfg, container, tail).await
             }
-            _ => match console::logs_command(&meta, &dir, tail) {
+            _ => match console::logs_command(&meta, &dir, tail, docker_cfg) {
                 Ok(cmd) => stream_subprocess_logs(socket, cmd).await,
                 Err(err) => close_with_error(socket, &format!("{err:#}")).await,
             },

@@ -8,9 +8,9 @@ use tracing::warn;
 
 use crate::daemon::config::Config;
 use crate::daemon::docker::PublishedPort;
-use crate::daemon::pkg::{self, manifest::Manifest, settings};
+use crate::daemon::pkg::{self, compose, dockerfile, settings};
 
-use super::meta::AppMeta;
+use super::meta::{AppMeta, Runtime};
 use super::store::AppStore;
 
 /// The ports an app publishes: the user's host port, the container port the
@@ -30,17 +30,19 @@ pub fn published(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<Ve
             return Ok(Vec::new());
         }
     };
-    let manifest = match Manifest::load(&manifest_dir) {
-        Ok(manifest) => manifest,
+    // A compose app (DMN-108) has no settings to read at all — its ports
+    // come straight from the compose file, live or stopped alike, the same
+    // property every other runtime already gets from its settings.
+    if let Runtime::Compose { files, .. } = &meta.runtime {
+        return Ok(match files.first() {
+            Some(file) => compose::published_ports(&manifest_dir.join(file)),
+            None => Vec::new(),
+        });
+    }
+    let settings_file = match dockerfile::resolve_installed(meta, &manifest_dir) {
+        Ok((_, settings_file)) => settings_file,
         Err(err) => {
-            warn!(app = %meta.id, error = %format!("{err:#}"), "cannot load app manifest for ports");
-            return Ok(Vec::new());
-        }
-    };
-    let settings_file = match settings::SettingsFile::load_for(&manifest_dir, &manifest) {
-        Ok(settings_file) => settings_file,
-        Err(err) => {
-            warn!(app = %meta.id, error = %format!("{err:#}"), "cannot load app settings for ports");
+            warn!(app = %meta.id, error = %format!("{err:#}"), "cannot load app manifest/settings for ports");
             return Ok(Vec::new());
         }
     };

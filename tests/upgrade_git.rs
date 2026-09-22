@@ -90,6 +90,7 @@ fn upgrade_follows_the_recorded_repository_url() {
         None,
         false,
         None,
+        None,
     )
     .unwrap();
     let meta = store.get("demo").unwrap().unwrap();
@@ -185,6 +186,7 @@ fn branch_installs_follow_their_branch() {
         None,
         false,
         None,
+        None,
     )
     .unwrap();
     let meta = store.get("demo").unwrap().unwrap();
@@ -257,7 +259,7 @@ fn untagged_repositories_track_their_default_branch() {
     let (config, ctx, store) = workspace(ws.path());
 
     pkg::install_from_git(
-        &config, &ctx, &url, None, None, None, None, true, None, false, None,
+        &config, &ctx, &url, None, None, None, None, true, None, false, None, None,
     )
     .unwrap();
     assert_eq!(
@@ -321,6 +323,7 @@ fn upgrade_of_a_monorepo_direct_install_keeps_the_manifest_path() {
         true,
         None,
         false,
+        None,
         None,
     )
     .unwrap();

@@ -26,6 +26,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
+use super::dockerfile;
 use super::gitref::{head_commit, ls_remote, short_commit};
 use super::install::{
     RemoveOnDrop, VersionSpec, clone_repository, enforce_install_policy, load_quota,
@@ -34,7 +35,7 @@ use super::install::{
 use super::manifest::Manifest;
 use super::registry::RegistryClient;
 use super::settings::{SettingValues, SettingsFile};
-use crate::daemon::apps::meta::Runtime;
+use crate::daemon::apps::meta::{AppMeta, InstallMethod as StoredInstallMethod, Runtime};
 use crate::daemon::apps::{AppManager, RuntimeState, UserContext};
 use crate::daemon::config::Config;
 use crate::daemon::docker;
@@ -79,6 +80,13 @@ pub fn upgrade(
     let id = meta.id.clone();
     if state == RuntimeState::Running {
         bail!(tf2(Msg::PkgUpgradeStopFirst, &id, &id));
+    }
+    // Not a next-increment gap to paper over with a confusing "cannot read
+    // manifest" error: a compose app (DMN-108) has no manifest to re-resolve
+    // a version from in the first place, and re-cloning + rebuilding its
+    // project is real, separate work.
+    if matches!(meta.runtime, Runtime::Compose { .. }) {
+        bail!("upgrading a docker compose app is not supported yet");
     }
 
     // Where the new version comes from: the recorded repository URL for a
@@ -193,9 +201,30 @@ pub fn upgrade(
         });
     }
     let (new_manifest_dir, _) = locate_manifest(&new_dir, entry_path, stack_app)?;
-    let manifest = Manifest::load(&new_manifest_dir)?;
+    // A Dockerfile install (DMN-107) re-detects its Dockerfile in the freshly
+    // cloned version rather than trusting the old path blindly — the file
+    // may have moved or been renamed between versions, same as a repository
+    // that changed between inspect and install.
+    let (manifest, settings, new_install_method) = match &meta.install_method {
+        Some(StoredInstallMethod::Dockerfile { .. }) => {
+            let dockerfile_rel = dockerfile::find(&new_manifest_dir)?;
+            let (manifest, settings) =
+                dockerfile::synthesize(&new_manifest_dir, &id, &dockerfile_rel)?;
+            (
+                manifest,
+                settings,
+                Some(StoredInstallMethod::Dockerfile {
+                    dockerfile: dockerfile_rel,
+                }),
+            )
+        }
+        None => {
+            let manifest = Manifest::load(&new_manifest_dir)?;
+            let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
+            (manifest, settings, None)
+        }
+    };
     enforce_install_policy(config, ctx, &manifest, &id)?;
-    let settings = SettingsFile::load_for(&new_manifest_dir, &manifest)?;
     let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
 
     // Point of no return: swap the repository, keeping the old one around
@@ -233,7 +262,7 @@ pub fn upgrade(
         Err(err) => {
             rollback(
                 config,
-                &id,
+                &meta,
                 &app_dir,
                 &repo_dir,
                 &old_dir,
@@ -264,12 +293,22 @@ pub fn upgrade(
     // The tag that was checked out, or — for a moving ref, which has no tag —
     // the version the new manifest declares, exactly as a direct install
     // records it.
-    let to = cloned_ref.unwrap_or_else(|| manifest.version.clone());
+    let to = cloned_ref
+        .clone()
+        .unwrap_or_else(|| manifest.version.clone());
     let mut meta = meta;
     // The package title may change between versions; the user's custom_name
     // is left untouched and keeps winning in display_name().
     meta.name = manifest.title.clone().unwrap_or_else(|| id.clone());
-    meta.version = Some(to.clone());
+    // A Dockerfile app with no tag checked out has no meaningful version at
+    // all (see the matching install-time comment in pkg::install) — leave it
+    // unset rather than show the synthesized manifest's schema placeholder.
+    meta.version = if new_install_method.is_some() && cloned_ref.is_none() {
+        None
+    } else {
+        Some(to.clone())
+    };
+    meta.install_method = new_install_method;
     meta.quota = quota;
     meta.runtime = runtime;
     store.save(&meta)?;
@@ -297,7 +336,9 @@ fn teardown_runtime(config: &Config, runtime: &Runtime) -> Result<()> {
     match runtime {
         Runtime::Docker { container, .. } => docker::remove(&config.docker, container)
             .context("cannot remove the old container before upgrade"),
-        Runtime::Systemd { .. } | Runtime::Process { .. } => Ok(()),
+        // `upgrade()` already refuses a compose app before it ever reaches
+        // here (DMN-108) — kept exhaustive rather than `unreachable!()`.
+        Runtime::Systemd { .. } | Runtime::Process { .. } | Runtime::Compose { .. } => Ok(()),
     }
 }
 
@@ -306,7 +347,7 @@ fn teardown_runtime(config: &Config, runtime: &Runtime) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn rollback(
     config: &Config,
-    id: &str,
+    meta: &AppMeta,
     app_dir: &Path,
     repo_dir: &Path,
     old_dir: &Path,
@@ -314,14 +355,17 @@ fn rollback(
     stack_app: Option<&str>,
     image_source: Option<crate::daemon::apps::meta::ImageSource>,
 ) {
+    let id = meta.id.as_str();
     let _ = fs::remove_dir_all(repo_dir);
     if let Err(err) = fs::rename(old_dir, repo_dir) {
         warn!(app = id, error = %err, "rollback: cannot restore the previous repository");
         return;
     }
+    // The old repository is back, at its old install_method — resynthesize
+    // the same way `dockerfile::resolve_installed` always does rather than
+    // `Manifest::load`, which would fail outright for a Dockerfile install.
     let restore = locate_manifest(repo_dir, entry_path, stack_app).and_then(|(dir, _)| {
-        let manifest = Manifest::load(&dir)?;
-        let settings = SettingsFile::load_for(&dir, &manifest)?;
+        let (manifest, settings) = dockerfile::resolve_installed(meta, &dir)?;
         let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
         provision(
             &manifest,

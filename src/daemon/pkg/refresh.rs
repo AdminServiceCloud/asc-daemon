@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tracing::{info, warn};
 
+use super::dockerfile;
 use super::install::{
     effective_image_ref, interpolate_env, load_quota, provision, runtime_inputs, volume_bind,
 };
@@ -123,8 +124,7 @@ impl Desired {
         image_source: Option<ImageSource>,
     ) -> Result<Self> {
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
-        let manifest = Manifest::load(&manifest_dir)?;
-        let settings = SettingsFile::load_for(&manifest_dir, &manifest)?;
+        let (manifest, settings) = dockerfile::resolve_installed(meta, &manifest_dir)?;
         let config_dir = app_dir.join("config");
         let quota = load_quota(settings.as_ref(), &config_dir)?;
         let inputs = runtime_inputs(settings.as_ref(), &config_dir)?;

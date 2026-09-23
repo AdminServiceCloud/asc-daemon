@@ -87,6 +87,7 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `GET /v1/docker/networks` | `DockerService.ListNetworks` (DMN-104) | Все сети, только инвентарь — почему нет маршрута удаления, см. `PruneDocker` ниже. **Только root-контекст** |
 | `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | Четыре категории `docker system df` (образы/контейнеры/тома/build cache): счётчики и байты. Дорогой вызов — только по требованию, никогда по таймеру. **Только root-контекст** |
 | `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Тело `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Удаляет неиспользуемое поштучно; то, что всё ещё нужно установленному приложению, возвращается в `skipped` с причиной, `dryRun` считает тот же план без удаления. **Только root-контекст** |
+| `POST /v1/docker/control` | `DockerService.ControlContainer` (DMN-111) | Тело `{container \| composeProject, action: "start"\|"stop"\|"restart"\|"pause"\|"unpause"\|"remove"}`. Жизненный цикл одного контейнера (id, однозначный префикс id или имя) или всех контейнеров compose-проекта; у стека неприменимые к члену действия пропускаются, старт идёт от старых к новым, стоп — от новых к старым. Контейнер установленного ASC-приложения (или его compose-проекта) получает отказ 409 `owned_by_app` / `FAILED_PRECONDITION` — им управляют через приложение. Capability `docker.control`. **Только root-контекст** |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |
@@ -112,4 +113,4 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 ## 🔗 Связанные задачи
 
-DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070, DMN-111 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

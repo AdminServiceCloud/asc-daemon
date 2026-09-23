@@ -1554,12 +1554,12 @@ message RemoveAuthorizedKeyResponse {}
 // AppManager::get_authorized to check against, so there is nothing to scope
 // a non-root caller to — the same reasoning FileService uses.
 //
-// Read-only by design. Lifecycle control over arbitrary containers is
-// deliberately *not* here: an ASC app's container must not be stopped behind
+// Lifecycle control (ControlContainer, DMN-111) covers containers ASC does
+// *not* own only: an ASC app's container must not be stopped behind
 // AppManager's back (desired_state would bring it straight back after a
-// daemon restart, which reads as a bug), and a container ASC does not own has
-// no authorization model at all. That is its own task, behind its own
-// capability.
+// daemon restart, which reads as a bug), so those are refused with
+// FAILED_PRECONDITION and controlled through AppService instead. Gated on the
+// "docker.control" capability.
 service DockerService {
   rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
   // Live resource usage of the requested containers (DMN-112), like
@@ -1590,6 +1590,42 @@ service DockerService {
   // same plan without deleting anything, so a caller can show it for
   // confirmation before the real call.
   rpc PruneDocker(PruneDockerRequest) returns (PruneDockerResponse);
+  // Start/stop/restart/pause/unpause/remove one container, or every
+  // container of one compose project (DMN-111). A container belonging to an
+  // installed ASC app — its own container, or any container of its compose
+  // project — is refused with FAILED_PRECONDITION before anything is touched.
+  // For a compose project, members the action does not apply to (stopping an
+  // already exited service) are skipped rather than failing the call;
+  // start-like actions walk the project oldest-first, stop-like ones
+  // newest-first.
+  rpc ControlContainer(ControlContainerRequest) returns (ControlContainerResponse);
+}
+
+enum ContainerAction {
+  CONTAINER_ACTION_UNSPECIFIED = 0;
+  CONTAINER_ACTION_START = 1;
+  CONTAINER_ACTION_STOP = 2;
+  CONTAINER_ACTION_RESTART = 3;
+  CONTAINER_ACTION_PAUSE = 4;
+  CONTAINER_ACTION_UNPAUSE = 5;
+  // Force-remove (`docker rm -f`): a running container is stopped first.
+  // Volumes are never removed.
+  CONTAINER_ACTION_REMOVE = 6;
+}
+
+message ControlContainerRequest {
+  oneof target {
+    // Full id, unambiguous id prefix, or name.
+    string container = 1;
+    // com.docker.compose.project of the stack to act on as a whole.
+    string compose_project = 2;
+  }
+  ContainerAction action = 3;
+}
+
+message ControlContainerResponse {
+  // Names of the containers actually acted on, in the order they were.
+  repeated string affected = 1;
 }
 
 message ListContainersRequest {

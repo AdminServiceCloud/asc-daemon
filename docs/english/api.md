@@ -87,6 +87,7 @@ recognizes keeps working against a newer daemon.
 | `GET /v1/docker/networks` | `DockerService.ListNetworks` (DMN-104) | Every network, inventory-only — see `PruneDocker` below for why there is no delete route. **Root context only** |
 | `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | `docker system df`'s four categories (images/containers/volumes/build cache): counts and bytes. Expensive — call on demand, never on a poll. **Root context only** |
 | `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Body `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Removes unused items one at a time; anything an installed app still needs comes back in `skipped` with why, `dryRun` computes the same plan without deleting. **Root context only** |
+| `POST /v1/docker/control` | `DockerService.ControlContainer` (DMN-111) | Body `{container \| composeProject, action: "start"\|"stop"\|"restart"\|"pause"\|"unpause"\|"remove"}`. Lifecycle of one container (id, unambiguous id prefix or name) or of every container of a compose project; a stack skips members the action does not apply to and goes oldest-first to start, newest-first to stop. A container of an installed ASC app (or of its compose project) is refused with 409 `owned_by_app` / `FAILED_PRECONDITION` — control it through the app. Capability `docker.control`. **Root context only** |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | Metrics history from the ring buffer, oldest → newest |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Real host listening ports parsed from `/proc/net/*`, merged with Docker/app attribution — distinct from `GET /v1/ports` above, which reports what apps *declare* |
@@ -112,4 +113,4 @@ recognizes keeps working against a newer daemon.
 
 ## 🔗 Related tasks
 
-DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070, DMN-111 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

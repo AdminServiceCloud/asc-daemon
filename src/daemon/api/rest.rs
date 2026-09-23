@@ -73,6 +73,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/docker/networks", get(list_networks))
         .route("/v1/docker/disk-usage", get(docker_disk_usage))
         .route("/v1/docker/prune", post(prune_docker))
+        // Lifecycle control over non-ASC containers and compose stacks
+        // (DMN-111) — ASC apps' own containers are refused with 409.
+        .route("/v1/docker/control", post(control_container))
         // Registry sources & credentials (DMN-083/084), pushed by the
         // platform — see docs/custom-registry.md, docs/package-manager.md.
         .route("/v1/sources", get(list_sources).put(replace_sources))
@@ -240,6 +243,16 @@ impl IntoResponse for ApiError {
                         "image": choice.image,
                         "build": choice.build,
                     },
+                })),
+            )
+                .into_response();
+        }
+        if let Some(owned) = self.0.downcast_ref::<super::ContainerOwnedByApp>() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "owned_by_app": { "container": owned.container, "app": owned.app_id },
                 })),
             )
                 .into_response();
@@ -842,6 +855,51 @@ async fn prune_docker(
         })).collect::<Vec<_>>(),
     }))
     .into_response())
+}
+
+/// Body of `POST /v1/docker/control` (DMN-111): exactly one of `container`
+/// and `composeProject`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlContainerBody {
+    #[serde(default)]
+    container: Option<String>,
+    #[serde(default)]
+    compose_project: Option<String>,
+    /// "start" | "stop" | "restart" | "pause" | "unpause" | "remove".
+    action: String,
+}
+
+/// Start/stop/restart/pause/unpause/remove a container or a whole compose
+/// stack ASC does not own. Root context only.
+async fn control_container(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<ControlContainerBody>,
+) -> Result<Response, ApiError> {
+    let bad_request = |error: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error })),
+        )
+            .into_response()
+    };
+    let Some(action) = super::ContainerAction::from_wire(&body.action) else {
+        return Ok(bad_request(
+            "action must be 'start', 'stop', 'restart', 'pause', 'unpause' or 'remove'",
+        ));
+    };
+    let target = match (body.container, body.compose_project) {
+        (Some(id), None) => super::ContainerTarget::Container(id),
+        (None, Some(project)) => super::ContainerTarget::ComposeProject(project),
+        _ => {
+            return Ok(bad_request(
+                "set exactly one of 'container' and 'composeProject'",
+            ));
+        }
+    };
+    let affected = state.control_container(ctx, target, action).await?;
+    Ok(Json(serde_json::json!({ "affected": affected })).into_response())
 }
 
 /// Resource consumption per app, like `docker stats --no-stream`. Costs the

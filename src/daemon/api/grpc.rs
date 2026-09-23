@@ -84,6 +84,9 @@ fn to_status(err: anyhow::Error) -> Status {
             F::Io(..) => Status::internal(msg),
         };
     }
+    if err.downcast_ref::<super::ContainerOwnedByApp>().is_some() {
+        return Status::failed_precondition(msg);
+    }
     if let Some(err) = err.downcast_ref::<users::UserError>() {
         use users::UserError as U;
         return match err {
@@ -2048,6 +2051,44 @@ impl DockerService for Grpc {
                 })
                 .collect(),
         }))
+    }
+
+    async fn control_container(
+        &self,
+        request: Request<pb::ControlContainerRequest>,
+    ) -> Result<Response<pb::ControlContainerResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let action = container_action_from_pb(req.action)?;
+        let target = match req.target {
+            Some(pb::control_container_request::Target::Container(id)) => {
+                super::ContainerTarget::Container(id)
+            }
+            Some(pb::control_container_request::Target::ComposeProject(project)) => {
+                super::ContainerTarget::ComposeProject(project)
+            }
+            None => return Err(Status::invalid_argument("target must be set")),
+        };
+        let affected = self
+            .0
+            .control_container(ctx, target, action)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ControlContainerResponse { affected }))
+    }
+}
+
+/// `pb::ContainerAction` -> `super::ContainerAction`, refusing the zero value.
+fn container_action_from_pb(action: i32) -> Result<super::ContainerAction, Status> {
+    use super::ContainerAction as A;
+    match pb::ContainerAction::try_from(action) {
+        Ok(pb::ContainerAction::Start) => Ok(A::Start),
+        Ok(pb::ContainerAction::Stop) => Ok(A::Stop),
+        Ok(pb::ContainerAction::Restart) => Ok(A::Restart),
+        Ok(pb::ContainerAction::Pause) => Ok(A::Pause),
+        Ok(pb::ContainerAction::Unpause) => Ok(A::Unpause),
+        Ok(pb::ContainerAction::Remove) => Ok(A::Remove),
+        _ => Err(Status::invalid_argument("action must be set")),
     }
 }
 

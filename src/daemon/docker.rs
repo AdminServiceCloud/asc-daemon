@@ -220,6 +220,28 @@ pub fn restart(cfg: &DockerConfig, container: &str) -> Result<()> {
     })
 }
 
+/// Freeze every process of a running container (`docker pause`).
+pub fn pause(cfg: &DockerConfig, container: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        docker
+            .pause_container(container)
+            .await
+            .map_err(|e| friendly(cfg, e))
+    })
+}
+
+/// Resume a paused container (`docker unpause`).
+pub fn unpause(cfg: &DockerConfig, container: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        docker
+            .unpause_container(container)
+            .await
+            .map_err(|e| friendly(cfg, e))
+    })
+}
+
 /// Whether the container exists and is running. A missing container (404)
 /// reads as not running.
 pub fn running(cfg: &DockerConfig, container: &str) -> Result<bool> {

@@ -60,6 +60,7 @@ pub const CAPABILITIES: &[&str] = &[
     "docker.inventory",
     "docker.prune",
     "app.clone",
+    "docker.control",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -253,6 +254,144 @@ pub enum PruneTarget {
     Images,
     Volumes,
     BuildCache,
+}
+
+/// What [`ApiState::control_container`] does (DMN-111) — mirrors the proto
+/// enum without its `UNSPECIFIED` variant, which the transports reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerAction {
+    Start,
+    Stop,
+    Restart,
+    Pause,
+    Unpause,
+    Remove,
+}
+
+impl ContainerAction {
+    /// REST spelling: `start`, `stop`, `restart`, `pause`, `unpause`, `remove`.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "start" => Some(Self::Start),
+            "stop" => Some(Self::Stop),
+            "restart" => Some(Self::Restart),
+            "pause" => Some(Self::Pause),
+            "unpause" => Some(Self::Unpause),
+            "remove" => Some(Self::Remove),
+            _ => None,
+        }
+    }
+
+    /// Whether a container in Engine state `state` is something this action
+    /// applies to. Only consulted for a compose-project target: a stack is a
+    /// mixed bag (one service exited, the rest running), and "stop the stack"
+    /// must not fail on the service that is already stopped. A single named
+    /// container always goes to the Engine as asked, so its own answer (e.g.
+    /// "container is not paused") reaches the caller unchanged.
+    fn applies_to(self, state: &str) -> bool {
+        match self {
+            Self::Start => !matches!(state, "running" | "paused" | "restarting"),
+            Self::Stop => matches!(state, "running" | "paused" | "restarting"),
+            Self::Pause => state == "running",
+            Self::Unpause => state == "paused",
+            Self::Restart | Self::Remove => true,
+        }
+    }
+
+    /// Start-like actions walk a stack oldest-first (compose created its
+    /// dependencies before their dependants), stop-like ones newest-first —
+    /// the closest a caller without the compose file gets to `depends_on`.
+    fn oldest_first(self) -> bool {
+        matches!(self, Self::Start | Self::Unpause | Self::Restart)
+    }
+}
+
+/// Which containers [`ApiState::control_container`] acts on.
+#[derive(Debug, Clone)]
+pub enum ContainerTarget {
+    /// One container, by full id, unambiguous id prefix, or name.
+    Container(String),
+    /// Every container carrying `com.docker.compose.project=<name>`.
+    ComposeProject(String),
+}
+
+/// Refusal of [`ApiState::control_container`]: the container is the runtime
+/// of an installed ASC app. Starting or stopping it behind [`AppManager`]'s
+/// back would desync the app's desired state — the next daemon restart would
+/// "undo" the operator's action, which reads as a bug. The app's own
+/// start/stop/restart/remove is the way to act on it.
+#[derive(Debug)]
+pub struct ContainerOwnedByApp {
+    pub container: String,
+    pub app_id: String,
+}
+
+impl std::fmt::Display for ContainerOwnedByApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "container '{}' belongs to the ASC app '{}': control it through the app instead",
+            self.container, self.app_id
+        )
+    }
+}
+
+impl std::error::Error for ContainerOwnedByApp {}
+
+fn display_name(info: &docker::ContainerInfo) -> &str {
+    info.names.first().map(String::as_str).unwrap_or(&info.id)
+}
+
+/// The containers [`ApiState::control_container`] acts on, in the order it
+/// acts on them. A single container is matched by exact id, exact name, or
+/// an id prefix that picks exactly one container (`docker`'s own rule); a
+/// compose project keeps only the containers `action` applies to (see
+/// [`ContainerAction::applies_to`]) and is ordered by creation time.
+fn select_control_targets<'a>(
+    containers: &'a [docker::ContainerInfo],
+    target: &ContainerTarget,
+    action: ContainerAction,
+) -> Result<Vec<&'a docker::ContainerInfo>> {
+    match target {
+        ContainerTarget::Container(wanted) => {
+            let wanted = wanted.trim().trim_start_matches('/');
+            if wanted.is_empty() {
+                anyhow::bail!("unsupported container reference: empty");
+            }
+            if let Some(exact) = containers
+                .iter()
+                .find(|c| c.id == wanted || c.names.iter().any(|n| n == wanted))
+            {
+                return Ok(vec![exact]);
+            }
+            let by_prefix: Vec<_> = containers
+                .iter()
+                .filter(|c| c.id.starts_with(wanted))
+                .collect();
+            match by_prefix.len() {
+                1 => Ok(by_prefix),
+                0 => anyhow::bail!("container '{wanted}' not found"),
+                _ => {
+                    anyhow::bail!("unsupported container reference '{wanted}': ambiguous id prefix")
+                }
+            }
+        }
+        ContainerTarget::ComposeProject(project) => {
+            let mut members: Vec<_> = containers
+                .iter()
+                .filter(|c| c.compose_project.as_deref() == Some(project.as_str()))
+                .collect();
+            if members.is_empty() {
+                anyhow::bail!("compose project '{project}' not found");
+            }
+            members.retain(|c| action.applies_to(&c.state));
+            members.sort_by_key(|c| c.created);
+            if !action.oldest_first() {
+                members.reverse();
+            }
+            Ok(members)
+        }
+    }
 }
 
 /// One item [`ApiState::prune_docker`] considered but did not remove.
@@ -673,6 +812,25 @@ impl ApiState {
             {
                 owners.insert(
                     container.clone(),
+                    (app.meta.id.clone(), app.meta.uuid.clone()),
+                );
+            }
+        }
+        Ok(owners)
+    }
+
+    /// Map of compose project name -> (app id, app uuid) for every installed
+    /// compose app (DMN-108) the caller can see — the counterpart of
+    /// [`Self::container_owners`] for apps that have no single container.
+    fn compose_owners(
+        &self,
+        ctx: &UserContext,
+    ) -> Result<std::collections::HashMap<String, (String, Option<String>)>> {
+        let mut owners = std::collections::HashMap::new();
+        for app in self.manager.list(ctx)? {
+            if let crate::daemon::apps::meta::Runtime::Compose { project, .. } = &app.meta.runtime {
+                owners.insert(
+                    project.clone(),
                     (app.meta.id.clone(), app.meta.uuid.clone()),
                 );
             }
@@ -1736,6 +1894,7 @@ impl ApiState {
             users::require_root(&ctx)?;
             let containers = docker::list_containers(&s.config.docker, all, with_size)?;
             let owners = s.container_owners(&ctx)?;
+            let compose_owners = s.compose_owners(&ctx)?;
             Ok(containers
                 .into_iter()
                 .map(|info| {
@@ -1743,6 +1902,11 @@ impl ApiState {
                         .names
                         .iter()
                         .find_map(|name| owners.get(name.as_str()))
+                        .or_else(|| {
+                            info.compose_project
+                                .as_deref()
+                                .and_then(|project| compose_owners.get(project))
+                        })
                         .cloned();
                     ContainerRow {
                         app_id: owner.as_ref().map(|(id, _)| id.clone()),
@@ -1810,6 +1974,67 @@ impl ApiState {
                 });
             }
             Ok(rows)
+        })
+        .await
+    }
+
+    /// Lifecycle control over containers ASC does not own (DMN-111): start,
+    /// stop, restart, pause, unpause or remove one container, or every
+    /// container of one compose project. Returns the names acted on.
+    ///
+    /// A container that is the runtime of an installed ASC app — its own
+    /// container, or any container of its compose project — is refused with
+    /// [`ContainerOwnedByApp`] before anything is touched, for a stack as a
+    /// whole: half-stopping a stack and then failing leaves the operator
+    /// worse off than a clean refusal. Root context only, like the rest of
+    /// the Docker inventory.
+    pub async fn control_container(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        target: ContainerTarget,
+        action: ContainerAction,
+    ) -> Result<Vec<String>> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let cfg = &s.config.docker;
+            let containers = docker::list_containers(cfg, true, false)?;
+            let owners = s.container_owners(&ctx)?;
+            let compose_owners = s.compose_owners(&ctx)?;
+            let selected = select_control_targets(&containers, &target, action)?;
+            for info in &selected {
+                let owner = info
+                    .names
+                    .iter()
+                    .find_map(|name| owners.get(name.as_str()))
+                    .or_else(|| {
+                        info.compose_project
+                            .as_deref()
+                            .and_then(|project| compose_owners.get(project))
+                    });
+                if let Some((app_id, _)) = owner {
+                    return Err(ContainerOwnedByApp {
+                        container: display_name(info).to_string(),
+                        app_id: app_id.clone(),
+                    }
+                    .into());
+                }
+            }
+
+            let mut affected = Vec::with_capacity(selected.len());
+            for info in selected {
+                let name = display_name(info).to_string();
+                match action {
+                    ContainerAction::Start => docker::start(cfg, &info.id)?,
+                    ContainerAction::Stop => docker::stop(cfg, &info.id)?,
+                    ContainerAction::Restart => docker::restart(cfg, &info.id)?,
+                    ContainerAction::Pause => docker::pause(cfg, &info.id)?,
+                    ContainerAction::Unpause => docker::unpause(cfg, &info.id)?,
+                    ContainerAction::Remove => docker::remove(cfg, &info.id)?,
+                }
+                info!(container = %name, action = ?action, "container controlled");
+                affected.push(name);
+            }
+            Ok(affected)
         })
         .await
     }
@@ -2442,6 +2667,105 @@ fn is_grpc(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn container(
+        id: &str,
+        name: &str,
+        state: &str,
+        created: i64,
+        project: Option<&str>,
+    ) -> docker::ContainerInfo {
+        docker::ContainerInfo {
+            id: id.into(),
+            names: vec![name.into()],
+            image: "nginx:latest".into(),
+            image_id: String::new(),
+            state: state.into(),
+            status: String::new(),
+            created,
+            ports: Vec::new(),
+            labels: Default::default(),
+            compose_project: project.map(str::to_string),
+            compose_service: None,
+            size_rw: None,
+            size_root_fs: None,
+            networks: Vec::new(),
+        }
+    }
+
+    fn names(selected: &[&docker::ContainerInfo]) -> Vec<String> {
+        selected.iter().map(|c| c.names[0].clone()).collect()
+    }
+
+    #[test]
+    fn a_single_container_is_found_by_id_name_or_unique_prefix() {
+        let all = [
+            container("abc123", "web", "running", 1, None),
+            container("abd456", "db", "exited", 2, None),
+        ];
+        let by_name = ContainerTarget::Container("db".into());
+        let by_prefix = ContainerTarget::Container("abc".into());
+        let ambiguous = ContainerTarget::Container("ab".into());
+        let missing = ContainerTarget::Container("nope".into());
+        assert_eq!(
+            names(&select_control_targets(&all, &by_name, ContainerAction::Start).unwrap()),
+            ["db"]
+        );
+        assert_eq!(
+            names(&select_control_targets(&all, &by_prefix, ContainerAction::Stop).unwrap()),
+            ["web"]
+        );
+        assert!(select_control_targets(&all, &ambiguous, ContainerAction::Stop).is_err());
+        let Err(err) = select_control_targets(&all, &missing, ContainerAction::Stop) else {
+            panic!("a missing container must not resolve");
+        };
+        assert!(format!("{err:#}").contains("not found"));
+    }
+
+    #[test]
+    fn a_single_container_goes_to_the_engine_whatever_its_state() {
+        // "Stop an already stopped container" is the Engine's call to make,
+        // not something to silently swallow for a named container.
+        let all = [container("abc", "web", "exited", 1, None)];
+        let target = ContainerTarget::Container("web".into());
+        assert_eq!(
+            names(&select_control_targets(&all, &target, ContainerAction::Stop).unwrap()),
+            ["web"]
+        );
+    }
+
+    #[test]
+    fn a_stack_keeps_applicable_members_in_dependency_order() {
+        let all = [
+            container("1", "shop-db", "running", 10, Some("shop")),
+            container("2", "shop-web", "running", 20, Some("shop")),
+            container("3", "shop-worker", "exited", 30, Some("shop")),
+            container("4", "other", "running", 5, Some("other")),
+        ];
+        let shop = ContainerTarget::ComposeProject("shop".into());
+        assert_eq!(
+            names(&select_control_targets(&all, &shop, ContainerAction::Stop).unwrap()),
+            ["shop-web", "shop-db"]
+        );
+        assert_eq!(
+            names(&select_control_targets(&all, &shop, ContainerAction::Start).unwrap()),
+            ["shop-worker"]
+        );
+        assert_eq!(
+            names(&select_control_targets(&all, &shop, ContainerAction::Restart).unwrap()),
+            ["shop-db", "shop-web", "shop-worker"]
+        );
+        let missing = ContainerTarget::ComposeProject("nope".into());
+        assert!(select_control_targets(&all, &missing, ContainerAction::Stop).is_err());
+    }
+
+    #[test]
+    fn container_actions_parse_their_wire_names_only() {
+        for wire in ["start", "stop", "restart", "pause", "unpause", "remove"] {
+            assert!(ContainerAction::from_wire(wire).is_some(), "{wire}");
+        }
+        assert!(ContainerAction::from_wire("kill").is_none());
+    }
 
     /// A progress line reported from inside an async context must reach the
     /// stream instead of killing it: Docker pulls and builds report from

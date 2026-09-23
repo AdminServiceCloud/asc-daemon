@@ -30,6 +30,7 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "docker.inventory",
         "docker.prune",
         "app.clone",
+        "docker.control",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()

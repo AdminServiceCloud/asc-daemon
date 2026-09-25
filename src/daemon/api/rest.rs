@@ -136,6 +136,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             "/v1/users/{name}/authorized-keys",
             delete(remove_authorized_key_by_body),
         )
+        .merge(super::rest_backups::routes())
         .with_state(state)
 }
 
@@ -144,7 +145,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
 /// The typed install errors keep their structure (DMN-028/DMN-042): a
 /// client that can act on them — the CLI's consent prompt, the platform
 /// UI's dialog — reads the payload instead of parsing the message.
-struct ApiError(anyhow::Error);
+pub(super) struct ApiError(anyhow::Error);
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {

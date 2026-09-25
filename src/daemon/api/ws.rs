@@ -94,7 +94,7 @@ async fn handle(
             Runtime::Docker { container, .. } => {
                 stream_docker_logs(socket, docker_cfg, container, tail).await
             }
-            _ => match console::logs_command(&meta, &dir, tail, docker_cfg) {
+            _ => match console::logs_command(&meta, &dir, tail, docker_cfg).await {
                 Ok(cmd) => stream_subprocess_logs(socket, cmd).await,
                 Err(err) => close_with_error(socket, &format!("{err:#}")).await,
             },
@@ -162,7 +162,13 @@ async fn stream_docker_logs(
     container: &str,
     tail: usize,
 ) -> anyhow::Result<()> {
-    let log_stream = match docker::logs_follow(cfg, container, tail).await {
+    // Only the current run (DMN-116): a restarted container keeps appending
+    // to the log of every run before it.
+    let log_stream = match docker::run_started_at(cfg, container).await {
+        Ok(since) => docker::logs_follow(cfg, container, tail, since).await,
+        Err(err) => Err(err),
+    };
+    let log_stream = match log_stream {
         Ok(stream) => stream,
         Err(err) => return close_with_error(socket, &format!("{err:#}")).await,
     };
@@ -191,6 +197,10 @@ async fn stream_docker_logs(
     Ok(())
 }
 
+/// How many of the current run's log messages a fresh attach session starts
+/// with (DMN-116). Later joiners get the hub's own replay buffer instead.
+const ATTACH_BACKLOG_TAIL: usize = 1000;
+
 /// Docker attach (bidirectional): client frames → stdin, container → binary
 /// frames. All clients of one app share a source through the console hub:
 /// this connection joins it, replays recent output, then follows live.
@@ -201,12 +211,28 @@ async fn attach_docker(
     container: &str,
 ) -> anyhow::Result<()> {
     let cfg = &state.config.docker;
+    // The session's backlog is the current run only (DMN-116). Attach's own
+    // `logs` replay cannot give that — it is every run the container ever
+    // had — so the live attach goes up bare first and the backlog is read
+    // from the log afterwards, cut at both ends: at `StartedAt` (earlier
+    // runs) and at the moment the attach went live (what it will carry).
     let connect = async {
-        let attach = docker::attach(cfg, container, true).await?;
-        let output = attach.output.map(|item| {
+        let started = docker::run_started_at(cfg, container).await?;
+        let attach = docker::attach(cfg, container, false).await?;
+        let attached_at = time::OffsetDateTime::now_utc();
+        let backlog = match started {
+            Some(started) => {
+                docker::run_backlog(cfg, container, started, attached_at, ATTACH_BACKLOG_TAIL)
+                    .await?
+            }
+            None => Vec::new(),
+        };
+        let live = attach.output.map(|item| {
             item.map(|chunk| chunk.into_bytes().to_vec())
                 .map_err(|e| anyhow::anyhow!("docker attach: {e}"))
         });
+        let backlog = console::hub::coalesce(backlog);
+        let output = futures_util::stream::iter(backlog.into_iter().map(Ok)).chain(live);
         Ok((output, attach.input))
     };
     let mut client = match state.attach_hub.subscribe(app_id, connect).await {

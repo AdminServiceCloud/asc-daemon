@@ -30,6 +30,28 @@ const STDIN_CAPACITY: usize = 64;
 
 type Chunk = Vec<u8>;
 
+/// Largest chunk [`coalesce`] builds — well under the platform relay's
+/// browser-side frame limit (32 KiB).
+pub const COALESCE_LIMIT_BYTES: usize = 16 * 1024;
+
+/// Packs many small chunks into few, up to [`COALESCE_LIMIT_BYTES`] each
+/// (a single larger chunk is kept whole). A source that opens with a
+/// backlog (DMN-116) publishes it all at once, faster than any socket
+/// drains: one chunk per log line would overrun [`BROADCAST_CAPACITY`] and
+/// cost the first client the start of its own backlog.
+pub fn coalesce(chunks: Vec<Chunk>) -> Vec<Chunk> {
+    let mut packed: Vec<Chunk> = Vec::new();
+    for chunk in chunks {
+        match packed.last_mut() {
+            Some(last) if last.len() + chunk.len() <= COALESCE_LIMIT_BYTES => {
+                last.extend_from_slice(&chunk)
+            }
+            _ => packed.push(chunk),
+        }
+    }
+    packed
+}
+
 /// Per-app shared sessions. The map holds weak refs and clients hold strong
 /// ones, so a session disappears with its last client; a dead entry is
 /// replaced on the next subscribe.
@@ -56,10 +78,14 @@ impl AttachHub {
             return Ok(client);
         }
         let (source, sink) = connect.await?;
-        let session = Arc::new(spawn(app_id, source, sink));
-        let client = join(&session).expect("fresh session is open");
+        let (session, rx) = spawn(app_id, source, sink);
+        let session = Arc::new(session);
         sessions.insert(app_id.to_string(), Arc::downgrade(&session));
-        Ok(client)
+        Ok(AttachClient {
+            session,
+            rx,
+            replay: Vec::new(),
+        })
     }
 }
 
@@ -142,13 +168,22 @@ fn join(session: &Arc<AttachSession>) -> Option<AttachClient> {
     })
 }
 
-fn spawn<S, W>(app_id: &str, mut source: S, mut sink: W) -> AttachSession
+/// Starts the pump and returns the first client's receiver alongside it.
+/// That receiver is subscribed before the pump exists: a short source (a
+/// stopped container's backlog, then an attach that ends at once) could
+/// otherwise be drained and closed before the first client ever joined.
+fn spawn<S, W>(
+    app_id: &str,
+    mut source: S,
+    mut sink: W,
+) -> (AttachSession, broadcast::Receiver<Chunk>)
 where
     S: Stream<Item = Result<Chunk>> + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
+    let (tx, first_rx) = broadcast::channel(BROADCAST_CAPACITY);
     let shared = Arc::new(Shared {
-        tx: StdMutex::new(Some(broadcast::channel(BROADCAST_CAPACITY).0)),
+        tx: StdMutex::new(Some(tx)),
         replay: StdMutex::default(),
     });
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Chunk>(STDIN_CAPACITY);
@@ -201,11 +236,12 @@ where
             .take();
     });
 
-    AttachSession {
+    let session = AttachSession {
         shared,
         stdin: stdin_tx,
         pump,
-    }
+    };
+    (session, first_rx)
 }
 
 #[cfg(test)]
@@ -338,6 +374,33 @@ mod tests {
         let mut buf = [0u8; 1];
         let n = read.read(&mut buf).await.unwrap();
         assert_eq!(n, 0, "sink must be closed once the last client leaves");
+    }
+
+    #[test]
+    fn coalesce_packs_small_chunks_and_keeps_order() {
+        let packed = coalesce(vec![b"a\n".to_vec(), b"b\n".to_vec(), b"c\n".to_vec()]);
+        assert_eq!(packed, vec![b"a\nb\nc\n".to_vec()]);
+
+        let big = vec![b'x'; COALESCE_LIMIT_BYTES];
+        let packed = coalesce(vec![b"head".to_vec(), big.clone(), b"tail".to_vec()]);
+        assert_eq!(packed, vec![b"head".to_vec(), big, b"tail".to_vec()]);
+        assert!(coalesce(Vec::new()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_that_ends_at_once_still_reaches_the_first_client() {
+        let hub = AttachHub::default();
+        let stream = futures_util::stream::iter(vec![Ok(b"backlog".to_vec())]).boxed();
+        let (write, _read) = sink();
+        let mut client = hub
+            .subscribe("demo", async { Ok((stream, write)) })
+            .await
+            .unwrap();
+        assert_eq!(client.rx.recv().await.unwrap(), b"backlog");
+        assert!(matches!(
+            client.rx.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
     }
 
     #[tokio::test]

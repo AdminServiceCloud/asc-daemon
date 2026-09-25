@@ -1831,3 +1831,314 @@ message PruneSkip {
   string name = 1;
   string reason = 2;
 }
+
+// ── Backups (DMN-009, DMN-115) ──
+//
+// BackupService exposes the daemon's backup module over the API: the
+// system-scope storage list (where archives go — the built-in "local", plus
+// configured S3/FTP/SFTP/local-directory storages) and the archives
+// themselves. The platform pushes its organization storages here as
+// managed_by = "platform" before a backup, so machine-run schedules keep
+// working without it (docs/backups.md). Gated behind the "backups"
+// capability (DMN-076).
+service BackupService {
+  rpc ListBackupStorages(ListBackupStoragesRequest) returns (ListBackupStoragesResponse);
+  // Adds or replaces a storage by name. Replacing an entry with a different
+  // managed_by (an operator's own storage, say) is refused.
+  rpc UpsertBackupStorage(UpsertBackupStorageRequest) returns (UpsertBackupStorageResponse);
+  rpc RemoveBackupStorage(RemoveBackupStorageRequest) returns (RemoveBackupStorageResponse);
+  // Archives of one app or of every app, on one storage or on every storage.
+  // A storage that cannot be listed (unreachable S3) is reported in
+  // `errors` instead of failing the whole call.
+  rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
+  // Archives the app once and pushes the same file to every storage; the
+  // response carries one result per storage (a failed upload does not stop
+  // the others). Runs until the backup is done — callers set a long deadline.
+  rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+  // Replaces the app's repository/config/data with the archive. The app must
+  // be stopped — or stop_app set, in which case the daemon stops it, restores
+  // and starts it again (when it was running before).
+  rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse);
+  rpc DeleteBackup(DeleteBackupRequest) returns (DeleteBackupResponse);
+}
+
+message BackupStorage {
+  string name = 1;
+  // local | s3 | ftp | sftp
+  string type = 2;
+  // "local" — the built-in, always-present storage (not stored, not removable).
+  bool builtin = 3;
+  optional string managed_by = 4;
+  // Non-secret summary of the configuration: the directory for local, the
+  // endpoint/bucket/region/prefix for s3, host/port/dir for ftp/sftp.
+  // Credentials never leave the daemon through this message.
+  string dir = 5;
+  string s3_endpoint = 6;
+  string s3_bucket = 7;
+  string s3_region = 8;
+  string s3_prefix = 9;
+  string host = 10;
+  uint32 port = 11;
+}
+
+message ListBackupStoragesRequest {}
+
+message ListBackupStoragesResponse {
+  // "local" first.
+  repeated BackupStorage storages = 1;
+}
+
+message S3StorageConfig {
+  // Empty — AWS for `region`; a host or http(s) URL otherwise.
+  string endpoint = 1;
+  string region = 2;
+  string bucket = 3;
+  string access_key = 4;
+  string secret_key = 5;
+  // Key prefix, e.g. "team/asc-backups/<node>" — archives go under it.
+  string prefix = 6;
+}
+
+message LocalStorageConfig {
+  string dir = 1;
+}
+
+message UpsertBackupStorageRequest {
+  string name = 1;
+  optional string managed_by = 2;
+  oneof kind {
+    S3StorageConfig s3 = 3;
+    LocalStorageConfig local = 4;
+  }
+}
+
+message UpsertBackupStorageResponse {
+  BackupStorage storage = 1;
+}
+
+message RemoveBackupStorageRequest {
+  string name = 1;
+  // When set, only an entry carrying exactly this marker is removed.
+  optional string managed_by = 2;
+}
+
+message RemoveBackupStorageResponse {}
+
+message ListBackupsRequest {
+  // Empty — every app.
+  optional string app_id = 1;
+  // Empty — every storage.
+  optional string storage = 2;
+}
+
+message BackupEntry {
+  string app_id = 1;
+  string storage = 2;
+  // <app-id>-<unix-ts>.tar.gz — what RestoreBackup/DeleteBackup take.
+  string name = 3;
+  uint64 size_bytes = 4;
+  int64 created_unix = 5;
+}
+
+message BackupStorageError {
+  string storage = 1;
+  string error = 2;
+}
+
+message ListBackupsResponse {
+  // Newest first.
+  repeated BackupEntry backups = 1;
+  repeated BackupStorageError errors = 2;
+}
+
+message CreateBackupRequest {
+  string app_id = 1;
+  // Empty — the app's own backup policy, else "local".
+  repeated string storages = 2;
+  // Rotation per storage after the upload; absent — the policy's keep.
+  optional uint32 keep = 3;
+}
+
+message BackupResult {
+  string storage = 1;
+  // Empty when this storage failed.
+  string name = 2;
+  uint64 size_bytes = 3;
+  string error = 4;
+}
+
+message CreateBackupResponse {
+  repeated BackupResult results = 1;
+}
+
+message RestoreBackupRequest {
+  string app_id = 1;
+  string storage = 2;
+  string name = 3;
+  bool stop_app = 4;
+}
+
+message RestoreBackupResponse {
+  // The app was running, got stopped for the restore and started again.
+  bool restarted = 1;
+}
+
+message DeleteBackupRequest {
+  string app_id = 1;
+  string storage = 2;
+  string name = 3;
+}
+
+message DeleteBackupResponse {}
+
+// ── Scheduled jobs (DMN-012, DMN-114) ──
+//
+// ScheduleService manages the daemon's own scheduler jobs
+// (<data_dir>/schedules.json): a trigger (hourly | daily@HH:MM | HH:MM | a
+// five-field cron expression) plus one action. The platform keeps its
+// "run on the machine" schedules here with ReplaceManagedSchedules — a full
+// replace of the jobs it owns (managed_by), never touching jobs an operator
+// added with `asc schedule add`. Gated behind the "schedules" capability.
+service ScheduleService {
+  rpc ListSchedules(ListSchedulesRequest) returns (ListSchedulesResponse);
+  rpc UpsertSchedule(UpsertScheduleRequest) returns (UpsertScheduleResponse);
+  rpc RemoveSchedule(RemoveScheduleRequest) returns (RemoveScheduleResponse);
+  rpc ReplaceManagedSchedules(ReplaceManagedSchedulesRequest) returns (ReplaceManagedSchedulesResponse);
+  // Starts the job now, outside its trigger, and returns the opened run
+  // (status RUNNING) without waiting for it — poll ListScheduleRuns.
+  rpc RunSchedule(RunScheduleRequest) returns (RunScheduleResponse);
+  rpc ListScheduleRuns(ListScheduleRunsRequest) returns (ListScheduleRunsResponse);
+}
+
+message ScheduleAppTarget {
+  string app_id = 1;
+}
+
+message ScheduleBackupJob {
+  string app_id = 1;
+  // Empty — the app's own backup policy, else "local".
+  repeated string storages = 2;
+  optional uint32 keep = 3;
+}
+
+message ScheduleShellJob {
+  string command = 1;
+  // Set — run in the app directory as the app's owner.
+  optional string app_id = 2;
+  // 0 — the daemon default (600 s); at most 3600.
+  uint32 timeout_seconds = 3;
+}
+
+message ScheduleHttpJob {
+  string method = 1;
+  string url = 2;
+  map<string, string> headers = 3;
+  string body = 4;
+  uint32 timeout_seconds = 5;
+}
+
+message ScheduleNodeReboot {}
+
+enum ScheduleRunState {
+  SCHEDULE_RUN_STATE_UNSPECIFIED = 0;
+  SCHEDULE_RUN_STATE_RUNNING = 1;
+  SCHEDULE_RUN_STATE_SUCCEEDED = 2;
+  SCHEDULE_RUN_STATE_FAILED = 3;
+}
+
+message ScheduleRunRecord {
+  string id = 1;
+  ScheduleRunState state = 2;
+  // schedule | manual
+  string trigger = 3;
+  int64 started_unix = 4;
+  // 0 while running.
+  int64 finished_unix = 5;
+  string error = 6;
+  // Shell stdout+stderr or the HTTP response body, capped at 64 KiB.
+  string output = 7;
+  // HTTP jobs; 0 when no response came back.
+  uint32 http_status = 8;
+}
+
+message ScheduleJob {
+  string id = 1;
+  string trigger = 2;
+  // Evaluate the trigger in UTC instead of the node's local time.
+  bool utc = 3;
+  bool enabled = 4;
+  string comment = 5;
+  optional string managed_by = 6;
+  oneof action {
+    ScheduleNodeReboot node_reboot = 10;
+    ScheduleAppTarget app_start = 11;
+    ScheduleAppTarget app_stop = 12;
+    ScheduleAppTarget app_restart = 13;
+    ScheduleAppTarget app_update = 14;
+    ScheduleBackupJob backup = 15;
+    ScheduleShellJob shell = 16;
+    ScheduleHttpJob http = 17;
+  }
+  // Read-only, ignored on writes.
+  optional ScheduleRunRecord last_run = 20;
+  // Next firing (unix seconds); 0 — disabled or not within a year.
+  int64 next_run_unix = 21;
+  int64 created_unix = 22;
+  int64 updated_unix = 23;
+}
+
+message ListSchedulesRequest {
+  // When set, only jobs with exactly this marker.
+  optional string managed_by = 1;
+}
+
+message ListSchedulesResponse {
+  repeated ScheduleJob schedules = 1;
+}
+
+message UpsertScheduleRequest {
+  ScheduleJob schedule = 1;
+}
+
+message UpsertScheduleResponse {
+  ScheduleJob schedule = 1;
+}
+
+message RemoveScheduleRequest {
+  string id = 1;
+}
+
+message RemoveScheduleResponse {
+  bool removed = 1;
+}
+
+message ReplaceManagedSchedulesRequest {
+  string managed_by = 1;
+  repeated ScheduleJob schedules = 2;
+}
+
+message ReplaceManagedSchedulesResponse {
+  repeated ScheduleJob schedules = 1;
+}
+
+message RunScheduleRequest {
+  string id = 1;
+}
+
+message RunScheduleResponse {
+  ScheduleRunRecord run = 1;
+  // False when the job was already running — no second run was started
+  // and `run` is empty.
+  bool started = 2;
+}
+
+message ListScheduleRunsRequest {
+  string id = 1;
+  // 0 — 50 (the retained maximum).
+  uint32 limit = 2;
+}
+
+message ListScheduleRunsResponse {
+  // Newest first.
+  repeated ScheduleRunRecord runs = 1;
+}

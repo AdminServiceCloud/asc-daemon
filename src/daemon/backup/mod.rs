@@ -13,19 +13,20 @@
 //! [`create_backup`] when it fires.
 
 pub mod glob;
+pub mod s3;
 pub mod storage;
 
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::apps::AppStore;
 use crate::daemon::apps::meta::AppMeta;
 use crate::daemon::config::Config;
-use storage::{BackupStorage, StorageList};
+use storage::{BackupObject, BackupStorage, StorageList};
 
 /// The three directories a backup covers (`meta.json`, the fourth thing
 /// under an app directory, is never included — it is regenerated, not
@@ -82,7 +83,18 @@ pub fn resolve_storage(
     let entry = storages
         .get(name)
         .with_context(|| format!("backup storage '{name}' not found (asc backup storage list)"))?;
-    Ok(storage::open(&entry.kind))
+    storage::open(&entry.kind)
+}
+
+/// Refuse a backup name that is not one of `app_id`'s archives: the name
+/// comes from an API caller and is joined onto a directory (local storage)
+/// or an object key (S3), so `../../etc/shadow` or another app's archive
+/// must never get that far.
+pub fn validate_backup_name(app_id: &str, name: &str) -> Result<()> {
+    if name.contains('/') || name.contains('\\') || !storage::belongs_to(name, app_id) {
+        bail!("'{name}' is not a backup of app '{app_id}'");
+    }
+    Ok(())
 }
 
 /// Archive `meta`'s repository/config/data directories and push them to
@@ -97,9 +109,46 @@ pub fn create_backup(
     storage_name: &str,
     keep: Option<u32>,
 ) -> Result<BackupInfo> {
-    let app_dir = store.app_dir(&meta.id)?;
-    let exclude = BackupManifest::load(&app_dir.join("repository"))?.exclude;
-    let storage = resolve_storage(config, storages, storage_name)?;
+    create_backup_multi(
+        config,
+        store,
+        meta,
+        storages,
+        &[storage_name.to_string()],
+        keep,
+    )
+    .pop()
+    .map(|(_, result)| result)
+    .unwrap_or_else(|| Err(anyhow::anyhow!("no storage given")))
+}
+
+/// [`create_backup`] to several storages from **one** archive: the app is
+/// archived once, the same file pushed to every storage in turn — both
+/// faster and consistent (every copy is the same snapshot). Results come
+/// back per storage, in order; one failed upload does not stop the others.
+pub fn create_backup_multi(
+    config: &Config,
+    store: &AppStore,
+    meta: &AppMeta,
+    storages: &StorageList,
+    storage_names: &[String],
+    keep: Option<u32>,
+) -> Vec<(String, Result<BackupInfo>)> {
+    let fail_all = |err: anyhow::Error| {
+        let message = format!("{err:#}");
+        storage_names
+            .iter()
+            .map(|name| (name.clone(), Err(anyhow::anyhow!(message.clone()))))
+            .collect::<Vec<_>>()
+    };
+    let app_dir = match store.app_dir(&meta.id) {
+        Ok(dir) => dir,
+        Err(err) => return fail_all(err),
+    };
+    let exclude = match BackupManifest::load(&app_dir.join("repository")) {
+        Ok(manifest) => manifest.exclude,
+        Err(err) => return fail_all(err),
+    };
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -115,7 +164,7 @@ pub fn create_backup(
         now.as_nanos()
     ));
 
-    let result = (|| -> Result<u64> {
+    let built = (|| -> Result<u64> {
         {
             let file = fs::File::create(&tmp_archive)
                 .with_context(|| format!("cannot create {}", tmp_archive.display()))?;
@@ -135,26 +184,38 @@ pub fn create_backup(
                 .finish()
                 .context("cannot finalize backup archive")?;
         }
-        let bytes = fs::metadata(&tmp_archive).map(|m| m.len()).unwrap_or(0);
-        storage
-            .push(&tmp_archive, &remote_name)
-            .with_context(|| format!("cannot upload backup to storage '{storage_name}'"))?;
-        Ok(bytes)
+        Ok(fs::metadata(&tmp_archive).map(|m| m.len()).unwrap_or(0))
     })();
-    let _ = fs::remove_file(&tmp_archive);
-    let bytes = result?;
+    let bytes = match built {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = fs::remove_file(&tmp_archive);
+            return fail_all(err);
+        }
+    };
 
-    if let Some(keep) = keep {
-        // Rotation is a courtesy on top of an already-successful backup —
-        // its own failure must not turn into an error for the caller.
-        let _ = prune(storage.as_ref(), &meta.id, keep);
+    let mut results = Vec::with_capacity(storage_names.len());
+    for storage_name in storage_names {
+        let pushed = (|| -> Result<BackupInfo> {
+            let storage = resolve_storage(config, storages, storage_name)?;
+            storage
+                .push(&tmp_archive, &remote_name)
+                .with_context(|| format!("cannot upload backup to storage '{storage_name}'"))?;
+            if let Some(keep) = keep {
+                // Rotation is a courtesy on top of an already-successful
+                // backup — its own failure must not turn into an error.
+                let _ = prune(storage.as_ref(), &meta.id, keep);
+            }
+            Ok(BackupInfo {
+                name: remote_name.clone(),
+                storage: storage_name.clone(),
+                bytes,
+            })
+        })();
+        results.push((storage_name.clone(), pushed));
     }
-
-    Ok(BackupInfo {
-        name: remote_name,
-        storage: storage_name.to_string(),
-        bytes,
-    })
+    let _ = fs::remove_file(&tmp_archive);
+    results
 }
 
 /// Download `backup_name` from `storage_name` and extract it over `meta`'s
@@ -170,6 +231,7 @@ pub fn restore_backup(
     storage_name: &str,
     backup_name: &str,
 ) -> Result<()> {
+    validate_backup_name(&meta.id, backup_name)?;
     let app_dir = store.app_dir(&meta.id)?;
     let storage = resolve_storage(config, storages, storage_name)?;
     let unique = std::time::SystemTime::now()
@@ -210,20 +272,32 @@ pub fn list_backups(
     storages: &StorageList,
     storage_name: &str,
     app_id: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<BackupObject>> {
     resolve_storage(config, storages, storage_name)?.list(app_id)
+}
+
+/// Delete one archive of `app_id` from `storage_name`.
+pub fn delete_backup(
+    config: &Config,
+    storages: &StorageList,
+    storage_name: &str,
+    app_id: &str,
+    backup_name: &str,
+) -> Result<()> {
+    validate_backup_name(app_id, backup_name)?;
+    resolve_storage(config, storages, storage_name)?.remove(backup_name)
 }
 
 /// Delete the oldest backups of `app_id` beyond `keep` (DMN-009 rotation).
 /// Best-effort per file: one failed deletion does not stop the rest.
 pub fn prune(storage: &dyn BackupStorage, app_id: &str, keep: u32) -> Result<Vec<String>> {
-    let names = storage.list(app_id)?;
+    let objects = storage.list(app_id)?;
     let keep = keep as usize;
     let mut removed = Vec::new();
-    if names.len() > keep {
-        for name in &names[..names.len() - keep] {
-            if storage.remove(name).is_ok() {
-                removed.push(name.clone());
+    if objects.len() > keep {
+        for object in &objects[..objects.len() - keep] {
+            if storage.remove(&object.name).is_ok() {
+                removed.push(object.name.clone());
             }
         }
     }
@@ -374,7 +448,68 @@ mod tests {
         let storage = resolve_storage(&config, &storages, storage::LOCAL_NAME).unwrap();
         let removed = prune(storage.as_ref(), "demo", 1).unwrap();
         assert_eq!(removed.len(), 2);
-        let remaining = storage.list("demo").unwrap();
+        let remaining: Vec<String> = storage
+            .list("demo")
+            .unwrap()
+            .into_iter()
+            .map(|o| o.name)
+            .collect();
         assert_eq!(remaining, vec![names[2].clone()]);
+    }
+
+    #[test]
+    fn multi_storage_backup_and_name_validation() {
+        let ws = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.daemon.data_dir = ws.path().join("data");
+        config.daemon.apps_dir = ws.path().join("apps");
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        let meta = seed_app(&store, "demo", &[]);
+        let mut storages =
+            StorageList::load_with(crate::daemon::pkg::sources::Scope::User).unwrap();
+        storages
+            .upsert(storage::StorageEntry {
+                name: "second".into(),
+                managed_by: Some("platform".into()),
+                kind: storage::StorageKind::Local {
+                    dir: ws.path().join("second"),
+                },
+            })
+            .unwrap();
+
+        let names = vec![
+            storage::LOCAL_NAME.to_string(),
+            "second".to_string(),
+            "missing".to_string(),
+        ];
+        let results = create_backup_multi(&config, &store, &meta, &storages, &names, None);
+        assert_eq!(results.len(), 3);
+        let first = results[0].1.as_ref().unwrap();
+        let second = results[1].1.as_ref().unwrap();
+        assert_eq!(
+            first.name, second.name,
+            "one snapshot, same name everywhere"
+        );
+        assert!(results[2].1.is_err());
+
+        let listed = list_backups(&config, &storages, "second", "demo").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].size > 0);
+
+        for bad in [
+            "../../etc/shadow",
+            "other-1.tar.gz",
+            "demo-1/x.tar.gz",
+            "demo-abc.tar.gz",
+        ] {
+            assert!(validate_backup_name("demo", bad).is_err(), "{bad}");
+            assert!(delete_backup(&config, &storages, "second", "demo", bad).is_err());
+        }
+        delete_backup(&config, &storages, "second", "demo", &second.name).unwrap();
+        assert!(
+            list_backups(&config, &storages, "second", "demo")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

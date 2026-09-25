@@ -1,7 +1,9 @@
 //! Process driver: supervises a plain process via pid-file.
 //!
 //! Layout inside the app directory: `app.pid` (PID of the spawned process),
-//! `app.log` (combined stdout+stderr). The process is detached into its own
+//! `app.log` (combined stdout+stderr, appended across runs),
+//! `app.log.run-offset` (where the latest run starts in `app.log`, for the
+//! console — DMN-116). The process is detached into its own
 //! process group so it survives the CLI/daemon exiting.
 //!
 //! Known MVP limitation: a PID can be reused by the OS after a reboot, so a
@@ -21,7 +23,10 @@ use super::driver::{AppDriver, ResourceUsage, RuntimeState, boot_time_unix, tail
 use super::meta::{AppMeta, Runtime};
 
 const PID_FILE: &str = "app.pid";
-const LOG_FILE: &str = "app.log";
+pub const LOG_FILE: &str = "app.log";
+/// Byte offset in [`LOG_FILE`] where the latest run's output begins
+/// (DMN-116), written on every start.
+pub const RUN_OFFSET_FILE: &str = "app.log.run-offset";
 /// How long to wait for graceful termination before SIGKILL.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -141,6 +146,14 @@ impl AppDriver for ProcessDriver {
             .append(true)
             .open(dir.join(LOG_FILE))
             .context("cannot open app log file")?;
+        // Every run appends to the same file; the console follows from this
+        // offset so it shows the current run only (DMN-116). A marker that
+        // cannot be written must not survive either — a stale one would
+        // point into the previous run.
+        let run_offset = log.metadata().map(|m| m.len()).unwrap_or(0);
+        if fs::write(dir.join(RUN_OFFSET_FILE), run_offset.to_string()).is_err() {
+            fs::remove_file(dir.join(RUN_OFFSET_FILE)).ok();
+        }
         // Run from repository/ when the package has one, else the app dir.
         let workdir = if dir.join("repository").is_dir() {
             dir.join("repository")

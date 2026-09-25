@@ -1,16 +1,27 @@
-//! In-daemon task scheduler (DMN-012, first increment).
+//! In-daemon task scheduler (DMN-012, DMN-114).
 //!
 //! A cron-like evaluator that wakes up once a minute and runs whatever is
-//! due. The first (and so far only) consumer is scheduled app backups
-//! (DMN-009): every app whose backup policy (`asc app settings`, the
-//! `backups` category) has a `schedule` gets `create_backup` runs to its
-//! configured storages, with the policy's `keep` rotation applied.
+//! due. Two kinds of work:
 //!
-//! Schedule syntax (see [`Schedule::parse`]): `daily@HH:MM`, bare `HH:MM`
-//! (same as daily) or a five-field cron expression
+//! - scheduled app backups (DMN-009): every app whose backup policy (`asc
+//!   app settings`, the `backups` category) has a `schedule` gets
+//!   `create_backup` runs to its configured storages, with the policy's
+//!   `keep` rotation applied;
+//! - scheduled jobs (DMN-114, [`jobs`]): the operator's `asc schedule add`
+//!   entries and the platform's "run on the machine" schedules — node
+//!   reboot, app lifecycle/update, backup, shell command, HTTP request —
+//!   each with a run history.
+//!
+//! Schedule syntax (see [`Schedule::parse`]): `hourly`, `daily@HH:MM`, bare
+//! `HH:MM` (same as daily) or a five-field cron expression
 //! `minute hour day-of-month month day-of-week`. Times are the node's local
-//! time, like cron. The persistent task queue, priorities and the `asc task`
-//! CLI from the DMN-012 design are the next increment.
+//! time, like cron — except jobs flagged `utc`, which the platform pushes so
+//! its own UTC-based next-run times stay true.
+
+pub mod jobs;
+
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
@@ -56,8 +67,29 @@ impl Moment {
         }
     }
 
-    fn now() -> Self {
-        Self::local(unix_now())
+    /// UTC broken-down time for a unix timestamp.
+    pub fn utc(epoch_secs: i64) -> Self {
+        let epoch: libc::time_t = epoch_secs as libc::time_t;
+        // SAFETY: gmtime_r fills the caller's buffer and touches no shared
+        // state; a zeroed tm is a valid out-parameter.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::gmtime_r(&epoch, &mut tm) };
+        Self {
+            minute: tm.tm_min as u32,
+            hour: tm.tm_hour as u32,
+            day: tm.tm_mday as u32,
+            month: (tm.tm_mon + 1) as u32,
+            weekday: tm.tm_wday as u32,
+        }
+    }
+
+    /// [`Self::utc`] or [`Self::local`].
+    pub fn at(epoch_secs: i64, utc: bool) -> Self {
+        if utc {
+            Self::utc(epoch_secs)
+        } else {
+            Self::local(epoch_secs)
+        }
     }
 }
 
@@ -85,6 +117,7 @@ pub struct Schedule {
 
 impl Schedule {
     /// Parse a schedule string. Accepted forms:
+    /// - `hourly` — at minute 0 of every hour (the platform's preset);
     /// - `daily@HH:MM` or bare `HH:MM` — every day at that local time;
     /// - `minute hour day-of-month month day-of-week` — cron, with `*`,
     ///   values, `a-b` ranges, `a,b,c` lists and `/n` steps; day-of-week is
@@ -94,6 +127,17 @@ impl Schedule {
         let invalid = || anyhow::anyhow!(tf(Msg::ErrBackupSchedule, raw));
         if s.is_empty() {
             return Err(invalid());
+        }
+        if s.eq_ignore_ascii_case("hourly") {
+            return Ok(Self {
+                minute: 1,
+                hour: mask_all(0, 23),
+                day: mask_all(1, 31),
+                month: mask_all(1, 12),
+                weekday: mask_all(0, 6),
+                day_restricted: false,
+                weekday_restricted: false,
+            });
         }
         // daily@HH:MM / HH:MM sugar.
         let time_part = match s.split_once('@') {
@@ -141,6 +185,40 @@ impl Schedule {
             day_restricted: *day != "*",
             weekday_restricted: *weekday != "*",
         })
+    }
+
+    /// The first minute strictly after `epoch_secs` at which the schedule
+    /// fires, `None` if that is more than a year away (e.g. `0 0 30 2 *`).
+    /// Skips whole hours and days that cannot match, so even a yearly job
+    /// costs a few thousand evaluations, not half a million.
+    pub fn next_after(&self, epoch_secs: i64, utc: bool) -> Option<i64> {
+        let limit = epoch_secs + 366 * 24 * 3600;
+        let mut t = (epoch_secs.div_euclid(60) + 1) * 60;
+        while t <= limit {
+            let m = Moment::at(t, utc);
+            let bit = |mask: u64, value: u32| mask & (1 << value) != 0;
+            let day_ok = bit(self.day, m.day);
+            let weekday_ok = bit(self.weekday, m.weekday);
+            let date_ok = bit(self.month, m.month)
+                && if self.day_restricted && self.weekday_restricted {
+                    day_ok || weekday_ok
+                } else {
+                    day_ok && weekday_ok
+                };
+            if !date_ok {
+                t += ((23 - m.hour as i64) * 60 + (60 - m.minute as i64)) * 60;
+                continue;
+            }
+            if !bit(self.hour, m.hour) {
+                t += (60 - m.minute as i64) * 60;
+                continue;
+            }
+            if bit(self.minute, m.minute) {
+                return Some(t);
+            }
+            t += 60;
+        }
+        None
     }
 
     /// Whether the schedule fires at this instant (minute resolution).
@@ -208,10 +286,60 @@ pub fn start(config: &Config) {
     tokio::spawn(run(config));
 }
 
+/// Jobs currently executing in this process — a job still running from its
+/// previous tick (a long backup, a slow command) is skipped rather than
+/// started a second time on top of itself. Shared with manual runs over the
+/// API ([`spawn_job`]).
+static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Start `job` on the blocking pool unless it is already running; records
+/// the run in the job store. Returns the opened run, `None` when skipped.
+pub fn spawn_job(
+    config: &Config,
+    job: jobs::Job,
+    trigger: jobs::RunTrigger,
+) -> Result<Option<jobs::RunRecord>> {
+    {
+        let mut running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+        if !running.insert(job.id.clone()) {
+            return Ok(None);
+        }
+    }
+    let store = jobs::JobStore::for_config(config);
+    let run = match store.begin_run(&job.id, trigger) {
+        Ok(run) => run,
+        Err(err) => {
+            RUNNING
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&job.id);
+            return Err(err);
+        }
+    };
+    let config = config.clone();
+    let run_id = run.id.clone();
+    tokio::task::spawn_blocking(move || {
+        let outcome = jobs::execute(&config, &job);
+        if outcome.ok {
+            info!(schedule = %job.id, action = job.action.label(), "scheduled job succeeded");
+        } else {
+            warn!(schedule = %job.id, action = job.action.label(), error = %outcome.error, "scheduled job failed");
+        }
+        if let Err(err) = store.finish_run(&job.id, &run_id, &outcome) {
+            warn!(schedule = %job.id, error = %format!("{err:#}"), "cannot record scheduled job run");
+        }
+        RUNNING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&job.id);
+    });
+    Ok(Some(run))
+}
+
 /// Wake up at the start of every minute and run whatever is due. Each pass
 /// runs on the blocking pool — backup archiving is filesystem-heavy.
 async fn run(config: Config) {
-    info!("scheduler started (backup schedules)");
+    info!("scheduler started (backup policies and scheduled jobs)");
     let mut last_stamp: Option<i64> = None;
     loop {
         let now = unix_now();
@@ -226,11 +354,50 @@ async fn run(config: Config) {
         }
         last_stamp = Some(stamp);
 
-        let config = config.clone();
+        let now = stamp * 60;
+        let pass_config = config.clone();
         let result =
-            tokio::task::spawn_blocking(move || run_due_backups(&config, Moment::now())).await;
+            tokio::task::spawn_blocking(move || run_due_backups(&pass_config, Moment::local(now)))
+                .await;
         if let Err(err) = result {
             warn!(error = %err, "scheduler pass panicked");
+        }
+        run_due_jobs(&config, now);
+    }
+}
+
+/// Start every enabled job whose trigger fires at `now` (the minute's
+/// start). Each job gets its own blocking task — a half-hour backup must
+/// not hold back an HTTP check due the same minute.
+fn run_due_jobs(config: &Config, now: i64) {
+    let store = jobs::JobStore::for_config(config);
+    let list = match store.list() {
+        Ok(list) => list,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "scheduler: cannot read scheduled jobs");
+            return;
+        }
+    };
+    for job in list.into_iter().filter(|j| j.enabled) {
+        let schedule = match Schedule::parse(&job.trigger) {
+            Ok(schedule) => schedule,
+            Err(err) => {
+                warn!(schedule = %job.id, error = %err, "scheduler: invalid job trigger");
+                continue;
+            }
+        };
+        if !schedule.matches(Moment::at(now, job.utc)) {
+            continue;
+        }
+        let id = job.id.clone();
+        match spawn_job(config, job, jobs::RunTrigger::Schedule) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                warn!(schedule = %id, "scheduler: previous run still in progress, skipping this tick")
+            }
+            Err(err) => {
+                warn!(schedule = %id, error = %format!("{err:#}"), "scheduler: cannot start job")
+            }
         }
     }
 }
@@ -335,6 +502,45 @@ mod tests {
             assert!(!s.matches(moment(16, 3, 1, 1, 0)), "{raw}");
             assert!(!s.matches(moment(15, 4, 1, 1, 0)), "{raw}");
         }
+    }
+
+    #[test]
+    fn hourly_fires_at_minute_zero() {
+        let s = Schedule::parse("hourly").unwrap();
+        assert!(s.matches(moment(0, 0, 1, 1, 0)));
+        assert!(s.matches(moment(0, 17, 9, 5, 3)));
+        assert!(!s.matches(moment(1, 17, 9, 5, 3)));
+        assert_eq!(s, Schedule::parse("0 * * * *").unwrap());
+    }
+
+    #[test]
+    fn next_after_in_utc() {
+        // 2026-01-01 00:00:00 UTC, a Thursday.
+        let base = 1_767_225_600;
+        let hourly = Schedule::parse("HOURLY").unwrap();
+        assert_eq!(hourly.next_after(base, true), Some(base + 3600));
+        assert_eq!(hourly.next_after(base + 1, true), Some(base + 3600));
+        let daily = Schedule::parse("daily@03:15").unwrap();
+        assert_eq!(
+            daily.next_after(base, true),
+            Some(base + 3 * 3600 + 15 * 60)
+        );
+        // Mondays at 04:00: Thursday → the following Monday (4 days later).
+        let monday = Schedule::parse("0 4 * * 1").unwrap();
+        assert_eq!(
+            monday.next_after(base, true),
+            Some(base + 4 * 86400 + 4 * 3600)
+        );
+        // Every 15 minutes — the very next quarter.
+        let quarter = Schedule::parse("*/15 * * * *").unwrap();
+        assert_eq!(quarter.next_after(base + 60, true), Some(base + 15 * 60));
+        // Never within a year.
+        let never = Schedule::parse("0 0 30 2 *").unwrap();
+        assert_eq!(never.next_after(base, true), None);
+        // Leap day 2028 is within 366 days of 2027-03-01.
+        let leap = Schedule::parse("0 0 29 2 *").unwrap();
+        let mar_2027 = 1_803_859_200; // 2027-03-01 00:00:00 UTC
+        assert_eq!(leap.next_after(mar_2027, true), Some(1_835_395_200)); // 2028-02-29
     }
 
     #[test]

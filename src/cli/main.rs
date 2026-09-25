@@ -181,6 +181,12 @@ enum Command {
         #[command(subcommand)]
         action: BackupAction,
     },
+    /// Scheduled jobs: reboots, app start/stop/restart/update, backups,
+    /// shell commands and HTTP checks, run by the daemon (DMN-114)
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
     /// Manage daemon configuration
     Config {
         #[command(subcommand)]
@@ -402,6 +408,88 @@ enum BackupAction {
         #[command(subcommand)]
         action: StorageAction,
     },
+}
+
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// List scheduled jobs with their next and last run
+    List,
+    /// Add a job: `asc schedule add daily@03:00 backup --app web --keep 7`
+    Add(Box<ScheduleAddArgs>),
+    /// Remove a job and its run history
+    Remove { schedule: String },
+    /// Enable a disabled job
+    Enable { schedule: String },
+    /// Disable a job without removing it
+    Disable { schedule: String },
+    /// Run a job now, in the foreground, and print what it produced
+    Run { schedule: String },
+    /// Show a job's recent runs, newest first
+    Runs {
+        schedule: String,
+        /// How many runs to show (at most 50 are kept)
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum JobKind {
+    NodeReboot,
+    AppStart,
+    AppStop,
+    AppRestart,
+    AppUpdate,
+    Backup,
+    Shell,
+    Http,
+}
+
+/// Fields of `asc schedule add`, boxed like [`StorageAddArgs`] — one
+/// variant carrying every action's options.
+#[derive(clap::Args)]
+struct ScheduleAddArgs {
+    /// hourly, daily@HH:MM, HH:MM or a cron expression 'min hour day month weekday'
+    trigger: String,
+    /// What the job does
+    #[arg(value_enum)]
+    action: JobKind,
+    /// App the action targets (app-* and backup; optional for shell)
+    #[arg(long)]
+    app: Option<String>,
+    /// Shell command line (shell)
+    #[arg(long)]
+    command: Option<String>,
+    /// Request URL (http)
+    #[arg(long)]
+    url: Option<String>,
+    /// HTTP method (http, default GET)
+    #[arg(long, default_value = "GET")]
+    method: String,
+    /// Request header 'Name: value' (http, repeatable)
+    #[arg(long = "header")]
+    headers: Vec<String>,
+    /// Request body (http)
+    #[arg(long)]
+    body: Option<String>,
+    /// Storage to back up to (backup, repeatable; default: the app's policy)
+    #[arg(long = "storage")]
+    storages: Vec<String>,
+    /// Copies to keep per storage (backup)
+    #[arg(long)]
+    keep: Option<u32>,
+    /// Timeout in seconds (shell/http, default 600, at most 3600)
+    #[arg(long)]
+    timeout: Option<u32>,
+    /// Evaluate the trigger in UTC instead of the node's local time
+    #[arg(long)]
+    utc: bool,
+    /// Free-form note shown in `asc schedule list`
+    #[arg(long)]
+    comment: Option<String>,
+    /// Job id (default: generated)
+    #[arg(long)]
+    id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -873,6 +961,7 @@ fn run() -> anyhow::Result<()> {
         Command::Source { action } => source_cmd(action),
         Command::Auth { action } => auth_cmd(action),
         Command::Backup { action } => backup_cmd(action, &config),
+        Command::Schedule { action } => schedule_cmd(action, &config),
         Command::Config { action } => config_cmd(action, config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
         // Both were handled above, before the config was loaded.
@@ -1436,6 +1525,266 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
 /// the storages they go to. Every subcommand resolves the app through
 /// `get_authorized`, so a user only ever touches their own apps' backups
 /// (root, everyone's) — same rule as every other `asc app` command.
+/// `YYYY-MM-DD HH:MM` in the node's local time, `-` for 0/none.
+fn local_minute(epoch: i64) -> String {
+    if epoch <= 0 {
+        return "-".to_string();
+    }
+    let t: libc::time_t = epoch as libc::time_t;
+    // SAFETY: localtime_r writes only into the caller's buffer.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
+fn schedule_cmd(action: ScheduleAction, config: &Config) -> anyhow::Result<()> {
+    use asc_daemon::daemon::scheduler::jobs::{self, Job, JobAction, JobStore, RunStatus};
+
+    let store = JobStore::for_config(config);
+    let warn_managed = |job: &Job| {
+        if let Some(owner) = &job.managed_by {
+            eprintln!("{}", tf(Msg::ScheduleManagedWarning, owner));
+        }
+    };
+    let status_label = |status: RunStatus| match status {
+        RunStatus::Running => "running",
+        RunStatus::Succeeded => "ok",
+        RunStatus::Failed => "failed",
+    };
+    match action {
+        ScheduleAction::List => {
+            let list = store.list()?;
+            if list.is_empty() {
+                println!("{}", t(Msg::ScheduleListEmpty));
+                return Ok(());
+            }
+            let last = store.last_runs()?;
+            let now = jobs::unix_now();
+            let id_w = list.iter().map(|j| j.id.len()).max().unwrap_or(2).max(2);
+            let trig_w = list
+                .iter()
+                .map(|j| j.trigger.len() + if j.utc { 4 } else { 0 })
+                .max()
+                .unwrap_or(7)
+                .max(7);
+            println!(
+                "{:<id_w$}  {:<trig_w$}  {:<11}  {:<16}  {:<16}  {:<7}  {:<3}  TARGET / NOTE",
+                "ID", "TRIGGER", "ACTION", "NEXT RUN", "LAST RUN", "RESULT", "ON"
+            );
+            for job in &list {
+                let trigger = if job.utc {
+                    format!("{} UTC", job.trigger)
+                } else {
+                    job.trigger.clone()
+                };
+                let next = jobs::next_run(job, now).unwrap_or(0);
+                let (last_at, last_status) = match last.get(&job.id) {
+                    Some(run) => (local_minute(run.started_at), status_label(run.status)),
+                    None => ("-".to_string(), "-"),
+                };
+                let target = match &job.action {
+                    JobAction::Http { method, url, .. } => format!("{method} {url}"),
+                    JobAction::Shell { command, app, .. } => match app {
+                        Some(app) => format!("[{app}] {command}"),
+                        None => command.clone(),
+                    },
+                    other => other.app().unwrap_or("-").to_string(),
+                };
+                let mut note = target;
+                if !job.comment.is_empty() {
+                    note.push_str(&format!(" — {}", job.comment));
+                }
+                if let Some(owner) = &job.managed_by {
+                    note.push_str(&format!(" ({owner})"));
+                }
+                println!(
+                    "{:<id_w$}  {:<trig_w$}  {:<11}  {:<16}  {:<16}  {:<7}  {:<3}  {}",
+                    job.id,
+                    trigger,
+                    job.action.label(),
+                    local_minute(next),
+                    last_at,
+                    last_status,
+                    if job.enabled { "yes" } else { "no" },
+                    note
+                );
+            }
+        }
+        ScheduleAction::Add(args) => {
+            let args = *args;
+            let need_app = |kind: &str| {
+                args.app
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(tf(Msg::ScheduleMissingOption, format!("--app ({kind})")))
+                    })
+            };
+            let action = match args.action {
+                JobKind::NodeReboot => JobAction::NodeReboot,
+                JobKind::AppStart => JobAction::AppStart {
+                    app: need_app("app-start")?,
+                },
+                JobKind::AppStop => JobAction::AppStop {
+                    app: need_app("app-stop")?,
+                },
+                JobKind::AppRestart => JobAction::AppRestart {
+                    app: need_app("app-restart")?,
+                },
+                JobKind::AppUpdate => JobAction::AppUpdate {
+                    app: need_app("app-update")?,
+                },
+                JobKind::Backup => JobAction::Backup {
+                    app: need_app("backup")?,
+                    storages: args.storages.clone(),
+                    keep: args.keep,
+                },
+                JobKind::Shell => JobAction::Shell {
+                    command: args.command.clone().ok_or_else(|| {
+                        anyhow::anyhow!(tf(Msg::ScheduleMissingOption, "--command (shell)"))
+                    })?,
+                    app: args.app.clone(),
+                    timeout_secs: args.timeout,
+                },
+                JobKind::Http => {
+                    let mut headers = std::collections::BTreeMap::new();
+                    for raw in &args.headers {
+                        let (key, value) = raw
+                            .split_once(':')
+                            .ok_or_else(|| anyhow::anyhow!(tf(Msg::ScheduleBadHeader, raw)))?;
+                        headers.insert(key.trim().to_string(), value.trim().to_string());
+                    }
+                    JobAction::Http {
+                        method: args.method.to_ascii_uppercase(),
+                        url: args.url.clone().ok_or_else(|| {
+                            anyhow::anyhow!(tf(Msg::ScheduleMissingOption, "--url (http)"))
+                        })?,
+                        headers,
+                        body: args.body.clone().unwrap_or_default(),
+                        timeout_secs: args.timeout,
+                    }
+                }
+            };
+            let id = match args.id {
+                Some(id) => id,
+                None => loop {
+                    let candidate = jobs::new_id()[..8].to_string();
+                    if store.get(&candidate)?.is_none() {
+                        break candidate;
+                    }
+                },
+            };
+            if store.get(&id)?.is_some() {
+                anyhow::bail!(tf(Msg::ScheduleExists, &id));
+            }
+            let job = store.upsert(Job {
+                id,
+                trigger: args.trigger,
+                utc: args.utc,
+                enabled: true,
+                comment: args.comment.unwrap_or_default(),
+                managed_by: None,
+                action,
+                created_at: 0,
+                updated_at: 0,
+            })?;
+            let next = jobs::next_run(&job, jobs::unix_now()).unwrap_or(0);
+            println!("{}", tf2(Msg::ScheduleAdded, &job.id, local_minute(next)));
+        }
+        ScheduleAction::Remove { schedule } => {
+            if let Some(job) = store.get(&schedule)? {
+                warn_managed(&job);
+            }
+            if !store.remove(&schedule)? {
+                anyhow::bail!(tf(Msg::ScheduleNotFound, &schedule));
+            }
+            println!("{}", tf(Msg::ScheduleRemoved, &schedule));
+        }
+        ScheduleAction::Enable { schedule } => {
+            let job = store
+                .get(&schedule)?
+                .ok_or_else(|| anyhow::anyhow!(tf(Msg::ScheduleNotFound, &schedule)))?;
+            warn_managed(&job);
+            store.set_enabled(&schedule, true)?;
+            println!("{}", tf(Msg::ScheduleEnabled, &schedule));
+        }
+        ScheduleAction::Disable { schedule } => {
+            let job = store
+                .get(&schedule)?
+                .ok_or_else(|| anyhow::anyhow!(tf(Msg::ScheduleNotFound, &schedule)))?;
+            warn_managed(&job);
+            store.set_enabled(&schedule, false)?;
+            println!("{}", tf(Msg::ScheduleDisabled, &schedule));
+        }
+        ScheduleAction::Run { schedule } => {
+            let job = store
+                .get(&schedule)?
+                .ok_or_else(|| anyhow::anyhow!(tf(Msg::ScheduleNotFound, &schedule)))?;
+            let run = store.begin_run(&job.id, jobs::RunTrigger::Manual)?;
+            let outcome = jobs::execute(config, &job);
+            store.finish_run(&job.id, &run.id, &outcome)?;
+            if !outcome.output.is_empty() {
+                println!("{}", outcome.output.trim_end());
+            }
+            if let Some(status) = outcome.http_status {
+                println!("HTTP {status}");
+            }
+            if outcome.ok {
+                println!("{}", tf(Msg::ScheduleRunOk, &job.id));
+            } else {
+                anyhow::bail!(tf2(Msg::ScheduleRunFailed, &job.id, &outcome.error));
+            }
+        }
+        ScheduleAction::Runs { schedule, limit } => {
+            if store.get(&schedule)?.is_none() {
+                anyhow::bail!(tf(Msg::ScheduleNotFound, &schedule));
+            }
+            let runs = store.runs(&schedule, limit)?;
+            if runs.is_empty() {
+                println!("{}", t(Msg::ScheduleRunsEmpty));
+                return Ok(());
+            }
+            println!(
+                "{:<16}  {:<8}  {:<8}  {:>6}  DETAILS",
+                "STARTED", "TRIGGER", "RESULT", "SECS"
+            );
+            for run in runs {
+                let secs = run
+                    .finished_at
+                    .map(|f| (f - run.started_at).max(0).to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let trigger = match run.trigger {
+                    jobs::RunTrigger::Schedule => "schedule",
+                    jobs::RunTrigger::Manual => "manual",
+                };
+                let mut details = run.error.lines().next().unwrap_or("").to_string();
+                if let Some(code) = run.http_status {
+                    details = format!("HTTP {code} {details}");
+                }
+                if details.trim().is_empty() {
+                    details = run.output.lines().last().unwrap_or("").to_string();
+                }
+                println!(
+                    "{:<16}  {:<8}  {:<8}  {:>6}  {}",
+                    local_minute(run.started_at),
+                    trigger,
+                    status_label(run.status),
+                    secs,
+                    details.trim()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn backup_cmd(action: BackupAction, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::backup::{self, storage};
     use asc_daemon::daemon::pkg::settings::SettingValues;
@@ -1515,12 +1864,12 @@ fn backup_cmd(action: BackupAction, config: &Config) -> anyhow::Result<()> {
             let meta = manager.get_authorized(&ctx, &app)?;
             let storage_name = storage.unwrap_or_else(|| storage::LOCAL_NAME.to_string());
             let storage_list = storage::StorageList::load()?;
-            let names = backup::list_backups(config, &storage_list, &storage_name, &meta.id)?;
-            if names.is_empty() {
+            let objects = backup::list_backups(config, &storage_list, &storage_name, &meta.id)?;
+            if objects.is_empty() {
                 println!("{}", t(Msg::BackupListEmpty));
             } else {
-                for name in names {
-                    println!("{name}");
+                for object in objects {
+                    println!("{}\t{}", object.name, monitor::human_bytes(object.size));
                 }
             }
         }

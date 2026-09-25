@@ -27,6 +27,12 @@ const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/backup-storages.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageEntry {
     pub name: String,
+    /// Who owns this entry when it was not added by hand (DMN-115): the
+    /// platform pushes its organization storages as `managed_by =
+    /// "platform"` and may replace or remove them; `None` for operator
+    /// entries, which a platform push never touches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
     #[serde(flatten)]
     pub kind: StorageKind,
 }
@@ -96,6 +102,28 @@ impl StorageKind {
     }
 }
 
+/// One archive on a storage: its remote name and size in bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupObject {
+    pub name: String,
+    pub size: u64,
+}
+
+impl BackupObject {
+    /// Creation time encoded in the name (`<app-id>-<unix-ts>.tar.gz`),
+    /// `None` for a name that does not follow the convention.
+    pub fn created_unix(&self) -> Option<i64> {
+        created_unix(&self.name)
+    }
+}
+
+/// See [`BackupObject::created_unix`].
+pub fn created_unix(name: &str) -> Option<i64> {
+    let stem = name.strip_suffix(".tar.gz")?;
+    let (_, ts) = stem.rsplit_once('-')?;
+    ts.parse().ok()
+}
+
 /// Where `asc backup` reads/writes archives. `push`/`pull` work with a
 /// caller-supplied local path (the archive is always built/restored on
 /// local disk first — see [`super::create`]/[`super::restore`]); `remote_name`
@@ -104,15 +132,26 @@ impl StorageKind {
 pub trait BackupStorage {
     fn push(&self, local_archive: &Path, remote_name: &str) -> Result<()>;
     fn pull(&self, remote_name: &str, local_dest: &Path) -> Result<()>;
-    /// Remote names for one app, oldest first (names are
+    /// Archives of one app, oldest first (names are
     /// `<app-id>-<unix-timestamp>.tar.gz`, which sorts chronologically).
-    fn list(&self, app_id: &str) -> Result<Vec<String>>;
+    /// Only names of exactly this app: `demo` must not pick up `demo-2`'s
+    /// archives (see [`belongs_to`]).
+    fn list(&self, app_id: &str) -> Result<Vec<BackupObject>>;
     fn remove(&self, remote_name: &str) -> Result<()>;
 }
 
-/// A plain directory on the local filesystem — the only storage kind that
-/// actually works in this increment; S3/FTP/SFTP are configurable but not
-/// wired up to a real transfer yet (DMN-009 follow-up).
+/// Whether `name` is an archive of `app_id` and nothing else: the
+/// `<app-id>-` prefix alone would also match app `demo-2` when listing
+/// `demo`, so the remainder must be exactly `<digits>.tar.gz`.
+pub fn belongs_to(name: &str, app_id: &str) -> bool {
+    name.strip_prefix(app_id)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.strip_suffix(".tar.gz"))
+        .is_some_and(|ts| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A plain directory on the local filesystem. S3 lives in [`super::s3`];
+/// FTP/SFTP are configurable but not wired up to a real transfer yet.
 pub struct Local {
     pub dir: PathBuf,
 }
@@ -134,13 +173,18 @@ impl BackupStorage for Local {
         Ok(())
     }
 
-    fn list(&self, app_id: &str) -> Result<Vec<String>> {
-        let prefix = format!("{app_id}-");
+    fn list(&self, app_id: &str) -> Result<Vec<BackupObject>> {
         let mut names = match fs::read_dir(&self.dir) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|name| name.starts_with(&prefix) && name.ends_with(".tar.gz"))
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    if !belongs_to(&name, app_id) {
+                        return None;
+                    }
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    Some(BackupObject { name, size })
+                })
                 .collect::<Vec<_>>(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => {
@@ -148,7 +192,7 @@ impl BackupStorage for Local {
                     .with_context(|| format!("cannot list backups in {}", self.dir.display()));
             }
         };
-        names.sort();
+        names.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(names)
     }
 
@@ -165,38 +209,52 @@ struct NotImplemented(&'static str);
 impl BackupStorage for NotImplemented {
     fn push(&self, _: &Path, _: &str) -> Result<()> {
         bail!(
-            "{} backup storage is not implemented yet (DMN-009) — use the 'local' storage for now",
+            "{} backup storage is not implemented yet — use the 'local' or 's3' storage for now",
             self.0
         )
     }
     fn pull(&self, _: &str, _: &Path) -> Result<()> {
         bail!(
-            "{} backup storage is not implemented yet (DMN-009) — use the 'local' storage for now",
+            "{} backup storage is not implemented yet — use the 'local' or 's3' storage for now",
             self.0
         )
     }
-    fn list(&self, _: &str) -> Result<Vec<String>> {
+    fn list(&self, _: &str) -> Result<Vec<BackupObject>> {
         bail!(
-            "{} backup storage is not implemented yet (DMN-009) — use the 'local' storage for now",
+            "{} backup storage is not implemented yet — use the 'local' or 's3' storage for now",
             self.0
         )
     }
     fn remove(&self, _: &str) -> Result<()> {
         bail!(
-            "{} backup storage is not implemented yet (DMN-009) — use the 'local' storage for now",
+            "{} backup storage is not implemented yet — use the 'local' or 's3' storage for now",
             self.0
         )
     }
 }
 
 /// Build the storage implementation for one entry.
-pub fn open(kind: &StorageKind) -> Box<dyn BackupStorage> {
-    match kind {
+pub fn open(kind: &StorageKind) -> Result<Box<dyn BackupStorage>> {
+    Ok(match kind {
         StorageKind::Local { dir } => Box::new(Local { dir: dir.clone() }),
-        StorageKind::S3 { .. } => Box::new(NotImplemented("S3")),
+        StorageKind::S3 {
+            bucket,
+            region,
+            endpoint,
+            access_key,
+            secret_key,
+            prefix,
+        } => Box::new(super::s3::S3::new(
+            endpoint.as_deref(),
+            region,
+            bucket,
+            access_key,
+            secret_key,
+            prefix.as_deref(),
+        )?),
         StorageKind::Ftp { .. } => Box::new(NotImplemented("FTP")),
         StorageKind::Sftp { .. } => Box::new(NotImplemented("SFTP")),
-    }
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -315,9 +373,49 @@ impl StorageList {
         };
         target.push(StorageEntry {
             name: name.to_string(),
+            managed_by: None,
             kind,
         });
         Ok(())
+    }
+
+    /// Add or replace a storage in the editable scope (DMN-115, the
+    /// platform's push). Replacing an operator entry with a managed one (or
+    /// the reverse) is refused: a push must never silently take over — or
+    /// hand back — something it does not own.
+    pub fn upsert(&mut self, entry: StorageEntry) -> Result<()> {
+        if entry.name == LOCAL_NAME {
+            bail!("'{LOCAL_NAME}' is the built-in storage name and cannot be reused");
+        }
+        let target = match self.scope {
+            Scope::System => &mut self.system,
+            Scope::User => &mut self.user,
+        };
+        if let Some(existing) = target.iter_mut().find(|e| e.name == entry.name) {
+            if existing.managed_by != entry.managed_by {
+                bail!(
+                    "storage '{}' exists and is managed by {} — refusing to replace it",
+                    entry.name,
+                    existing.managed_by.as_deref().unwrap_or("the operator")
+                );
+            }
+            *existing = entry;
+        } else {
+            target.push(entry);
+        }
+        Ok(())
+    }
+
+    /// Every configured entry visible here, system first, then user entries
+    /// not shadowed by a system one (the built-in `local` is not included).
+    pub fn entries(&self) -> Vec<&StorageEntry> {
+        let mut out: Vec<&StorageEntry> = self.system.iter().collect();
+        for entry in &self.user {
+            if !self.system.iter().any(|e| e.name == entry.name) {
+                out.push(entry);
+            }
+        }
+        out
     }
 
     pub fn remove(&mut self, name: &str) -> Result<()> {
@@ -364,6 +462,7 @@ mod tests {
                 .iter()
                 .map(|n| StorageEntry {
                     name: n.to_string(),
+                    managed_by: None,
                     kind: StorageKind::Local {
                         dir: PathBuf::from("/tmp/x"),
                     },
@@ -403,6 +502,40 @@ mod tests {
         assert!(err.to_string().contains("already exists"));
         let err = l.remove("s3-main").unwrap_err().to_string();
         assert!(err.to_lowercase().contains("sudo"), "got: {err}");
+    }
+
+    #[test]
+    fn archive_names_belong_to_exactly_one_app() {
+        assert!(belongs_to("demo-1767225600.tar.gz", "demo"));
+        assert!(!belongs_to("demo-2-1767225600.tar.gz", "demo"));
+        assert!(belongs_to("demo-2-1767225600.tar.gz", "demo-2"));
+        assert!(!belongs_to("demo-.tar.gz", "demo"));
+        assert!(!belongs_to("demo-1767225600.tar", "demo"));
+        assert_eq!(
+            created_unix("demo-2-1767225600.tar.gz"),
+            Some(1_767_225_600)
+        );
+        assert_eq!(created_unix("junk"), None);
+    }
+
+    #[test]
+    fn upsert_replaces_only_what_it_owns() {
+        let mut l = list(&["manual"], &[], Scope::System);
+        let managed = |name: &str, dir: &str| StorageEntry {
+            name: name.into(),
+            managed_by: Some("platform".into()),
+            kind: StorageKind::Local { dir: dir.into() },
+        };
+        l.upsert(managed("platform-1", "/a")).unwrap();
+        l.upsert(managed("platform-1", "/b")).unwrap();
+        assert_eq!(l.entries().len(), 2);
+        match &l.get("platform-1").unwrap().kind {
+            StorageKind::Local { dir } => assert_eq!(dir, &PathBuf::from("/b")),
+            other => panic!("unexpected {other:?}"),
+        }
+        let err = l.upsert(managed("manual", "/c")).unwrap_err().to_string();
+        assert!(err.contains("refusing"), "{err}");
+        assert!(l.upsert(managed(LOCAL_NAME, "/c")).is_err());
     }
 
     #[test]

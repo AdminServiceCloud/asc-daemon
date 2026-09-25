@@ -88,6 +88,19 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | Четыре категории `docker system df` (образы/контейнеры/тома/build cache): счётчики и байты. Дорогой вызов — только по требованию, никогда по таймеру. **Только root-контекст** |
 | `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Тело `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Удаляет неиспользуемое поштучно; то, что всё ещё нужно установленному приложению, возвращается в `skipped` с причиной, `dryRun` считает тот же план без удаления. **Только root-контекст** |
 | `POST /v1/docker/control` | `DockerService.ControlContainer` (DMN-111) | Тело `{container \| composeProject, action: "start"\|"stop"\|"restart"\|"pause"\|"unpause"\|"remove"}`. Жизненный цикл одного контейнера (id, однозначный префикс id или имя) или всех контейнеров compose-проекта; у стека неприменимые к члену действия пропускаются, старт идёт от старых к новым, стоп — от новых к старым. Контейнер установленного ASC-приложения (или его compose-проекта) получает отказ 409 `owned_by_app` / `FAILED_PRECONDITION` — им управляют через приложение. Capability `docker.control`. **Только root-контекст** |
+| `GET /v1/backups?app_id=&storage=` | `BackupService.ListBackups` (DMN-115) | Архивы одного или всех видимых приложений на одном или всех хранилищах: имя, хранилище, размер, время создания; недоступное хранилище — в `errors`. Capability `backups` |
+| `GET /v1/backups/storages` | `BackupService.ListBackupStorages` | Хранилища (`local` первым) без реквизитов |
+| `PUT /v1/backups/storages/{name}` | `BackupService.UpsertBackupStorage` | Тело `{managed_by?, s3: {endpoint, region, bucket, access_key, secret_key, prefix}}` или `{local: {dir}}`; запись с другим `managed_by` не заменяется |
+| `DELETE /v1/backups/storages/{name}?managed_by=` | `BackupService.RemoveBackupStorage` | Удалить хранилище (только с этой меткой, если она передана) |
+| `POST /v1/apps/{id}/backups` | `BackupService.CreateBackup` | Тело `{storages?, keep?}` — один архив во все хранилища, результат по каждому. Долгий вызов |
+| `POST /v1/apps/{id}/backups/restore` | `BackupService.RestoreBackup` | Тело `{storage, name, stop_app}` — `stop_app` останавливает запущенное приложение, восстанавливает и запускает снова |
+| `DELETE /v1/apps/{id}/backups/{storage}/{name}` | `BackupService.DeleteBackup` | Удалить один архив |
+| `GET /v1/schedules?managed_by=` | `ScheduleService.ListSchedules` (DMN-114) | Задачи планировщика с `next_run_unix` и последним запуском. Capability `schedules` |
+| `PUT /v1/schedules/{id}` | `ScheduleService.UpsertSchedule` | Тело — задача (`trigger`, `utc`, `enabled`, `comment`, `action: {type, …}`) |
+| `DELETE /v1/schedules/{id}` | `ScheduleService.RemoveSchedule` | Удалить задачу и её журнал |
+| `PUT /v1/schedules/managed/{managed_by}` | `ScheduleService.ReplaceManagedSchedules` | Тело `{schedules}` — полная замена задач этого владельца; задачи оператора не трогаются |
+| `POST /v1/schedules/{id}/run` | `ScheduleService.RunSchedule` | Запустить задачу сейчас; ответ `{started, run}` без ожидания |
+| `GET /v1/schedules/{id}/runs?limit=` | `ScheduleService.ListScheduleRuns` | Запуски задачи, новые первыми (хранится до 50) |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |

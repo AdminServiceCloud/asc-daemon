@@ -327,6 +327,8 @@ enum Dynamic {
     Storages,
     /// Saved git/registry credentials, by pattern.
     Credentials,
+    /// Scheduled jobs, by id (DMN-114).
+    Schedules,
 }
 
 /// Which live list, if any, fills an argument — keyed by where the argument
@@ -346,6 +348,7 @@ fn dynamic_source(path: &[String], arg: &Arg) -> Option<Dynamic> {
         (["source", "remove"], "name") => Dynamic::Sources,
         (["backup", "storage", "remove"], "name") => Dynamic::Storages,
         (["auth", "remove"], "target") => Dynamic::Credentials,
+        (["schedule", _], "schedule") => Dynamic::Schedules,
         (_, "source") => Dynamic::Sources,
         (_, "storage") | (_, "storages") => Dynamic::Storages,
         // Every command that addresses an app spells it `id` (`asc app stop
@@ -364,8 +367,23 @@ impl Dynamic {
             Dynamic::Sources => sources(),
             Dynamic::Storages => storages(),
             Dynamic::Credentials => credentials(),
+            Dynamic::Schedules => schedules(config),
         }
     }
+}
+
+/// Scheduled jobs from the job store — readable only where the store is
+/// (root on a system install); elsewhere simply no candidates.
+fn schedules(config: &Config) -> Vec<Candidate> {
+    asc_daemon::daemon::scheduler::jobs::JobStore::for_config(config)
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|job| Candidate {
+            help: Some(format!("{} {}", job.trigger, job.action.label())),
+            value: job.id,
+        })
+        .collect()
 }
 
 /// Installed apps: through the daemon when there is one (it is the only path

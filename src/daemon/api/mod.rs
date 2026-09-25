@@ -5,11 +5,14 @@
 //! Remote access goes through the platform tunnel; locally the API listens
 //! on localhost only (config `[api] listen`).
 
+mod backups;
 pub mod console;
 mod grpc;
+mod grpc_backups;
 mod local;
 pub mod proto;
 mod rest;
+mod rest_backups;
 pub mod tls;
 pub mod tokens;
 pub mod uds;
@@ -61,6 +64,8 @@ pub const CAPABILITIES: &[&str] = &[
     "docker.prune",
     "app.clone",
     "docker.control",
+    "backups",
+    "schedules",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -1386,7 +1391,12 @@ impl ApiState {
             let meta = s.manager.get_authorized(&ctx, &id)?;
             let storages =
                 storage::StorageList::load_with(crate::daemon::pkg::sources::Scope::System)?;
-            backup::list_backups(&s.config, &storages, storage::LOCAL_NAME, &meta.id)
+            Ok(
+                backup::list_backups(&s.config, &storages, storage::LOCAL_NAME, &meta.id)?
+                    .into_iter()
+                    .map(|o| o.name)
+                    .collect(),
+            )
         })
         .await
     }

@@ -1541,12 +1541,65 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
 
 // ── Async streaming operations (WebSocket console) ──────────────────────────
 
+/// When the container's current run began — or, once it stopped, its most
+/// recent one. The console's cut-off between this run's output and every
+/// earlier run's (DMN-116): a `docker start` of an existing container
+/// appends to the same log the Engine has kept since the container was
+/// created, so neither `tail` nor attach's `logs` replay can tell the runs
+/// apart on their own. `None` when the container is missing or has never
+/// started (the Engine's zero `"0001-01-01T00:00:00Z"`).
+pub async fn run_started_at(
+    cfg: &DockerConfig,
+    container: &str,
+) -> Result<Option<time::OffsetDateTime>> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let docker = connect(cfg)?;
+    match docker.inspect_container(container, None).await {
+        Ok(info) => Ok(info
+            .state
+            .and_then(|s| s.started_at)
+            .and_then(|raw| OffsetDateTime::parse(&raw, &Rfc3339).ok())
+            .filter(|started| started.unix_timestamp() > 0)),
+        Err(e) if status_of(&e) == Some(404) => Ok(None),
+        Err(e) => Err(friendly(cfg, e)),
+    }
+}
+
+/// Splits the Engine's `timestamps=true` prefix (RFC3339 with nanoseconds,
+/// then one space) off a log message. `None` when the message does not
+/// start with one — the caller keeps such a message rather than guessing
+/// which run it belongs to.
+fn split_log_timestamp(message: &[u8]) -> Option<(time::OffsetDateTime, &[u8])> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let space = message.iter().position(|&b| b == b' ')?;
+    let stamp = std::str::from_utf8(&message[..space]).ok()?;
+    let parsed = OffsetDateTime::parse(stamp, &Rfc3339).ok()?;
+    Some((parsed, &message[space + 1..]))
+}
+
+/// The Engine's `since` is whole seconds, so it only narrows the transfer:
+/// the exact cut is made on each message's own nanosecond timestamp — a
+/// restart's shutdown lines of the previous run usually land within the
+/// same second as the new `StartedAt`.
+fn since_seconds(since: Option<time::OffsetDateTime>) -> i32 {
+    since
+        .map(|at| i32::try_from(at.unix_timestamp()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
 /// Follow-mode logs as a stream of UTF-8 text lines (trailing newline
-/// stripped). Timestamps are included by the Engine.
+/// stripped). Timestamps are included by the Engine. With `since`, lines
+/// logged before that moment are dropped — the console passes the
+/// container's [`run_started_at`] so it shows the current run only.
 pub async fn logs_follow(
     cfg: &DockerConfig,
     container: &str,
     tail: usize,
+    since: Option<time::OffsetDateTime>,
 ) -> Result<impl Stream<Item = Result<String>> + Send> {
     let docker = connect(cfg)?;
     let opts = LogsOptions {
@@ -1555,20 +1608,74 @@ pub async fn logs_follow(
         stderr: true,
         timestamps: true,
         tail: tail.to_string(),
+        since: since_seconds(since),
         ..Default::default()
     };
     // The stream owns its transport handle, so `docker` may drop here.
-    let stream = docker.logs(container, Some(opts)).map(|item| {
-        item.map(|log| {
-            let mut line = String::from_utf8_lossy(&log.into_bytes()).into_owned();
-            while line.ends_with('\n') || line.ends_with('\r') {
-                line.pop();
-            }
-            line
+    let stream = docker
+        .logs(container, Some(opts))
+        .filter(move |item| {
+            let keep = match (item, since) {
+                (Ok(log), Some(since)) => split_log_timestamp(log.as_ref())
+                    .is_none_or(|(logged_at, _)| logged_at >= since),
+                _ => true,
+            };
+            std::future::ready(keep)
         })
-        .map_err(|e| anyhow!("docker logs: {e}"))
-    });
+        .map(|item| {
+            item.map(|log| {
+                let mut line = String::from_utf8_lossy(&log.into_bytes()).into_owned();
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                line
+            })
+            .map_err(|e| anyhow!("docker logs: {e}"))
+        });
     Ok(stream)
+}
+
+/// What the container printed in `[since, until)`, oldest first, capped to
+/// the last `tail` messages, with the Engine's timestamps stripped again —
+/// the raw bytes an attach would have carried. This is the attach console's
+/// backlog (DMN-116): `until` is the moment the live attach went up, so the
+/// backlog and the live stream meet there instead of overlapping.
+pub async fn run_backlog(
+    cfg: &DockerConfig,
+    container: &str,
+    since: time::OffsetDateTime,
+    until: time::OffsetDateTime,
+    tail: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let docker = connect(cfg)?;
+    let opts = LogsOptions {
+        follow: false,
+        stdout: true,
+        stderr: true,
+        timestamps: true,
+        tail: tail.to_string(),
+        since: since_seconds(Some(since)),
+        ..Default::default()
+    };
+    let mut stream = docker.logs(container, Some(opts));
+    let mut backlog = Vec::new();
+    while let Some(item) = stream.next().await {
+        let log = match item {
+            Ok(log) => log,
+            // Removed between inspect and here: nothing to replay.
+            Err(e) if status_of(&e) == Some(404) => break,
+            Err(e) => return Err(friendly(cfg, e)),
+        };
+        let bytes = log.into_bytes();
+        match split_log_timestamp(&bytes) {
+            Some((logged_at, message)) if logged_at >= since && logged_at < until => {
+                backlog.push(message.to_vec())
+            }
+            Some(_) => {}
+            None => backlog.push(bytes.to_vec()),
+        }
+    }
+    Ok(backlog)
 }
 
 /// Interactive attach: bidirectional stdin/stdout to a running container.

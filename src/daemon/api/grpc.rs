@@ -19,11 +19,13 @@ use crate::daemon::pkg::InstallOutcome;
 use crate::daemon::users;
 
 use pb::app_service_server::{AppService, AppServiceServer};
+use pb::backup_service_server::BackupServiceServer;
 use pb::credential_service_server::{CredentialService, CredentialServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
 use pb::docker_service_server::{DockerService, DockerServiceServer};
 use pb::file_service_server::{FileService, FileServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
+use pb::schedule_service_server::ScheduleServiceServer;
 use pb::source_service_server::{SourceService, SourceServiceServer};
 use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
@@ -40,18 +42,20 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(CredentialServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(FileServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(UserServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(DockerServiceServer::new(Grpc(state)))
+        .add_service(DockerServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(BackupServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(ScheduleServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 
-struct Grpc(Arc<ApiState>);
+pub(super) struct Grpc(pub(super) Arc<ApiState>);
 
 /// The caller's context, stamped into the request extensions by the
 /// transport middleware: the full-visibility context after bearer auth
 /// (TCP), the peer-cred context on the unix socket. Absence means a
 /// middleware bug — fail closed with an unprivileged nobody context
 /// rather than defaulting to full visibility.
-fn ctx_of<T>(request: &Request<T>) -> UserContext {
+pub(super) fn ctx_of<T>(request: &Request<T>) -> UserContext {
     request
         .extensions()
         .get::<UserContext>()
@@ -66,7 +70,7 @@ fn ctx_of<T>(request: &Request<T>) -> UserContext {
 /// anyhow errors → gRPC status. Typed [`files::FileError`]s keep their own
 /// code (DMN-070); "not found" text otherwise keeps its code too; everything
 /// else becomes INTERNAL with the message preserved.
-fn to_status(err: anyhow::Error) -> Status {
+pub(super) fn to_status(err: anyhow::Error) -> Status {
     let msg = format!("{err:#}");
     if let Some(err) = err.downcast_ref::<files::FileError>() {
         use files::FileError as F;

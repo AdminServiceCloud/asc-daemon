@@ -88,6 +88,19 @@ recognizes keeps working against a newer daemon.
 | `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | `docker system df`'s four categories (images/containers/volumes/build cache): counts and bytes. Expensive — call on demand, never on a poll. **Root context only** |
 | `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Body `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Removes unused items one at a time; anything an installed app still needs comes back in `skipped` with why, `dryRun` computes the same plan without deleting. **Root context only** |
 | `POST /v1/docker/control` | `DockerService.ControlContainer` (DMN-111) | Body `{container \| composeProject, action: "start"\|"stop"\|"restart"\|"pause"\|"unpause"\|"remove"}`. Lifecycle of one container (id, unambiguous id prefix or name) or of every container of a compose project; a stack skips members the action does not apply to and goes oldest-first to start, newest-first to stop. A container of an installed ASC app (or of its compose project) is refused with 409 `owned_by_app` / `FAILED_PRECONDITION` — control it through the app. Capability `docker.control`. **Root context only** |
+| `GET /v1/backups?app_id=&storage=` | `BackupService.ListBackups` (DMN-115) | Archives of one app or all apps the caller sees, on one storage or all: name, storage, size, creation time; an unreachable storage is reported in `errors`. Capability `backups` |
+| `GET /v1/backups/storages` | `BackupService.ListBackupStorages` | Storages (`local` first) without credentials |
+| `PUT /v1/backups/storages/{name}` | `BackupService.UpsertBackupStorage` | Body `{managed_by?, s3: {endpoint, region, bucket, access_key, secret_key, prefix}}` or `{local: {dir}}`; an entry with a different `managed_by` is not replaced |
+| `DELETE /v1/backups/storages/{name}?managed_by=` | `BackupService.RemoveBackupStorage` | Remove a storage (only one carrying that marker, when given) |
+| `POST /v1/apps/{id}/backups` | `BackupService.CreateBackup` | Body `{storages?, keep?}` — one archive pushed to every storage, one result each. Long-running |
+| `POST /v1/apps/{id}/backups/restore` | `BackupService.RestoreBackup` | Body `{storage, name, stop_app}` — `stop_app` stops a running app, restores and starts it again |
+| `DELETE /v1/apps/{id}/backups/{storage}/{name}` | `BackupService.DeleteBackup` | Delete one archive |
+| `GET /v1/schedules?managed_by=` | `ScheduleService.ListSchedules` (DMN-114) | Scheduled jobs with `next_run_unix` and the last run. Capability `schedules` |
+| `PUT /v1/schedules/{id}` | `ScheduleService.UpsertSchedule` | Body — a job (`trigger`, `utc`, `enabled`, `comment`, `action: {type, …}`) |
+| `DELETE /v1/schedules/{id}` | `ScheduleService.RemoveSchedule` | Remove a job and its run history |
+| `PUT /v1/schedules/managed/{managed_by}` | `ScheduleService.ReplaceManagedSchedules` | Body `{schedules}` — full replace of that owner's jobs; operator jobs are never touched |
+| `POST /v1/schedules/{id}/run` | `ScheduleService.RunSchedule` | Start a job now; answers `{started, run}` without waiting |
+| `GET /v1/schedules/{id}/runs?limit=` | `ScheduleService.ListScheduleRuns` | The job's runs, newest first (at most 50 kept) |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | Metrics history from the ring buffer, oldest → newest |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Real host listening ports parsed from `/proc/net/*`, merged with Docker/app attribution — distinct from `GET /v1/ports` above, which reports what apps *declare* |

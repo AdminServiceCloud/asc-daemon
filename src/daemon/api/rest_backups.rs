@@ -14,6 +14,7 @@ use serde::Deserialize;
 use super::ApiState;
 use super::rest::ApiError;
 use crate::daemon::apps::UserContext;
+use crate::daemon::backup;
 use crate::daemon::backup::storage::StorageKind;
 use crate::daemon::scheduler::jobs;
 
@@ -134,6 +135,10 @@ struct CreateBackupBody {
     #[serde(default)]
     storages: Vec<String>,
     keep: Option<u32>,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 async fn create_backup(
@@ -142,8 +147,9 @@ async fn create_backup(
     Path(id): Path<String>,
     Json(body): Json<CreateBackupBody>,
 ) -> Result<Response, ApiError> {
+    let filter = backup::BackupFilter::new(body.include, body.exclude)?;
     let results = state
-        .backup_create(ctx, id, body.storages, body.keep)
+        .backup_create(ctx, id, body.storages, body.keep, filter)
         .await?;
     Ok(Json(serde_json::json!({ "results": results })).into_response())
 }

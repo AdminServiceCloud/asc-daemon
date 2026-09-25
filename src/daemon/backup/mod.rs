@@ -60,6 +60,67 @@ impl BackupManifest {
     }
 }
 
+/// Per-run file selection chosen by the caller (DMN-118), on top of the
+/// repository's own `asc.backup.yaml` exclusions. Patterns use the same
+/// [`glob`] syntax and are relative to the app directory (`data/**/*.db`,
+/// `repository/vendor`). A non-empty `include` narrows the archive to the
+/// files it matches (a directory pattern takes everything under it);
+/// `exclude` then removes from whatever is left — exclusion always wins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackupFilter {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+impl BackupFilter {
+    /// Most patterns a single filter list may carry — a sanity cap on an
+    /// API caller, far above what anyone types by hand.
+    pub const MAX_PATTERNS: usize = 64;
+    const MAX_PATTERN_LEN: usize = 512;
+
+    /// Validate and normalize caller-supplied patterns: trimmed, blank lines
+    /// dropped, a trailing `/` stripped. Absolute paths, `..` segments and
+    /// backslashes are refused — the patterns only ever match paths inside
+    /// the app directory, and a pattern that cannot match anything there is
+    /// a mistake worth reporting, not silently ignoring.
+    pub fn new(include: Vec<String>, exclude: Vec<String>) -> Result<Self> {
+        Ok(Self {
+            include: normalize_patterns("include", include)?,
+            exclude: normalize_patterns("exclude", exclude)?,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+}
+
+fn normalize_patterns(kind: &str, raw: Vec<String>) -> Result<Vec<String>> {
+    let patterns: Vec<String> = raw
+        .into_iter()
+        .map(|p| p.trim().trim_end_matches('/').to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if patterns.len() > BackupFilter::MAX_PATTERNS {
+        bail!(
+            "invalid {kind} patterns: at most {} are allowed",
+            BackupFilter::MAX_PATTERNS
+        );
+    }
+    for p in &patterns {
+        if p.len() > BackupFilter::MAX_PATTERN_LEN {
+            bail!(
+                "invalid {kind} pattern '{p}': longer than {} characters",
+                BackupFilter::MAX_PATTERN_LEN
+            );
+        }
+        if p.starts_with('/') || p.contains('\\') || p.split('/').any(|seg| seg == "..") {
+            bail!("invalid {kind} pattern '{p}': use a path relative to the app directory");
+        }
+    }
+    Ok(patterns)
+}
+
 /// What one `create_backup` call produced.
 #[derive(Debug)]
 pub struct BackupInfo {
@@ -116,6 +177,7 @@ pub fn create_backup(
         storages,
         &[storage_name.to_string()],
         keep,
+        &BackupFilter::default(),
     )
     .pop()
     .map(|(_, result)| result)
@@ -126,6 +188,7 @@ pub fn create_backup(
 /// archived once, the same file pushed to every storage in turn — both
 /// faster and consistent (every copy is the same snapshot). Results come
 /// back per storage, in order; one failed upload does not stop the others.
+/// `filter` narrows what goes into the archive (see [`BackupFilter`]).
 pub fn create_backup_multi(
     config: &Config,
     store: &AppStore,
@@ -133,6 +196,7 @@ pub fn create_backup_multi(
     storages: &StorageList,
     storage_names: &[String],
     keep: Option<u32>,
+    filter: &BackupFilter,
 ) -> Vec<(String, Result<BackupInfo>)> {
     let fail_all = |err: anyhow::Error| {
         let message = format!("{err:#}");
@@ -145,10 +209,12 @@ pub fn create_backup_multi(
         Ok(dir) => dir,
         Err(err) => return fail_all(err),
     };
-    let exclude = match BackupManifest::load(&app_dir.join("repository")) {
+    let mut exclude = match BackupManifest::load(&app_dir.join("repository")) {
         Ok(manifest) => manifest.exclude,
         Err(err) => return fail_all(err),
     };
+    exclude.extend(filter.exclude.iter().cloned());
+    let include = &filter.include;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -175,7 +241,7 @@ pub fn create_backup_multi(
             for sub in BACKED_UP_DIRS {
                 let dir = app_dir.join(sub);
                 if dir.is_dir() {
-                    append_tree(&mut builder, &dir, sub, &exclude)?;
+                    append_tree(&mut builder, &dir, sub, include, &exclude)?;
                 }
             }
             builder
@@ -307,11 +373,14 @@ pub fn prune(storage: &dyn BackupStorage, app_id: &str, keep: u32) -> Result<Vec
 /// Add every file under `dir` to `builder` as `<rel_prefix>/...`, skipping
 /// symlinks (never followed, never recreated — same rule as
 /// [`crate::daemon::apps::disk::dir_size`]) and anything [`glob::matches_any`]
-/// excludes.
+/// excludes. With a non-empty `include`, a file goes in only when it (or
+/// one of its directories) matches one of those patterns; directories are
+/// still walked, since a file deep inside may match.
 fn append_tree(
     builder: &mut tar::Builder<impl io::Write>,
     dir: &Path,
     rel_prefix: &str,
+    include: &[String],
     exclude: &[String],
 ) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
@@ -326,8 +395,8 @@ fn append_tree(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            append_tree(builder, &path, &rel, exclude)?;
-        } else {
+            append_tree(builder, &path, &rel, include, exclude)?;
+        } else if include.is_empty() || glob::matches_any(include, &rel) {
             let mut file =
                 fs::File::open(&path).with_context(|| format!("cannot read {}", path.display()))?;
             builder
@@ -425,6 +494,79 @@ mod tests {
         assert!(app_dir.join("repository/asc.yaml").exists());
     }
 
+    /// Archive paths of the one backup `filter` produces for a seeded app.
+    fn archived_paths(filter: &BackupFilter) -> Vec<String> {
+        let ws = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.daemon.data_dir = ws.path().join("data");
+        config.daemon.apps_dir = ws.path().join("apps");
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        let meta = seed_app(&store, "demo", &[]);
+        let storages = StorageList::load_with(crate::daemon::pkg::sources::Scope::User).unwrap();
+        let names = vec![storage::LOCAL_NAME.to_string()];
+        let (_, result) =
+            create_backup_multi(&config, &store, &meta, &storages, &names, None, filter)
+                .pop()
+                .unwrap();
+        let info = result.unwrap();
+        let archive = config.daemon.data_dir.join("backups").join(&info.name);
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(
+            fs::File::open(archive).unwrap(),
+        ));
+        let mut paths: Vec<String> = tar
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn filter_include_narrows_and_exclude_wins() {
+        let everything = archived_paths(&BackupFilter::default());
+        assert_eq!(
+            everything,
+            vec!["data/cache/tmp.bin", "data/save.txt", "repository/asc.yaml"]
+        );
+
+        let only_data = BackupFilter::new(vec!["data".into()], vec![]).unwrap();
+        assert_eq!(
+            archived_paths(&only_data),
+            vec!["data/cache/tmp.bin", "data/save.txt"]
+        );
+
+        let data_without_cache =
+            BackupFilter::new(vec!["data/".into()], vec!["data/cache/**".into()]).unwrap();
+        assert_eq!(archived_paths(&data_without_cache), vec!["data/save.txt"]);
+
+        let by_extension = BackupFilter::new(vec!["**/*.txt".into()], vec![]).unwrap();
+        assert_eq!(archived_paths(&by_extension), vec!["data/save.txt"]);
+    }
+
+    #[test]
+    fn filter_rejects_patterns_outside_the_app() {
+        for bad in ["/etc/passwd", "../other", "data/../../x", "data\\x"] {
+            assert!(
+                BackupFilter::new(vec![bad.into()], vec![]).is_err(),
+                "{bad}"
+            );
+            assert!(
+                BackupFilter::new(vec![], vec![bad.into()]).is_err(),
+                "{bad}"
+            );
+        }
+        let filter = BackupFilter::new(vec!["  ".into(), " data/ ".into()], vec![]).unwrap();
+        assert_eq!(filter.include, vec!["data"]);
+        assert!(
+            BackupFilter::new(vec![], vec!["".into()])
+                .unwrap()
+                .is_empty()
+        );
+        let too_many = vec!["data".to_string(); BackupFilter::MAX_PATTERNS + 1];
+        assert!(BackupFilter::new(too_many, vec![]).is_err());
+    }
+
     #[test]
     fn prune_keeps_only_the_newest() {
         let ws = tempfile::tempdir().unwrap();
@@ -482,7 +624,15 @@ mod tests {
             "second".to_string(),
             "missing".to_string(),
         ];
-        let results = create_backup_multi(&config, &store, &meta, &storages, &names, None);
+        let results = create_backup_multi(
+            &config,
+            &store,
+            &meta,
+            &storages,
+            &names,
+            None,
+            &BackupFilter::default(),
+        );
         assert_eq!(results.len(), 3);
         let first = results[0].1.as_ref().unwrap();
         let second = results[1].1.as_ref().unwrap();

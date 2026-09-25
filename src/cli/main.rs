@@ -1645,6 +1645,8 @@ fn schedule_cmd(action: ScheduleAction, config: &Config) -> anyhow::Result<()> {
                     app: need_app("backup")?,
                     storages: args.storages.clone(),
                     keep: args.keep,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
                 },
                 JobKind::Shell => JobAction::Shell {
                     command: args.command.clone().ok_or_else(|| {

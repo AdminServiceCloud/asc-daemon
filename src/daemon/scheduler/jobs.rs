@@ -110,6 +110,12 @@ pub enum JobAction {
         storages: Vec<String>,
         #[serde(default)]
         keep: Option<u32>,
+        /// Per-run file selection (DMN-118), see
+        /// [`crate::daemon::backup::BackupFilter`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        include: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
     },
     /// `/bin/sh -c <command>`; with `app`, in the app directory as the app's
     /// owner, otherwise in `/` as the daemon's own user.
@@ -305,6 +311,12 @@ pub fn validate(job: &Job) -> Result<()> {
         }
         JobAction::Backup { keep: Some(0), .. } => {
             bail!("schedule '{}': keep must be at least 1", job.id);
+        }
+        JobAction::Backup {
+            include, exclude, ..
+        } => {
+            backup::BackupFilter::new(include.clone(), exclude.clone())
+                .with_context(|| format!("schedule '{}'", job.id))?;
         }
         _ => {}
     }
@@ -690,7 +702,12 @@ pub fn execute(config: &Config, job: &Job) -> Outcome {
             app,
             storages,
             keep,
-        } => run_backup(config, &manager, &ctx, app, storages, *keep),
+            include,
+            exclude,
+        } => {
+            let filter = backup::BackupFilter::new(include.clone(), exclude.clone())?;
+            run_backup(config, &manager, &ctx, app, storages, *keep, &filter)
+        }
         JobAction::Shell {
             command,
             app,
@@ -744,6 +761,7 @@ fn run_backup(
     app: &str,
     storages: &[String],
     keep: Option<u32>,
+    filter: &backup::BackupFilter,
 ) -> Result<Outcome> {
     let meta = manager.get_authorized(ctx, app)?;
     let config_dir = manager.store().app_dir(&meta.id)?.join("config");
@@ -759,8 +777,15 @@ fn run_backup(
     };
     let keep = keep.or(policy.keep);
     let list = StorageList::load()?;
-    let results =
-        backup::create_backup_multi(config, manager.store(), &meta, &list, &targets, keep);
+    let results = backup::create_backup_multi(
+        config,
+        manager.store(),
+        &meta,
+        &list,
+        &targets,
+        keep,
+        filter,
+    );
     let mut lines = Vec::new();
     let mut errors = Vec::new();
     for (name, result) in results {

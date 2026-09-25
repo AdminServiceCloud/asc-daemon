@@ -9,6 +9,7 @@ use tonic::{Request, Response, Status};
 use super::backups::{BackupListing, JobView, StorageRow};
 use super::grpc::{Grpc, ctx_of, to_status};
 use super::proto::v1 as pb;
+use crate::daemon::backup;
 use crate::daemon::backup::storage::StorageKind;
 use crate::daemon::scheduler::jobs;
 
@@ -94,10 +95,14 @@ fn job_to_pb(view: JobView) -> pb::ScheduleJob {
             app,
             storages,
             keep,
+            include,
+            exclude,
         } => Action::Backup(pb::ScheduleBackupJob {
             app_id: app,
             storages,
             keep,
+            include,
+            exclude,
         }),
         jobs::JobAction::Shell {
             command,
@@ -153,6 +158,8 @@ fn job_from_pb(job: pb::ScheduleJob) -> Result<jobs::Job, Status> {
             app: b.app_id,
             storages: b.storages,
             keep: b.keep,
+            include: b.include,
+            exclude: b.exclude,
         },
         Action::Shell(s) => jobs::JobAction::Shell {
             command: s.command,
@@ -283,9 +290,11 @@ impl BackupService for Grpc {
     ) -> Result<Response<pb::CreateBackupResponse>, Status> {
         let ctx = ctx_of(&request);
         let req = request.into_inner();
+        let filter = backup::BackupFilter::new(req.include, req.exclude)
+            .map_err(|err| Status::invalid_argument(format!("{err:#}")))?;
         let results = self
             .0
-            .backup_create(ctx, req.app_id, req.storages, req.keep)
+            .backup_create(ctx, req.app_id, req.storages, req.keep, filter)
             .await
             .map_err(invalid_or_status)?;
         Ok(Response::new(pb::CreateBackupResponse {

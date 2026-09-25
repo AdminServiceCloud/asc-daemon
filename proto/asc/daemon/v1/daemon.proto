@@ -1957,6 +1957,13 @@ message CreateBackupRequest {
   repeated string storages = 2;
   // Rotation per storage after the upload; absent — the policy's keep.
   optional uint32 keep = 3;
+  // Optional per-run file selection (DMN-118), glob patterns relative to
+  // the app directory (`data/**/*.db`, `repository/vendor`). Non-empty
+  // include — only matching files go into the archive; exclude is applied
+  // on top of it and of the repository's asc.backup.yaml. A daemon that
+  // predates these fields ignores them and archives everything.
+  repeated string include = 4;
+  repeated string exclude = 5;
 }
 
 message BackupResult {
@@ -2019,6 +2026,9 @@ message ScheduleBackupJob {
   // Empty — the app's own backup policy, else "local".
   repeated string storages = 2;
   optional uint32 keep = 3;
+  // Same as CreateBackupRequest.include/exclude.
+  repeated string include = 4;
+  repeated string exclude = 5;
 }
 
 message ScheduleShellJob {

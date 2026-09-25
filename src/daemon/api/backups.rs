@@ -288,6 +288,7 @@ impl ApiState {
         app: String,
         storages: Vec<String>,
         keep: Option<u32>,
+        filter: backup::BackupFilter,
     ) -> Result<Vec<BackupResultRow>> {
         self.blocking(move |s| {
             let meta = s.manager.get_authorized(&ctx, &app)?;
@@ -313,6 +314,7 @@ impl ApiState {
                 &list,
                 &targets,
                 keep.or(policy.keep),
+                &filter,
             );
             Ok(results
                 .into_iter()

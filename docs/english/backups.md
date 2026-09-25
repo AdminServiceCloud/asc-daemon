@@ -26,6 +26,8 @@ exclude:
 
 Patterns are relative to the app directory and support `*` (any run of characters within one path segment), `**` (any run, crossing `/`) and `?` (one character); excluding a directory excludes everything under it, like `.gitignore`. No file is a substitute for application-level consistency (e.g. a database dump) — pre/post backup hooks are a later increment.
 
+**Per-run file selection (DMN-118).** `CreateBackupRequest` (REST: `POST /v1/apps/{id}/backups`) and the scheduled `ScheduleBackupJob` take optional `include` and `exclude` lists in the same glob syntax. A non-empty `include` narrows the archive to the files it matches (a directory pattern takes everything under it; directories are still walked, so `**/*.db` finds files at any depth); `exclude` is applied on top of it and on top of `asc.backup.yaml` — exclusion always wins. Patterns are trimmed, a trailing `/` is dropped; absolute paths, `..` segments and backslashes are refused with `InvalidArgument`, and each list holds at most 64 patterns. A daemon that predates these fields ignores them and archives everything.
+
 ### Storages (`BackupStorage` trait, `src/daemon/backup/storage.rs`)
 
 - **`local`** — always available, no setup: a plain directory (`<data_dir>/backups`, i.e. `/var/lib/asc/backups` by default). This is the only storage kind that actually transfers anything today.
@@ -50,4 +52,4 @@ Downloads the archive to a local temp file, then **replaces** the app directory'
 
 ## 🔗 Related tasks
 
-DMN-009, DMN-012, DMN-115, NODE-049, BE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-009, DMN-012, DMN-115, DMN-118, NODE-049, BE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

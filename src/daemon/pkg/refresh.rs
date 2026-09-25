@@ -114,6 +114,11 @@ struct Desired {
     binds: Vec<String>,
     /// The interpolated start command, when one applies.
     command: Option<String>,
+    /// Local id of the image the app's reference points at now. A tag
+    /// re-pulled since the container was created (DMN-120) points at a new
+    /// id — the container is recreated onto it, like `docker compose up`.
+    /// `None` when the image is not on the host: nothing to compare.
+    image_id: Option<String>,
 }
 
 impl Desired {
@@ -153,17 +158,24 @@ impl Desired {
         // locally built one (DMN-050) already exists on the host from install,
         // so it is only inspected — rebuilding just to read its USER would be
         // wasteful before the drift check even decides on a recreate.
-        let owner = match effective_image_ref(&manifest, image_source, &meta.id) {
+        let image = effective_image_ref(&manifest, image_source, &meta.id);
+        let owner = match &image {
             Some(image) => {
                 if manifest.runtime.image.as_deref() == Some(image.as_str()) {
                     let auth = super::install::registry_auth_for(
-                        &image,
+                        image,
                         &[Some(meta.id.as_str()), meta.uuid.as_deref()],
                     );
-                    docker::ensure_pulled(&config.docker, &image, auth.as_ref(), None)?;
+                    docker::ensure_pulled(&config.docker, image, auth.as_ref(), None)?;
                 }
-                docker::image_uid_gid(&config.docker, &image)?
+                docker::image_uid_gid(&config.docker, image)?
             }
+            None => None,
+        };
+        let image_id = match &image {
+            Some(image) => docker::inspect_local_image(&config.docker, image)?
+                .map(|local| local.id)
+                .filter(|id| !id.is_empty()),
             None => None,
         };
         let mut binds = inputs
@@ -181,6 +193,7 @@ impl Desired {
             ports,
             binds,
             command,
+            image_id,
         })
     }
 
@@ -210,6 +223,10 @@ impl Desired {
             && match &self.command {
                 Some(command) => actual.cmd.as_deref() == Some(std::slice::from_ref(command)),
                 None => true,
+            }
+            && match (&self.image_id, &actual.image) {
+                (Some(desired), Some(actual)) => desired == actual,
+                _ => true,
             }
     }
 }

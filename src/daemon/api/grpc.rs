@@ -25,6 +25,7 @@ use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
 use pb::docker_service_server::{DockerService, DockerServiceServer};
 use pb::file_service_server::{FileService, FileServiceServer};
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
+use pb::process_service_server::{ProcessService, ProcessServiceServer};
 use pb::schedule_service_server::ScheduleServiceServer;
 use pb::source_service_server::{SourceService, SourceServiceServer};
 use pb::system_service_server::{SystemService, SystemServiceServer};
@@ -37,6 +38,7 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(AppServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(SystemServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(MonitorServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(ProcessServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(TokenServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(SourceServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(CredentialServiceServer::new(Grpc(Arc::clone(&state))))
@@ -90,6 +92,22 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
     }
     if err.downcast_ref::<super::ContainerOwnedByApp>().is_some() {
         return Status::failed_precondition(msg);
+    }
+    if err
+        .downcast_ref::<crate::daemon::pkg::image::NotRepullable>()
+        .is_some()
+    {
+        return Status::failed_precondition(msg);
+    }
+    if let Some(err) = err.downcast_ref::<crate::daemon::monitor::processes::ProcessError>() {
+        use crate::daemon::monitor::processes::ProcessError as P;
+        return match err {
+            P::NotFound(_) => Status::not_found(msg),
+            P::Replaced(_) => Status::failed_precondition(msg),
+            P::Protected { .. } | P::PermissionDenied(_) => Status::permission_denied(msg),
+            P::InvalidPid(_) => Status::invalid_argument(msg),
+            P::Io(..) => Status::internal(msg),
+        };
     }
     if let Some(err) = err.downcast_ref::<users::UserError>() {
         use users::UserError as U;
@@ -369,6 +387,86 @@ impl MonitorService for Grpc {
         Ok(Response::new(pb::ListListeningPortsResponse {
             ports: rows.iter().map(listening_port_to_pb).collect(),
         }))
+    }
+}
+
+#[tonic::async_trait]
+impl ProcessService for Grpc {
+    async fn list_processes(
+        &self,
+        request: Request<pb::ListProcessesRequest>,
+    ) -> Result<Response<pb::ListProcessesResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let include_kernel_threads = request.into_inner().include_kernel_threads;
+        let list = self
+            .0
+            .list_processes(ctx, include_kernel_threads)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListProcessesResponse {
+            processes: list.processes.iter().map(process_to_pb).collect(),
+            memory_total_bytes: list.memory_total_bytes,
+            cpu_count: list.cpu_count,
+        }))
+    }
+
+    async fn signal_process(
+        &self,
+        request: Request<pb::SignalProcessRequest>,
+    ) -> Result<Response<pb::SignalProcessResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let signal = process_signal_from_pb(req.signal)?;
+        self.0
+            .signal_process(ctx, req.pid, signal, req.expected_start_ticks)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SignalProcessResponse {}))
+    }
+}
+
+/// `pb::ProcessSignal` -> the monitor's closed signal set, refusing the zero
+/// value.
+fn process_signal_from_pb(
+    signal: i32,
+) -> Result<crate::daemon::monitor::processes::Signal, Status> {
+    use crate::daemon::monitor::processes::Signal as S;
+    match pb::ProcessSignal::try_from(signal) {
+        Ok(pb::ProcessSignal::Term) => Ok(S::Term),
+        Ok(pb::ProcessSignal::Kill) => Ok(S::Kill),
+        Ok(pb::ProcessSignal::Hup) => Ok(S::Hup),
+        Ok(pb::ProcessSignal::Int) => Ok(S::Int),
+        Ok(pb::ProcessSignal::Stop) => Ok(S::Stop),
+        Ok(pb::ProcessSignal::Cont) => Ok(S::Cont),
+        Ok(pb::ProcessSignal::Usr1) => Ok(S::Usr1),
+        Ok(pb::ProcessSignal::Usr2) => Ok(S::Usr2),
+        _ => Err(Status::invalid_argument("signal must be set")),
+    }
+}
+
+fn process_to_pb(row: &super::ProcessRow) -> pb::Process {
+    let p = &row.info;
+    pb::Process {
+        pid: p.pid,
+        ppid: p.ppid,
+        name: p.name.clone(),
+        command: p.command.clone(),
+        uid: p.uid,
+        user: p.user.clone(),
+        state: p.state.clone(),
+        cpu_percent: p.cpu_percent,
+        rss_bytes: p.rss_bytes,
+        virtual_bytes: p.virtual_bytes,
+        threads: p.threads,
+        nice: p.nice,
+        started_at: p.started_at,
+        start_ticks: p.start_ticks,
+        kernel_thread: p.kernel_thread,
+        container_id: p.container_id.clone(),
+        container_name: row.container_name.clone(),
+        app_id: row.app_id.clone(),
+        app_uuid: row.app_uuid.clone(),
+        protected_reason: p.protected_reason.map(str::to_string),
     }
 }
 
@@ -713,6 +811,62 @@ impl AppService for Grpc {
             .await
             .map_err(to_status)?;
         Ok(Response::new(disk_to_pb(&usage)))
+    }
+
+    async fn get_app_image(
+        &self,
+        request: Request<pb::GetAppImageRequest>,
+    ) -> Result<Response<pb::GetAppImageResponse>, Status> {
+        use crate::daemon::pkg::image::ImageState;
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let status = self
+            .0
+            .app_image(ctx, req.id, req.check_remote)
+            .await
+            .map_err(to_status)?;
+        let Some(status) = status else {
+            return Ok(Response::new(pb::GetAppImageResponse::default()));
+        };
+        let state = match status.state {
+            ImageState::UpToDate => pb::ImageUpdateState::UpToDate,
+            ImageState::UpdateAvailable => pb::ImageUpdateState::UpdateAvailable,
+            ImageState::RestartRequired => pb::ImageUpdateState::RestartRequired,
+            ImageState::Unknown => pb::ImageUpdateState::Unknown,
+        };
+        Ok(Response::new(pb::GetAppImageResponse {
+            image: Some(status.image),
+            tag: status.tag,
+            built_locally: status.built_locally,
+            repullable: status.repullable,
+            image_id: status.image_id,
+            digest: status.digest,
+            version: status.version,
+            created: status.created,
+            running_image_id: status.running_image_id,
+            remote_digest: status.remote_digest,
+            remote_error: status.remote_error,
+            state: state as i32,
+        }))
+    }
+
+    async fn repull_app(
+        &self,
+        request: Request<pb::RepullAppRequest>,
+    ) -> Result<Response<pb::RepullAppResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let (outcome, restarted) = self
+            .0
+            .repull_app(ctx, request.into_inner().id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RepullAppResponse {
+            image: outcome.image,
+            image_id: outcome.image_id,
+            previous_image_id: outcome.previous_image_id,
+            updated: outcome.changed,
+            restarted,
+        }))
     }
 
     async fn install_app(

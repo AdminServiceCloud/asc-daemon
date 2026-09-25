@@ -66,6 +66,8 @@ pub const CAPABILITIES: &[&str] = &[
     "docker.control",
     "backups",
     "schedules",
+    "processes",
+    "app.repull",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -591,6 +593,29 @@ fn prune_build_cache_target(state: &ApiState, dry_run: bool) -> Result<PruneDock
     })
 }
 
+/// One row of [`ApiState::list_processes`] (DMN-119): the `/proc` reading
+/// plus what only Docker and the app store can say about it.
+pub struct ProcessRow {
+    pub info: crate::daemon::monitor::processes::ProcessInfo,
+    pub container_name: Option<String>,
+    pub app_id: Option<String>,
+    pub app_uuid: Option<String>,
+}
+
+/// [`ApiState::list_processes`]'s result: the rows plus host totals.
+pub struct ProcessListRow {
+    pub processes: Vec<ProcessRow>,
+    pub memory_total_bytes: u64,
+    pub cpu_count: u32,
+}
+
+/// A container as [`ApiState::list_processes`] attributes it.
+struct ProcessContainer {
+    name: String,
+    app_id: Option<String>,
+    app_uuid: Option<String>,
+}
+
 /// One row of [`ApiState::listening_ports`] (DMN-103): a real host socket,
 /// or a declared-but-unbound port of a stopped app.
 pub struct ListeningPortRow {
@@ -872,6 +897,48 @@ impl ApiState {
             let meta = s.manager.get_authorized(&ctx, &id)?;
             let usage = crate::daemon::apps::disk::usage(&s.config, s.manager.store(), &meta)?;
             Ok((meta, usage))
+        })
+        .await
+    }
+
+    /// Image freshness of a Docker app (DMN-120): reference, version, local
+    /// vs registry digest, and whether the container runs the local image.
+    /// `Ok(None)` for other runtimes.
+    pub async fn app_image(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        check_remote: bool,
+    ) -> Result<Option<pkg::image::ImageStatus>> {
+        self.blocking(move |s| {
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let dir = s.manager.store().app_dir(&meta.id)?;
+            pkg::image::status(&s.config, &meta, &dir, check_remote)
+        })
+        .await
+    }
+
+    /// Re-pull a Docker app's `latest` image (DMN-120) and, when the pull
+    /// brought a new image and the app is running, restart it — the restart
+    /// recreates the container onto the new image through the settings-drift
+    /// check. A stopped app picks the image up on its next start. Returns
+    /// the pull outcome and whether the app was restarted.
+    pub async fn repull_app(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+    ) -> Result<(pkg::image::RepullOutcome, bool)> {
+        self.blocking(move |s| {
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let dir = s.manager.store().app_dir(&meta.id)?;
+            let outcome = pkg::image::repull(&s.config, &meta, &dir)?;
+            let running = s.manager.status(&ctx, &meta.id)?.state == RuntimeState::Running;
+            let restarted = outcome.changed && running;
+            if restarted {
+                s.manager.restart(&ctx, &meta.id)?;
+            }
+            info!(app = %meta.id, image = %outcome.image, changed = outcome.changed, restarted, "app image re-pulled");
+            Ok((outcome, restarted))
         })
         .await
     }
@@ -2300,6 +2367,102 @@ impl ApiState {
             }
 
             Ok(rows)
+        })
+        .await
+    }
+
+    // ── Host processes (DMN-119, see docs/english/monitoring.md) ──
+
+    /// Every process on the host (`ps`/`top`), with the Docker container a
+    /// process runs in resolved to its name and, when that container is the
+    /// runtime of an installed app (its own container or one of its compose
+    /// project), to the app. The Docker cross-reference is non-fatal, same
+    /// as [`Self::listening_ports`]: an unreachable Engine leaves the
+    /// container id without a name rather than failing the list.
+    ///
+    /// Open to any caller: the same data `ps` shows every local user.
+    pub async fn list_processes(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        include_kernel_threads: bool,
+    ) -> Result<ProcessListRow> {
+        self.blocking(move |s| {
+            let list = crate::daemon::monitor::processes::list(include_kernel_threads);
+            let mut containers: std::collections::HashMap<String, ProcessContainer> =
+                std::collections::HashMap::new();
+            if list.processes.iter().any(|p| p.container_id.is_some()) {
+                match docker::list_containers(&s.config.docker, false, false) {
+                    Ok(infos) => {
+                        let owners = s.container_owners(&ctx)?;
+                        let compose_owners = s.compose_owners(&ctx)?;
+                        for info in &infos {
+                            let owner = info
+                                .names
+                                .iter()
+                                .find_map(|name| owners.get(name.as_str()))
+                                .or_else(|| {
+                                    info.compose_project
+                                        .as_deref()
+                                        .and_then(|project| compose_owners.get(project))
+                                });
+                            containers.insert(
+                                info.id.clone(),
+                                ProcessContainer {
+                                    name: display_name(info).to_string(),
+                                    app_id: owner.map(|(id, _)| id.clone()),
+                                    app_uuid: owner.and_then(|(_, uuid)| uuid.clone()),
+                                },
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        warn!(error = %format!("{err:#}"), "cannot query docker for process attribution");
+                    }
+                }
+            }
+            let processes = list
+                .processes
+                .into_iter()
+                .map(|info| {
+                    let container = info
+                        .container_id
+                        .as_deref()
+                        .and_then(|id| containers.get(id));
+                    ProcessRow {
+                        container_name: container.map(|c| c.name.clone()),
+                        app_id: container.and_then(|c| c.app_id.clone()),
+                        app_uuid: container.and_then(|c| c.app_uuid.clone()),
+                        info,
+                    }
+                })
+                .collect();
+            Ok(ProcessListRow {
+                processes,
+                memory_total_bytes: list.memory_total_bytes,
+                cpu_count: list.cpu_count,
+            })
+        })
+        .await
+    }
+
+    /// Send `signal` to one host process (DMN-119). Root context only: the
+    /// daemon itself runs as root, and a regular user on the unix socket
+    /// must not borrow that to signal someone else's process. pid 1, the
+    /// daemon itself and kernel threads are refused; `expected_start_ticks`
+    /// guards against a pid reused since the caller listed it (see
+    /// [`crate::daemon::monitor::processes::signal`]).
+    pub async fn signal_process(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        pid: u32,
+        signal: crate::daemon::monitor::processes::Signal,
+        expected_start_ticks: Option<u64>,
+    ) -> Result<()> {
+        self.blocking(move |_| {
+            users::require_root(&ctx)?;
+            crate::daemon::monitor::processes::signal(pid, signal, expected_start_ticks)?;
+            info!(pid, signal = signal.name(), "process signalled");
+            Ok(())
         })
         .await
     }

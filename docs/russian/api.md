@@ -67,6 +67,8 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Установка из реестра или напрямую из git-URL (DMN-040); без `license_ack` репозиторий с LICENSE отвечает `409` + `license_required`, неоднозначный пакет — `409` + `ambiguous` (список кандидатов) — из них CLI строит диалог согласия / выбор источника |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | Одно приложение |
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Дисковое пространство: образ, репозиторий, данные, кастомные тома |
+| `GET /v1/apps/{id}/image` | `AppService.GetAppImage` (DMN-120) | Ссылка на образ, версия, локальный и удалённый дайджест (`?checkRemote=true`) и свежесть образа Docker-приложения; `{}` для других типов |
+| `POST /v1/apps/{id}/repull` | `AppService.RepullApp` (DMN-120) | Заново скачать образ `latest` и перезапустить запущенное приложение, если он изменился; 409 для закреплённого тега, дайджеста или локальной сборки |
 | `GET /v1/apps/{id}/ports` | — (пока только REST) | Порты, которые публикует приложение (DMN-049), из его настроек — остановленное приложение показывает, что займёт при следующем старте |
 | `POST /v1/apps/{id}/upgrade {"version"?}` | — (пока только REST) | Обновление приложения (DMN-003); без `version` — до самого свежего тега репозитория или до ветки, которую отслеживает приложение, установленное по ссылке (DMN-053). Приложение должно быть остановлено. Ответ — `{"id", "up_to_date", "from", "to"}` |
 | `POST /v1/apps/{id}/clone {"name"?}` | `AppService.CloneApp`/`CloneAppStream` (DMN-113) | Полная копия приложения под новым `<id>-N`, всегда остановленная; потоковый вариант отдаёт копирование каталога строками прогресса. REST отдаёт только нестриминговую форму — диалог клонирования на платформе использует gRPC-поток, тот же приём, что у install/upgrade. Ответ — `{"id", "name", "copied_bytes"}` |
@@ -104,6 +106,8 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |
+| `GET /v1/processes` | `ProcessService.ListProcesses` (DMN-119) | Процессы хоста (`ps`/`top`): CPU, RSS, пользователь, состояние, время старта, контейнер Docker и приложение-владелец; `?kernelThreads=true` — вместе с потоками ядра |
+| `POST /v1/processes/{pid}/signal` | `ProcessService.SignalProcess` (DMN-119) | Тело `{"signal": "term"\|"kill"\|"hup"\|"int"\|"stop"\|"cont"\|"usr1"\|"usr2", "expectedStartTicks"?: n}`; только root; 403 для pid 1/демона/потоков ядра, 404 — процесса уже нет, 409 — pid переиспользован |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Состояние токенов: вид, число живых временных, окно ротации, усечённый дайджест основного — никогда сам токен |
 | `POST /v1/system/reboot` | `SystemService.RebootSystem` | Запрашивает полную перезагрузку хоста после подтверждения вызова; только основной токен |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Выпуск временного токена (только по основному) |

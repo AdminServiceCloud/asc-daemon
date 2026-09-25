@@ -1746,7 +1746,7 @@ pub(crate) fn runtime_inputs(
 /// A missing or unreadable store is not fatal: public images must keep
 /// pulling on a host with no credentials at all, and a private one fails
 /// later with the Engine's own authorization error.
-pub(super) fn registry_auth_for(
+pub(crate) fn registry_auth_for(
     image: &str,
     app_ids: &[Option<&str>],
 ) -> Option<docker::RegistryAuth> {

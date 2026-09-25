@@ -52,6 +52,15 @@ service AppService {
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
   // Disk usage breakdown (DMN-035): image, repository, data, custom volumes.
   rpc GetAppDisk(GetAppDiskRequest) returns (GetAppDiskResponse);
+  // Image freshness of a Docker app (DMN-120): which image it runs, its
+  // version, and whether the registry serves a newer build of the tag.
+  // Empty response for non-Docker apps. Capability "app.repull".
+  rpc GetAppImage(GetAppImageRequest) returns (GetAppImageResponse);
+  // Re-pull a Docker app's mutable-tag image (`latest`) and, if the pull
+  // brought a new image and the app is running, restart it onto the new
+  // image. FAILED_PRECONDITION for a pinned tag, a digest, a locally built
+  // image or a non-Docker app.
+  rpc RepullApp(RepullAppRequest) returns (RepullAppResponse);
   // Install from the configured registries: "name" or "name@version".
   rpc InstallApp(InstallAppRequest) returns (InstallAppResponse);
   // Same install, but as a live progress feed instead of one blocking call
@@ -232,6 +241,66 @@ message GetAppDiskResponse {
   // apps-root is never published on its own, and an app-scoped file
   // manager needs this as a confinement root.
   string app_dir = 7;
+}
+
+message GetAppImageRequest {
+  string id = 1;
+  // Ask the registry for the tag's current digest (a bounded network call).
+  bool check_remote = 2;
+}
+
+enum ImageUpdateState {
+  IMAGE_UPDATE_STATE_UNSPECIFIED = 0;
+  // The local image is what the registry serves, and the container runs it.
+  IMAGE_UPDATE_STATE_UP_TO_DATE = 1;
+  // The registry serves a different image for the tag.
+  IMAGE_UPDATE_STATE_UPDATE_AVAILABLE = 2;
+  // A newer image is already on the host; a restart applies it.
+  IMAGE_UPDATE_STATE_RESTART_REQUIRED = 3;
+  // Locally built, not pulled yet, or the registry could not be asked.
+  IMAGE_UPDATE_STATE_UNKNOWN = 4;
+}
+
+message GetAppImageResponse {
+  // Effective image reference; absent for a non-Docker app.
+  optional string image = 1;
+  // Absent for a digest reference.
+  optional string tag = 2;
+  // Built from the package's Dockerfile rather than pulled (DMN-050).
+  bool built_locally = 3;
+  // RepullApp applies: a registry image under the `latest` tag.
+  bool repullable = 4;
+  // sha256 id the tag points at on the host; absent when not pulled.
+  optional string image_id = 5;
+  // Registry manifest digest of the local image.
+  optional string digest = 6;
+  // org.opencontainers.image.version label, else a non-latest tag.
+  optional string version = 7;
+  // Unix seconds the image was built.
+  optional int64 created = 8;
+  // Id of the image the container was created from.
+  optional string running_image_id = 9;
+  // What the registry serves for the tag now (check_remote only).
+  optional string remote_digest = 10;
+  // Why the registry could not be asked.
+  optional string remote_error = 11;
+  ImageUpdateState state = 12;
+}
+
+message RepullAppRequest {
+  string id = 1;
+}
+
+message RepullAppResponse {
+  string image = 1;
+  // Id the tag points at after the pull.
+  string image_id = 2;
+  // Id the container ran before.
+  optional string previous_image_id = 3;
+  // The pull brought a different image.
+  bool updated = 4;
+  // The app was running and has been restarted onto the new image.
+  bool restarted = 5;
 }
 
 message AppVolumeUsage {
@@ -931,6 +1000,100 @@ message ListeningPort {
   // The daemon'''s own API listener ([api] listen / acme_http_listen).
   bool is_daemon = 13;
 }
+
+// Host processes (DMN-119): the inventory `ps`/`top` would show, read from
+// /proc/<pid>/{stat,status,cmdline,cgroup}, and signal delivery. Advertised
+// as the "processes" capability. REST mirror: GET /v1/processes,
+// POST /v1/processes/{pid}/signal.
+service ProcessService {
+  // Every process on the host. Open to any caller — it is what `ps` shows
+  // every local user. CPU usage is a delta against the previous call (from
+  // anyone) when that was 0.2-60 s ago; a cold call samples for ~300 ms.
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+  // Deliver a signal to one process. Root context only (on the unix socket;
+  // the TCP listener always is). pid 1, the daemon itself and kernel threads
+  // are refused with PERMISSION_DENIED; an unknown pid is NOT_FOUND; a pid
+  // whose start time no longer matches expected_start_ticks (it exited and
+  // the number was reused) is FAILED_PRECONDITION.
+  rpc SignalProcess(SignalProcessRequest) returns (SignalProcessResponse);
+}
+
+message ListProcessesRequest {
+  // Kernel threads (kthreadd and its children) are left out by default:
+  // there are hundreds of them and nothing to do with them.
+  bool include_kernel_threads = 1;
+}
+
+message ListProcessesResponse {
+  repeated Process processes = 1;
+  // MemTotal, so a caller can render rss as a share of the host.
+  uint64 memory_total_bytes = 2;
+  // Logical CPUs: the ceiling of cpu_percent is 100 * cpu_count.
+  uint32 cpu_count = 3;
+}
+
+message Process {
+  uint32 pid = 1;
+  uint32 ppid = 2;
+  // comm — at most 15 bytes, as the kernel truncates it.
+  string name = 3;
+  // argv joined with spaces, cut at 4096 characters; empty for kernel
+  // threads and zombies.
+  string command = 4;
+  // Effective uid and its account name (the number when it has no passwd
+  // entry).
+  uint32 uid = 5;
+  string user = 6;
+  // Single-letter kernel state: R running, S sleeping, D uninterruptible,
+  // Z zombie, T stopped, t traced, I idle, X dead.
+  string state = 7;
+  // top-style: 100 = one full core, so a multi-threaded process can exceed
+  // 100 (ceiling 100 * cpu_count).
+  double cpu_percent = 8;
+  uint64 rss_bytes = 9;
+  uint64 virtual_bytes = 10;
+  uint32 threads = 11;
+  int32 nice = 12;
+  // Unix seconds; 0 when the boot time could not be read.
+  int64 started_at = 13;
+  // Raw starttime (clock ticks since boot): pass it back as
+  // SignalProcessRequest.expected_start_ticks.
+  uint64 start_ticks = 14;
+  bool kernel_thread = 15;
+  // The Docker container the process runs in (from its cgroup), and that
+  // container's name when the Engine could be reached.
+  optional string container_id = 16;
+  optional string container_name = 17;
+  // Set when that container is the runtime of an installed ASC app.
+  optional string app_id = 18;
+  optional string app_uuid = 19;
+  // SignalProcess refuses this process (pid 1, the daemon, a kernel thread);
+  // the reason is human-readable.
+  optional string protected_reason = 20;
+}
+
+enum ProcessSignal {
+  PROCESS_SIGNAL_UNSPECIFIED = 0;
+  PROCESS_SIGNAL_TERM = 1;
+  PROCESS_SIGNAL_KILL = 2;
+  PROCESS_SIGNAL_HUP = 3;
+  PROCESS_SIGNAL_INT = 4;
+  PROCESS_SIGNAL_STOP = 5;
+  PROCESS_SIGNAL_CONT = 6;
+  PROCESS_SIGNAL_USR1 = 7;
+  PROCESS_SIGNAL_USR2 = 8;
+}
+
+message SignalProcessRequest {
+  uint32 pid = 1;
+  ProcessSignal signal = 2;
+  // Process.start_ticks as the caller saw it; strongly recommended — without
+  // it a pid reused since the list was rendered gets the signal.
+  optional uint64 expected_start_ticks = 3;
+}
+
+message SignalProcessResponse {}
+
 
 message SystemMetrics {
   // Unix seconds when the sample was taken.

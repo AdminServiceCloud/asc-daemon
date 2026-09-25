@@ -33,6 +33,8 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "docker.control",
         "backups",
         "schedules",
+        "processes",
+        "app.repull",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()
@@ -315,6 +317,79 @@ mod rest {
         assert_eq!(status, StatusCode::OK);
         let interfaces = body["interfaces"].as_array().unwrap();
         assert!(interfaces.iter().any(|i| i["is_loopback"] == true));
+    }
+
+    #[tokio::test]
+    async fn processes_list_and_signal_rest() {
+        let (state, _ws) = test_state();
+        let (status, body) = call(&state, "GET", "/v1/processes", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["cpuCount"].as_u64().unwrap() >= 1);
+        let me = body["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["pid"] == std::process::id())
+            .expect("own pid listed")
+            .clone();
+        assert!(me["protectedReason"].is_string());
+
+        // The daemon itself is never signalled through the API.
+        let (status, body) = call(
+            &state,
+            "POST",
+            &format!("/v1/processes/{}/signal", std::process::id()),
+            Some(TOKEN),
+            Some(serde_json::json!({ "signal": "term" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, _) = call(
+            &state,
+            "POST",
+            "/v1/processes/1/signal",
+            Some(TOKEN),
+            Some(serde_json::json!({ "signal": "segv" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // A real child: a stale start time is refused, the right one lands.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (_, body) = call(&state, "GET", "/v1/processes", Some(TOKEN), None).await;
+        let ticks = body["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["pid"] == pid)
+            .expect("child listed")["startTicks"]
+            .as_u64()
+            .unwrap();
+        let uri = format!("/v1/processes/{pid}/signal");
+        let (status, _) = call(
+            &state,
+            "POST",
+            &uri,
+            Some(TOKEN),
+            Some(serde_json::json!({ "signal": "kill", "expectedStartTicks": ticks + 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = call(
+            &state,
+            "POST",
+            &uri,
+            Some(TOKEN),
+            Some(serde_json::json!({ "signal": "kill", "expectedStartTicks": ticks })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!child.wait().unwrap().success());
     }
 
     #[tokio::test]

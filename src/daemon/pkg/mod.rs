@@ -7,6 +7,7 @@ pub mod compose;
 pub mod detect;
 pub mod dockerfile;
 pub mod gitref;
+pub mod image;
 pub mod inspect;
 pub mod install;
 pub mod manifest;

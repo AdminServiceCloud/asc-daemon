@@ -304,6 +304,10 @@ pub struct AppliedConfig {
     pub memory: i64,
     /// `Config.Cmd` — a `start_command` override lands here.
     pub cmd: Option<Vec<String>>,
+    /// `Image` — the id (`sha256:…`) of the image the container was
+    /// created from. A re-pulled tag (DMN-120) moves the tag to a new id
+    /// while the container keeps the old one: that difference is drift.
+    pub image: Option<String>,
 }
 
 /// Inspect the daemon-managed configuration of a container. `None` when the
@@ -333,6 +337,7 @@ pub fn container_applied(cfg: &DockerConfig, container: &str) -> Result<Option<A
                     nano_cpus: host.nano_cpus.unwrap_or(0),
                     memory: host.memory.unwrap_or(0),
                     cmd: config.cmd,
+                    image: info.image,
                 }))
             }
             Err(e) if status_of(&e) == Some(404) => Ok(None),
@@ -951,6 +956,101 @@ pub fn ensure_pulled(
             Err(e) => Err(friendly(cfg, e)),
         }
     })
+}
+
+/// What the host knows about one local image (DMN-120).
+#[derive(Debug, Clone)]
+pub struct LocalImage {
+    /// `sha256:…` image id.
+    pub id: String,
+    /// `repo@sha256:…` — the registry manifest digests this image was
+    /// pulled as; empty for a locally built image.
+    pub repo_digests: Vec<String>,
+    /// Unix seconds.
+    pub created: Option<i64>,
+    pub labels: HashMap<String, String>,
+}
+
+/// Inspect a local image. `None` when it is not on the host (404).
+pub fn inspect_local_image(cfg: &DockerConfig, image: &str) -> Result<Option<LocalImage>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_image(image).await {
+            Ok(info) => Ok(Some(LocalImage {
+                id: info.id.unwrap_or_default(),
+                repo_digests: info.repo_digests.unwrap_or_default(),
+                created: info.created.map(|d| d.unix_timestamp()),
+                labels: info.config.and_then(|c| c.labels).unwrap_or_default(),
+            })),
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// How long [`registry_digest`] may wait on a registry: it is a UI status
+/// probe, and a slow or unreachable registry must not hang the page.
+const REGISTRY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The manifest digest `image` (a tag reference) currently resolves to on
+/// its registry — `GET /distribution/{name}/json`, no layers downloaded.
+/// For a multi-arch image this is the index digest, the same value the
+/// Engine records in `RepoDigests` after a pull by tag, so the two compare
+/// directly.
+pub fn registry_digest(
+    cfg: &DockerConfig,
+    image: &str,
+    auth: Option<&RegistryAuth>,
+) -> Result<String> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let (from_image, tag) = image_ref(image);
+        let reference = match tag {
+            Some(tag) => format!("{from_image}:{tag}"),
+            None => from_image.to_string(),
+        };
+        let probe =
+            docker.inspect_registry_image(&reference, auth.map(RegistryAuth::to_credentials));
+        match tokio::time::timeout(REGISTRY_PROBE_TIMEOUT, probe).await {
+            Ok(Ok(info)) => info
+                .descriptor
+                .digest
+                .ok_or_else(|| anyhow!("registry returned no digest for {image}")),
+            Ok(Err(e)) => Err(friendly(cfg, e)),
+            Err(_) => Err(anyhow!("registry did not answer for {image} in time")),
+        }
+    })
+}
+
+/// Pull `image` unconditionally — unlike [`ensure_pulled`], an image already
+/// on the host is refreshed from its registry (`docker pull`). Used by the
+/// repull of a mutable tag (DMN-120).
+pub fn pull_image(cfg: &DockerConfig, image: &str, auth: Option<&RegistryAuth>) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        pull(&docker, image, auth, None)
+            .await
+            .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image)))
+    })
+}
+
+/// The id of the image a container was created from; `None` when the
+/// container does not exist.
+pub fn container_image_id(cfg: &DockerConfig, container: &str) -> Result<Option<String>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_container(container, None).await {
+            Ok(info) => Ok(info.image),
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// Split a reference into `(repository, tag)` the way the Engine does —
+/// `None` tag for a digest reference; a bare name gets `latest`.
+pub fn split_image_ref(image: &str) -> (&str, Option<&str>) {
+    image_ref(image)
 }
 
 /// The numeric `(uid, gid)` the image's default `USER` runs as — `None` for

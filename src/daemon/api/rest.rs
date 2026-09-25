@@ -34,6 +34,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         // docs/monitoring.md — distinct from /v1/ports above, which reports
         // what apps *declare*, not what is actually bound.
         .route("/v1/ports/listening", get(listening_ports))
+        // Host processes and signals (DMN-119).
+        .route("/v1/processes", get(list_processes))
+        .route("/v1/processes/{pid}/signal", post(signal_process))
         .route("/v1/apps", get(list_apps).post(install_app))
         // Apps-wide reports (DMN-053): the per-app routes below answer for
         // one app, these for every app the caller may see — the figures the
@@ -43,6 +46,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/stats", get(stats))
         .route("/v1/apps/{id}", get(get_app).delete(remove_app))
         .route("/v1/apps/{id}/disk", get(app_disk))
+        // Image freshness and repull of a Docker app (DMN-120).
+        .route("/v1/apps/{id}/image", get(app_image))
+        .route("/v1/apps/{id}/repull", post(repull_app))
         .route("/v1/apps/{id}/ports", get(app_ports))
         .route("/v1/apps/{id}/upgrade", post(upgrade_app))
         // Full copy of an installed app under a new id (DMN-019/DMN-113) —
@@ -245,6 +251,33 @@ impl IntoResponse for ApiError {
                         "build": choice.build,
                     },
                 })),
+            )
+                .into_response();
+        }
+        // Typed process errors (DMN-119), same mapping as the gRPC
+        // `to_status` arm.
+        if let Some(err) = self
+            .0
+            .downcast_ref::<crate::daemon::monitor::processes::ProcessError>()
+        {
+            use crate::daemon::monitor::processes::ProcessError as P;
+            let status = match err {
+                P::NotFound(_) => StatusCode::NOT_FOUND,
+                P::Replaced(_) => StatusCode::CONFLICT,
+                P::Protected { .. } | P::PermissionDenied(_) => StatusCode::FORBIDDEN,
+                P::InvalidPid(_) => StatusCode::BAD_REQUEST,
+                P::Io(..) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+        if self
+            .0
+            .downcast_ref::<crate::daemon::pkg::image::NotRepullable>()
+            .is_some()
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": msg })),
             )
                 .into_response();
         }
@@ -511,6 +544,84 @@ async fn listening_ports(
         })).collect::<Vec<_>>(),
     }))
     .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessesQuery {
+    #[serde(default)]
+    kernel_threads: bool,
+}
+
+/// Host processes (DMN-119), see `ApiState::list_processes`.
+async fn list_processes(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Query(query): Query<ProcessesQuery>,
+) -> Result<Response, ApiError> {
+    let list = state.list_processes(ctx, query.kernel_threads).await?;
+    Ok(Json(serde_json::json!({
+        "memoryTotalBytes": list.memory_total_bytes,
+        "cpuCount": list.cpu_count,
+        "processes": list.processes.iter().map(|row| {
+            let p = &row.info;
+            serde_json::json!({
+                "pid": p.pid,
+                "ppid": p.ppid,
+                "name": p.name,
+                "command": p.command,
+                "uid": p.uid,
+                "user": p.user,
+                "state": p.state,
+                "cpuPercent": p.cpu_percent,
+                "rssBytes": p.rss_bytes,
+                "virtualBytes": p.virtual_bytes,
+                "threads": p.threads,
+                "nice": p.nice,
+                "startedAt": p.started_at,
+                "startTicks": p.start_ticks,
+                "kernelThread": p.kernel_thread,
+                "containerId": p.container_id,
+                "containerName": row.container_name,
+                "appId": row.app_id,
+                "appUuid": row.app_uuid,
+                "protectedReason": p.protected_reason,
+            })
+        }).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// Body of `POST /v1/processes/{pid}/signal` (DMN-119).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignalProcessBody {
+    /// "term" | "kill" | "hup" | "int" | "stop" | "cont" | "usr1" | "usr2".
+    signal: String,
+    #[serde(default)]
+    expected_start_ticks: Option<u64>,
+}
+
+/// Deliver a signal to one host process. Root context only.
+async fn signal_process(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(pid): Path<u32>,
+    Json(body): Json<SignalProcessBody>,
+) -> Result<Response, ApiError> {
+    let Some(signal) = crate::daemon::monitor::processes::Signal::from_wire(&body.signal) else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "signal must be 'term', 'kill', 'hup', 'int', 'stop', 'cont', 'usr1' or 'usr2'",
+            })),
+        )
+            .into_response());
+    };
+    state
+        .signal_process(ctx, pid, signal, body.expected_start_ticks)
+        .await?;
+    Ok(Json(serde_json::json!({})).into_response())
 }
 
 async fn system_metrics(State(state): State<Arc<ApiState>>) -> Response {
@@ -1160,6 +1271,64 @@ async fn stop_app(
     let outcome = state.stop(ctx, id).await?;
     Ok(Json(serde_json::json!({
         "already_stopped": outcome == Outcome::AlreadyInState
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppImageQuery {
+    #[serde(default)]
+    check_remote: bool,
+}
+
+/// Image freshness of a Docker app (DMN-120); `{}` for other runtimes.
+async fn app_image(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    Query(query): Query<AppImageQuery>,
+) -> Result<Response, ApiError> {
+    use crate::daemon::pkg::image::ImageState;
+    let Some(status) = state.app_image(ctx, id, query.check_remote).await? else {
+        return Ok(Json(serde_json::json!({})).into_response());
+    };
+    let state_name = match status.state {
+        ImageState::UpToDate => "up_to_date",
+        ImageState::UpdateAvailable => "update_available",
+        ImageState::RestartRequired => "restart_required",
+        ImageState::Unknown => "unknown",
+    };
+    Ok(Json(serde_json::json!({
+        "image": status.image,
+        "tag": status.tag,
+        "builtLocally": status.built_locally,
+        "repullable": status.repullable,
+        "imageId": status.image_id,
+        "digest": status.digest,
+        "version": status.version,
+        "created": status.created,
+        "runningImageId": status.running_image_id,
+        "remoteDigest": status.remote_digest,
+        "remoteError": status.remote_error,
+        "state": state_name,
+    }))
+    .into_response())
+}
+
+/// Re-pull a Docker app's `latest` image and restart it when it changed.
+async fn repull_app(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (outcome, restarted) = state.repull_app(ctx, id).await?;
+    Ok(Json(serde_json::json!({
+        "image": outcome.image,
+        "imageId": outcome.image_id,
+        "previousImageId": outcome.previous_image_id,
+        "updated": outcome.changed,
+        "restarted": restarted,
     }))
     .into_response())
 }

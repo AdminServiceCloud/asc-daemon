@@ -67,6 +67,8 @@ recognizes keeps working against a newer daemon.
 | `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Install from a registry or directly from a git URL (DMN-040); without `license_ack` a repository shipping a LICENSE fails with `409` + `license_required` payload, an ambiguous package with `409` + `ambiguous` (candidate list) — the CLI renders its consent prompt / source pick from these |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | A single application |
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Disk usage: image, repository, data, custom volumes |
+| `GET /v1/apps/{id}/image` | `AppService.GetAppImage` (DMN-120) | Image reference, version, local vs registry digest (`?checkRemote=true`) and freshness state of a Docker app; `{}` for other runtimes |
+| `POST /v1/apps/{id}/repull` | `AppService.RepullApp` (DMN-120) | Pull the `latest` image afresh and restart a running app if it changed; 409 for a pinned tag, a digest or a locally built image |
 | `GET /v1/apps/{id}/ports` | — (REST only for now) | The ports the app publishes (DMN-049), resolved from its settings — a stopped app reports what it will bind next start |
 | `POST /v1/apps/{id}/upgrade {"version"?}` | — (REST only for now) | Upgrade the app (DMN-003); without `version` — to the repository's newest tag, or the branch it tracks for a direct repository install (DMN-053). The app must be stopped. Answers `{"id", "up_to_date", "from", "to"}` |
 | `POST /v1/apps/{id}/clone {"name"?}` | `AppService.CloneApp`/`CloneAppStream` (DMN-113) | Full copy of the app under a new `<id>-N`, always stopped; the stream sibling reports the directory copy as progress lines. REST exposes only the unary form — the platform's clone dialog uses the gRPC stream, same split as install/upgrade. Answers `{"id", "name", "copied_bytes"}` |
@@ -104,6 +106,8 @@ recognizes keeps working against a newer daemon.
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Current system metrics (503 until the first sample) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | Metrics history from the ring buffer, oldest → newest |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Real host listening ports parsed from `/proc/net/*`, merged with Docker/app attribution — distinct from `GET /v1/ports` above, which reports what apps *declare* |
+| `GET /v1/processes` | `ProcessService.ListProcesses` (DMN-119) | Host processes (`ps`/`top`): CPU, RSS, user, state, start time, Docker container and owning app; `?kernelThreads=true` includes kernel threads |
+| `POST /v1/processes/{pid}/signal` | `ProcessService.SignalProcess` (DMN-119) | Body `{"signal": "term"\|"kill"\|"hup"\|"int"\|"stop"\|"cont"\|"usr1"\|"usr2", "expectedStartTicks"?: n}`; root only; 403 for pid 1/the daemon/kernel threads, 404 for a gone pid, 409 when the pid was reused |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Token state: kind, live access tokens, rotation window, the primary's truncated digest — never token material |
 | `POST /v1/system/reboot` | `SystemService.RebootSystem` | Requests a full host reboot after acknowledging the caller; primary token only |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Mint a short-lived access token (primary only) |

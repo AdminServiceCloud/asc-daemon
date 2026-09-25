@@ -5,6 +5,7 @@
 
 pub mod gpu;
 pub mod network;
+pub mod processes;
 pub mod sockets;
 pub mod system;
 

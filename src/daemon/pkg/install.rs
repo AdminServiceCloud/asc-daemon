@@ -278,6 +278,7 @@ pub fn install(
         // A registry entry always carries a real asc.yaml — only a direct
         // git install can point at a bare Dockerfile instead.
         install_method: None,
+        stack: None,
     };
     let origin = Origin::Registry(&resolved);
     if resolved.entry.package_type == "stack" {
@@ -344,6 +345,13 @@ struct InstallOpts<'a> {
     /// [`InstallOpts`] (a stack app always has its own `asc.yaml`, that being
     /// what makes it a member of the stack in the first place).
     install_method: Option<detect::InstallMethod>,
+    /// The stack a member is installed as part of (DMN-121) — set by
+    /// [`install_stack`] only, and read only for a direct git install: a
+    /// registry member already names its stack through the registry entry.
+    /// Recorded as `meta.package = "<stack>/<app>"`, so the platform and
+    /// `asc stacks` group a git-installed stack the same way as one from a
+    /// registry.
+    stack: Option<&'a str>,
 }
 
 /// Validate a user-chosen app name (DMN-024): printable, sane length, and
@@ -540,6 +548,7 @@ fn install_stack(
             // a stack member — regardless of what the whole-stack install
             // was requested as.
             install_method: None,
+            stack: Some(package),
             ..opts
         };
         let report = install_one(config, ctx, origin, &id, Some(&app.name), app_opts)?;
@@ -778,8 +787,13 @@ fn install_one(
                 None => None,
             },
             // Nothing to re-resolve in a registry: `source` and `repo_path`
-            // are all an upgrade of a direct install reads.
-            Origin::Git { .. } => None,
+            // are all an upgrade of a direct install reads. A stack member
+            // still records its stack (DMN-121) — only for grouping, since
+            // upgrade and settings check `source`/`repo_path` first.
+            Origin::Git { .. } => match (stack_app, opts.stack) {
+                (Some(app), Some(stack)) => Some(format!("{stack}/{app}")),
+                _ => None,
+            },
         },
         install_method,
         desired_state: DesiredState::Stopped,
@@ -1001,6 +1015,7 @@ pub fn install_from_git(
         force,
         report,
         install_method,
+        stack: None,
     };
     let base = install_from_git_app_base(url, path)?;
 

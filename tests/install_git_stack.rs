@@ -121,7 +121,10 @@ apps:
     let meta = store.get("demo-server").unwrap().expect("meta.json");
     assert_eq!(meta.source.as_deref(), Some(format!("git:{url}").as_str()));
     assert_eq!(meta.repo_path.as_deref(), Some("gameservers/demo/server"));
-    assert_eq!(meta.package, None, "no registry entry for a direct install");
+    // The stack is still recorded (DMN-121), named like the stack install
+    // itself — after the manifest subdirectory — so `asc stacks` and the
+    // platform group it; upgrade reads `source`/`repo_path` before it.
+    assert_eq!(meta.package.as_deref(), Some("demo/server"));
     assert!(
         store
             .app_dir("demo-server")

@@ -2315,3 +2315,384 @@ message ListScheduleRunsResponse {
   // Newest first.
   repeated ScheduleRunRecord runs = 1;
 }
+
+// ── Web server (DMN-122..DMN-125) ───────────────────────────────────────────
+//
+// The node's own web server (nginx) and the sites it serves: reverse proxy to
+// apps or addresses, Let's Encrypt issued by the daemon, provided certificates,
+// Cloudflare real IP. Root-only: every call from a non-root unix-socket peer
+// is refused. See docs/english/webserver.md.
+service WebServerService {
+  rpc GetWebServer(GetWebServerRequest) returns (GetWebServerResponse);
+  // Installs nginx (or adopts the one already on the host) and applies the
+  // configuration; streams human progress lines, the last event carries the
+  // final state or the error.
+  rpc InstallWebServerStream(InstallWebServerRequest) returns (stream InstallWebServerEvent);
+  rpc UninstallWebServer(UninstallWebServerRequest) returns (UninstallWebServerResponse);
+  // Saves the settings and applies them. A configuration nginx refuses is
+  // not saved: the error carries the `nginx -t` output.
+  rpc UpdateWebServerSettings(UpdateWebServerSettingsRequest) returns (UpdateWebServerSettingsResponse);
+  rpc TestWebServerConfig(TestWebServerConfigRequest) returns (TestWebServerConfigResponse);
+  rpc ReloadWebServer(ReloadWebServerRequest) returns (ReloadWebServerResponse);
+  rpc GetWebServerFiles(GetWebServerFilesRequest) returns (GetWebServerFilesResponse);
+
+  rpc ListSites(ListSitesRequest) returns (ListSitesResponse);
+  // Replaces every site carrying `managed_by` with `sites` and applies.
+  // Sites with another marker (or local ones) are left alone.
+  rpc ReplaceSites(ReplaceSitesRequest) returns (ReplaceSitesResponse);
+  rpc UpsertSite(UpsertSiteRequest) returns (UpsertSiteResponse);
+  rpc RemoveSite(RemoveSiteRequest) returns (RemoveSiteResponse);
+  // Renders one site's configuration without storing or applying it.
+  rpc RenderSite(RenderSiteRequest) returns (RenderSiteResponse);
+  // Forces a Let's Encrypt order for the site now, ignoring backoff.
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+  // Whether this node can open a TCP connection to an address — checks that
+  // a load balancer member on another node is reachable (DMN-126).
+  rpc ProbeTcp(ProbeTcpRequest) returns (ProbeTcpResponse);
+}
+
+enum WebServerMode {
+  WEB_SERVER_MODE_UNSPECIFIED = 0;
+  // Distribution package / nginx.org repository under systemd.
+  WEB_SERVER_MODE_SYSTEM = 1;
+  // `asc-webserver` container, host network.
+  WEB_SERVER_MODE_DOCKER = 2;
+}
+
+message WebServerSettings {
+  // "auto" or a number.
+  string worker_processes = 1;
+  uint32 worker_connections = 2;
+  uint32 keepalive_timeout_seconds = 3;
+  // nginx size syntax: "64m", "1g"; "0" disables the check.
+  string client_max_body_size = 4;
+  bool gzip = 5;
+  // 1..9
+  uint32 gzip_level = 6;
+  bool server_tokens = 7;
+  bool http2 = 8;
+  // "TLSv1.2", "TLSv1.3"
+  repeated string tls_protocols = 9;
+  bool hsts = 10;
+  // Trust Cloudflare for every site (http-level real_ip).
+  bool cloudflare_real_ip = 11;
+  bool access_log = 12;
+  string acme_email = 13;
+  // Empty — Let's Encrypt production.
+  string acme_directory = 14;
+  // Pasted verbatim into the main and http contexts.
+  string custom_main = 15;
+  string custom_http = 16;
+  // Docker mode only; empty — nginx:stable-alpine.
+  string image = 17;
+}
+
+message GetWebServerRequest {}
+
+message GetWebServerResponse {
+  bool installed = 1;
+  WebServerMode mode = 2;
+  // "nginx"
+  string engine = 3;
+  // "1.28.0"; empty when unknown.
+  string version = 4;
+  bool running = 5;
+  // The daemon adopted an nginx it did not install.
+  bool adopted = 6;
+  WebServerSettings settings = 7;
+  // The last failed apply (`nginx -t` output); empty after a good one.
+  string last_error = 8;
+  int64 last_applied_unix = 9;
+  // When the Cloudflare ranges were last refreshed (0 — embedded list).
+  int64 cloudflare_updated_unix = 10;
+  uint32 site_count = 11;
+  // Host facts the UI gates on: an nginx binary already present (a system
+  // install would adopt it) and whether Docker is reachable.
+  bool nginx_present = 12;
+  bool docker_available = 13;
+}
+
+message InstallWebServerRequest {
+  WebServerMode mode = 1;
+}
+
+message InstallWebServerEvent {
+  oneof event {
+    string log = 1;
+    GetWebServerResponse done = 2;
+    string error = 3;
+  }
+}
+
+message UninstallWebServerRequest {
+  // Also delete generated configs, certificates and the site list.
+  bool purge = 1;
+}
+
+message UninstallWebServerResponse {}
+
+message UpdateWebServerSettingsRequest {
+  WebServerSettings settings = 1;
+}
+
+message UpdateWebServerSettingsResponse {
+  GetWebServerResponse web_server = 1;
+}
+
+message TestWebServerConfigRequest {}
+
+message TestWebServerConfigResponse {
+  bool ok = 1;
+  string output = 2;
+}
+
+message ReloadWebServerRequest {}
+
+message ReloadWebServerResponse {}
+
+message GetWebServerFilesRequest {}
+
+message WebServerFile {
+  string path = 1;
+  string content = 2;
+}
+
+message GetWebServerFilesResponse {
+  repeated WebServerFile files = 1;
+}
+
+enum SiteBalance {
+  SITE_BALANCE_UNSPECIFIED = 0;
+  SITE_BALANCE_ROUND_ROBIN = 1;
+  SITE_BALANCE_LEAST_CONN = 2;
+  SITE_BALANCE_IP_HASH = 3;
+  SITE_BALANCE_HASH = 4;
+}
+
+message SiteUpstreamApp {
+  // App id, custom name or uuid.
+  string app = 1;
+  // Container-side port; resolved to the published host port.
+  uint32 port = 2;
+}
+
+message SiteUpstreamServer {
+  oneof target {
+    SiteUpstreamApp app = 1;
+    // "host:port"
+    string address = 2;
+  }
+  // 0 — 1.
+  uint32 weight = 3;
+  bool backup = 4;
+  uint32 max_fails = 5;
+  uint32 fail_timeout_seconds = 6;
+  // Out of rotation (drain).
+  bool down = 7;
+}
+
+enum SiteHealthCheckType {
+  SITE_HEALTH_CHECK_TYPE_UNSPECIFIED = 0;
+  SITE_HEALTH_CHECK_TYPE_OFF = 1;
+  SITE_HEALTH_CHECK_TYPE_TCP = 2;
+  SITE_HEALTH_CHECK_TYPE_HTTP = 3;
+}
+
+// Active health checks of the upstream servers (DMN-126): the daemon probes
+// every server and takes a failing one out of rotation (`down`) until it
+// passes again. Unset or OFF — nginx's passive max_fails only.
+message SiteHealthCheck {
+  SiteHealthCheckType type = 1;
+  // HTTP: request path, "/health".
+  string path = 2;
+  // HTTP: expected status; 0 — any 2xx or 3xx.
+  uint32 expected_status = 3;
+  // 0 — defaults: every 5 s, 2 s timeout, 3 failures down, 2 passes up.
+  uint32 interval_seconds = 4;
+  uint32 timeout_seconds = 5;
+  uint32 fails = 6;
+  uint32 passes = 7;
+}
+
+message SiteUpstream {
+  repeated SiteUpstreamServer servers = 1;
+  SiteBalance balance = 2;
+  // For SITE_BALANCE_HASH, e.g. "$cookie_session".
+  string hash_key = 3;
+  uint32 keepalive = 4;
+  // Talk HTTPS to the upstream.
+  bool tls = 5;
+  SiteHealthCheck health_check = 6;
+}
+
+enum SiteTlsMode {
+  SITE_TLS_MODE_UNSPECIFIED = 0;
+  SITE_TLS_MODE_NONE = 1;
+  SITE_TLS_MODE_ACME = 2;
+  SITE_TLS_MODE_PROVIDED = 3;
+}
+
+message SiteTls {
+  SiteTlsMode mode = 1;
+  // PROVIDED only; write-only — never returned by ListSites.
+  string certificate_pem = 2;
+  string private_key_pem = 3;
+  bool redirect_http = 4;
+  bool hsts = 5;
+  bool http2 = 6;
+}
+
+message SiteHeader {
+  string name = 1;
+  string value = 2;
+}
+
+message SiteProxy {
+  bool websocket = 1;
+  // Empty — inherit the server default.
+  string client_max_body_size = 2;
+  uint32 connect_timeout_seconds = 3;
+  uint32 read_timeout_seconds = 4;
+  uint32 send_timeout_seconds = 5;
+  repeated SiteHeader request_headers = 6;
+  repeated SiteHeader response_headers = 7;
+  // Send the upstream its own address as Host instead of the client's.
+  bool upstream_host = 8;
+  // proxy_buffering off (streaming responses, SSE).
+  bool no_buffering = 9;
+}
+
+enum SiteRealIp {
+  SITE_REAL_IP_UNSPECIFIED = 0;
+  SITE_REAL_IP_OFF = 1;
+  SITE_REAL_IP_CLOUDFLARE = 2;
+}
+
+message Site {
+  // [a-z0-9][a-z0-9_.-]{0,63}
+  string id = 1;
+  repeated string server_names = 2;
+  optional string managed_by = 3;
+  // Kept in the list but not served.
+  bool disabled = 4;
+  SiteUpstream upstream = 5;
+  SiteTls tls = 6;
+  SiteProxy proxy = 7;
+  SiteRealIp real_ip = 8;
+  string extra_server = 9;
+  string extra_location = 10;
+  // Set — the site's whole configuration, rendered as is.
+  optional string raw_config = 11;
+  // Read-only.
+  SiteStatus status = 20;
+}
+
+enum SiteState {
+  SITE_STATE_UNSPECIFIED = 0;
+  SITE_STATE_PENDING = 1;
+  SITE_STATE_APPLIED = 2;
+  SITE_STATE_ERROR = 3;
+  SITE_STATE_DISABLED = 4;
+}
+
+enum SiteTlsState {
+  SITE_TLS_STATE_UNSPECIFIED = 0;
+  SITE_TLS_STATE_NONE = 1;
+  SITE_TLS_STATE_PENDING_DNS = 2;
+  SITE_TLS_STATE_ISSUING = 3;
+  SITE_TLS_STATE_ACTIVE = 4;
+  SITE_TLS_STATE_EXPIRING = 5;
+  SITE_TLS_STATE_ERROR = 6;
+}
+
+message SiteTlsStatus {
+  SiteTlsState state = 1;
+  int64 not_after_unix = 2;
+  string issuer = 3;
+  string last_error = 4;
+  int64 next_attempt_unix = 5;
+}
+
+// One upstream server as the health checks see it.
+message SiteUpstreamHealth {
+  string address = 1;
+  bool healthy = 2;
+  // False until the first probe finished.
+  bool checked = 3;
+  string last_error = 4;
+  int64 checked_unix = 5;
+  uint32 latency_ms = 6;
+}
+
+message SiteStatus {
+  SiteState state = 1;
+  string message = 2;
+  int64 applied_unix = 3;
+  SiteTlsStatus tls = 4;
+  // What the upstream resolved to ("127.0.0.1:32768").
+  repeated string upstream_addresses = 5;
+  // Per upstream server, same order; empty without active health checks.
+  repeated SiteUpstreamHealth upstream_health = 6;
+}
+
+message ListSitesRequest {
+  optional string managed_by = 1;
+}
+
+message ListSitesResponse {
+  repeated Site sites = 1;
+}
+
+message ReplaceSitesRequest {
+  string managed_by = 1;
+  repeated Site sites = 2;
+}
+
+message ReplaceSitesResponse {
+  repeated Site sites = 1;
+}
+
+message UpsertSiteRequest {
+  Site site = 1;
+}
+
+message UpsertSiteResponse {
+  Site site = 1;
+}
+
+message RemoveSiteRequest {
+  string id = 1;
+}
+
+message RemoveSiteResponse {
+  bool removed = 1;
+}
+
+message RenderSiteRequest {
+  Site site = 1;
+}
+
+message RenderSiteResponse {
+  string content = 1;
+}
+
+message RenewCertificateRequest {
+  string id = 1;
+}
+
+message RenewCertificateResponse {
+  Site site = 1;
+}
+
+message ProbeTcpRequest {
+  // "host:port"
+  string address = 1;
+  // 0 — 3000.
+  uint32 timeout_ms = 2;
+}
+
+message ProbeTcpResponse {
+  bool reachable = 1;
+  uint32 latency_ms = 2;
+  string error = 3;
+}

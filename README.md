@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.47.1-blue)](version.txt)
+[![Version](https://img.shields.io/badge/version-0.48.0-blue)](version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -165,6 +165,7 @@ Documentation for the daemon's modules lives in the [docs/english/](docs/english
 | [👤 user-management](docs/english/user-management.md) | Local user management: accounts, groups, SSH keys |
 | [🖥️ console](docs/english/console.md) | WebSocket application console |
 | [⏰ scheduler](docs/english/scheduler.md) | Task scheduler |
+| [🌐 webserver](docs/english/webserver.md) | Web server: nginx, sites, Let's Encrypt, Cloudflare real IP |
 | [⌨️ completion](docs/english/completion.md) | Tab completion for bash, zsh and fish — commands, flags and live values |
 | [🔄 updater](docs/english/updater.md) | The asc-updater utility: auto-updates, channels, rollback |
 | [🔗 platform](docs/english/platform.md) | Connecting the node to the platform: `--token`, `asc connect` |

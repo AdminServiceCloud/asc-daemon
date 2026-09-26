@@ -16,6 +16,7 @@ mod rest_backups;
 pub mod tls;
 pub mod tokens;
 pub mod uds;
+mod webserver;
 mod ws;
 
 use std::future::Future;
@@ -68,6 +69,7 @@ pub const CAPABILITIES: &[&str] = &[
     "schedules",
     "processes",
     "app.repull",
+    "webserver",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -94,6 +96,8 @@ pub struct ApiState {
     /// The bearer tokens this daemon accepts: the long-lived primary and the
     /// short-lived access tokens minted from it (DMN-065).
     pub tokens: TokenStore,
+    /// The node's web server and its sites (DMN-122).
+    pub webserver: Arc<crate::daemon::webserver::WebServer>,
 }
 
 /// Apps-wide disk report (`asc disk` with no app): what each app occupies,
@@ -802,6 +806,7 @@ fn api_context() -> UserContext {
 impl ApiState {
     pub fn new(config: Config, token: String) -> Arc<Self> {
         let monitor = Monitor::new(&config.monitor);
+        let webserver = Arc::new(crate::daemon::webserver::WebServer::new(&config));
         Arc::new(Self {
             manager: AppManager::new(&config),
             config,
@@ -809,6 +814,7 @@ impl ApiState {
             attach_hub: Default::default(),
             monitor,
             tokens: TokenStore::new(token),
+            webserver,
         })
     }
 

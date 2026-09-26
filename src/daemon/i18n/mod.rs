@@ -281,6 +281,19 @@ pub enum Msg {
     Processing,
     DaemonUnreachable,
     DaemonDirectFallback,
+    WebRootRequired,
+    WebNotInstalled,
+    WebInstalled,
+    WebUninstalled,
+    WebTestOk,
+    WebTestFailed,
+    WebReloaded,
+    WebSiteListEmpty,
+    WebSiteSaved,
+    WebSiteRemoved,
+    WebSiteNotFound,
+    WebSiteTargetRequired,
+    WebInstalling,
 }
 
 /// Translate a message key using the current language.
@@ -902,6 +915,46 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::ScheduleRunOk => ("Job '{}' succeeded", "Задача '{}' выполнена успешно"),
         Msg::ScheduleRunFailed => ("job '{}' failed: {}", "задача '{}' завершилась ошибкой: {}"),
         Msg::ScheduleRunsEmpty => ("no runs yet", "запусков пока не было"),
+        Msg::WebRootRequired => (
+            "the web server is managed by root: run the command with sudo",
+            "веб-сервером управляет root: запустите команду через sudo",
+        ),
+        Msg::WebNotInstalled => (
+            "the web server is not installed — install it: asc web install --mode system|docker",
+            "веб-сервер не установлен — установите его: asc web install --mode system|docker",
+        ),
+        Msg::WebInstalled => ("Web server ready: {}", "Веб-сервер готов: {}"),
+        Msg::WebUninstalled => ("Web server removed", "Веб-сервер удалён"),
+        Msg::WebTestOk => (
+            "nginx accepts the configuration",
+            "nginx принимает конфигурацию",
+        ),
+        Msg::WebTestFailed => (
+            "nginx rejects the configuration:",
+            "nginx отклоняет конфигурацию:",
+        ),
+        Msg::WebReloaded => (
+            "Configuration applied and nginx reloaded",
+            "Конфигурация применена, nginx перезагружен",
+        ),
+        Msg::WebSiteListEmpty => (
+            "no sites yet — add one: asc web site add <domain> --app <id> --port <port>",
+            "сайтов пока нет — добавьте: asc web site add <домен> --app <id> --port <порт>",
+        ),
+        Msg::WebSiteSaved => ("Site '{}' saved: {}", "Сайт '{}' сохранён: {}"),
+        Msg::WebSiteRemoved => ("Site '{}' removed", "Сайт '{}' удалён"),
+        Msg::WebSiteNotFound => (
+            "site '{}' not found (asc web site list)",
+            "сайт '{}' не найден (asc web site list)",
+        ),
+        Msg::WebSiteTargetRequired => (
+            "choose where the site proxies to: --app <id> --port <port> or --to <host:port>",
+            "укажите, куда проксировать сайт: --app <id> --port <порт> или --to <host:port>",
+        ),
+        Msg::WebInstalling => (
+            "Installing the web server ({} mode), this can take a minute...",
+            "Устанавливаем веб-сервер (режим {}), это может занять минуту...",
+        ),
         Msg::ScheduleMissingOption => ("{} is required", "нужно указать {}"),
         Msg::ScheduleBadHeader => (
             "header '{}' must look like 'Name: value'",

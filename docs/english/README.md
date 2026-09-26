@@ -27,6 +27,7 @@ Open source CLI utility and daemon written in Rust, installed on the user's serv
 | 👤 Local user management: accounts, groups, SSH keys | [user-management](user-management.md) |
 | 🖥️ WebSocket application console | [console](console.md) |
 | ⏰ Task scheduler | [scheduler](scheduler.md) |
+| 🌐 Web server: nginx, sites, Let's Encrypt, Cloudflare real IP | [webserver](webserver.md) |
 | ⌨️ Shell completion (Tab) for bash, zsh and fish | [completion](completion.md) |
 | 🔄 The asc-updater update utility | [updater](updater.md) |
 | 🔗 Connecting the node to the platform | [platform](platform.md) |
@@ -46,7 +47,7 @@ Community files: [🛡️ SECURITY.md](../../SECURITY.md) — security policy an
 │   │   ├── apps/     # drivers: docker, systemd, process
 │   │   ├── pkg/      # package manager + registries
 │   │   ├── mcp/      # MCP server
-│   │   ├── backup/ monitor/ sftp/ files/ console/ scheduler/
+│   │   ├── backup/ monitor/ sftp/ files/ console/ scheduler/ webserver/
 │   │   ├── i18n/     # translation system for command output (EN/RU)
 │   │   └── config/   # /etc/asc/config.toml
 │   └── updater/      # 🔄 asc-updater — a separate update binary (see updater.md)

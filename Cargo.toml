@@ -1,7 +1,7 @@
 # рџ¦Ђ asc-daemon вЂ” AdminService.Cloud daemon, CLI (asc) and updater (asc-updater)
 [package]
 name = "asc-daemon"
-version = "0.47.1"
+version = "0.48.0"
 edition = "2024"
 license = "MIT"
 authors = ["Omar El Sayed (@statebyte)"]
@@ -83,6 +83,14 @@ schemars = "1"
 # listener already carries, so no OpenSSL and cross-compilation stays pure;
 # webpki roots are bundled, the host's CA store is not required.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# ACME client for the web server's Let's Encrypt certificates (DMN-124):
+# ring provider and hyper-rustls, the TLS stack the API already carries —
+# default features would pull aws-lc-rs and its C/cmake build into the cross
+# toolchain. `rcgen` generates the certificate key and CSR on the node.
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
+# Certificate expiry/issuer/SAN for issued and provided certificates
+# (DMN-124); already in the graph through rcgen.
+x509-parser = "0.18"
 
 [build-dependencies]
 # protox РєРѕРјРїРёР»РёСЂСѓРµС‚ .proto Р±РµР· РІРЅРµС€РЅРµРіРѕ protoc вЂ” СЃР±РѕСЂРєР° РіРµСЂРјРµС‚РёС‡РЅР°

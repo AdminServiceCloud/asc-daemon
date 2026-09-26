@@ -309,6 +309,13 @@ impl Daemon {
         Ok(Some(client))
     }
 
+    /// Web server API passthrough (DMN-122): the CLI renders the JSON the
+    /// daemon returns, the same shape the in-process path serializes.
+    pub fn web(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+        let method = Method::from_bytes(method.as_bytes()).context("bad HTTP method")?;
+        self.request(method, path, body)
+    }
+
     /// `(daemon version, apps running, apps total)`.
     pub fn status(&self) -> Result<(String, u64, u64)> {
         let json = self.request(Method::GET, "/v1/status", None)?;

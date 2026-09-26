@@ -103,6 +103,15 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `PUT /v1/schedules/managed/{managed_by}` | `ScheduleService.ReplaceManagedSchedules` | Тело `{schedules}` — полная замена задач этого владельца; задачи оператора не трогаются |
 | `POST /v1/schedules/{id}/run` | `ScheduleService.RunSchedule` | Запустить задачу сейчас; ответ `{started, run}` без ожидания |
 | `GET /v1/schedules/{id}/runs?limit=` | `ScheduleService.ListScheduleRuns` | Запуски задачи, новые первыми (хранится до 50) |
+| `GET /v1/webserver` | `WebServerService.GetWebServer` (DMN-122) | Состояние веб-сервера: режим, версия nginx, работает ли, настройки, последняя ошибка применения. Только root; capability `webserver` |
+| `POST /v1/webserver/install` | `WebServerService.InstallWebServerStream` | Тело `{mode: "system"\|"docker"}` — установить или подхватить nginx; ответ `{log, webserver}` |
+| `DELETE /v1/webserver?purge=` | `WebServerService.UninstallWebServer` | Удалить веб-сервер; `purge` — вместе с конфигами, сайтами и сертификатами |
+| `PUT /v1/webserver/settings` | `WebServerService.UpdateWebServerSettings` | Глобальные настройки nginx; сохраняются, только если их принимает `nginx -t` |
+| `POST /v1/webserver/test` / `POST /v1/webserver/reload` | `TestWebServerConfig` / `ReloadWebServer` | `{ok, output}` от `nginx -t` / полное применение и reload |
+| `GET /v1/webserver/files` | `WebServerService.GetWebServerFiles` | Сгенерированные файлы конфигурации |
+| `GET /v1/webserver/sites` | `WebServerService.ListSites` (DMN-123) | Сайты со статусом (`applied`/`error`/…) и состоянием TLS; ключи не возвращаются |
+| `PUT /v1/webserver/sites/{id}` / `DELETE …` | `UpsertSite` / `RemoveSite` | Добавить/заменить или удалить сайт; сайты платформы идут через `ReplaceSites(managed_by)` |
+| `POST /v1/webserver/sites/{id}/renew` | `WebServerService.RenewCertificate` (DMN-124) | Выпустить сертификат Let's Encrypt сейчас, игнорируя backoff |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |

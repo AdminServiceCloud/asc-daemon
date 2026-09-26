@@ -43,6 +43,8 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 | Add a registry/repo | `asc source add <url>` |
 | Backup / restore | `asc backup create <app>` / `asc backup restore <app> <id>` — restore is destructive, confirm first |
 | Scheduled tasks | `asc task list|add|cancel` |
+| Publish an app on a domain | `sudo asc web install` once, then `asc web site add <domain> --app <name> --port <port> --tls letsencrypt` |
+| Web server state / config check | `asc web status` / `asc web test` |
 
 ## Troubleshooting flow
 

@@ -31,6 +31,7 @@ use pb::source_service_server::{SourceService, SourceServiceServer};
 use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
 use pb::user_service_server::{UserService, UserServiceServer};
+use pb::web_server_service_server::WebServerServiceServer;
 
 /// gRPC routes as an axum router (mounted next to REST on one listener).
 pub fn routes(state: Arc<ApiState>) -> Router {
@@ -46,7 +47,8 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(UserServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(DockerServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(BackupServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(ScheduleServiceServer::new(Grpc(state)))
+        .add_service(ScheduleServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(WebServerServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 

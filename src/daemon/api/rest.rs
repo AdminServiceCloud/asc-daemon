@@ -143,6 +143,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             delete(remove_authorized_key_by_body),
         )
         .merge(super::rest_backups::routes())
+        .merge(super::webserver::routes())
         .with_state(state)
 }
 

@@ -1981,6 +1981,122 @@ async fn start_exec(
     }
 }
 
+// ── Daemon-owned service containers (DMN-122) ───────────────────────────────
+
+/// A container the daemon runs for itself rather than for an app — the web
+/// server. Host network, restarted unless stopped, no port bindings.
+pub struct ServiceContainerSpec<'a> {
+    pub name: &'a str,
+    pub image: &'a str,
+    /// Replaces the image's entrypoint when set.
+    pub entrypoint: Option<Vec<String>>,
+    pub cmd: Vec<String>,
+    /// `host:container[:ro]` bind mounts.
+    pub binds: Vec<String>,
+    pub labels: HashMap<String, String>,
+}
+
+/// Create (not start) a host-network service container, pulling the image
+/// when it is not on the host yet.
+pub fn create_host_service(cfg: &DockerConfig, spec: &ServiceContainerSpec<'_>) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let config = ContainerCreateBody {
+            image: Some(spec.image.to_string()),
+            entrypoint: spec.entrypoint.clone(),
+            cmd: (!spec.cmd.is_empty()).then(|| spec.cmd.clone()),
+            labels: (!spec.labels.is_empty()).then(|| spec.labels.clone()),
+            host_config: Some(HostConfig {
+                network_mode: Some("host".to_string()),
+                binds: (!spec.binds.is_empty()).then(|| spec.binds.clone()),
+                restart_policy: Some(RestartPolicy {
+                    name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: None,
+                }),
+                ulimits: Some(vec![ResourcesUlimits {
+                    name: Some("nofile".to_string()),
+                    soft: Some(65535),
+                    hard: Some(65535),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let options = CreateContainerOptions {
+            name: Some(spec.name.to_string()),
+            ..Default::default()
+        };
+        if let Err(e) = docker
+            .create_container(Some(options.clone()), config.clone())
+            .await
+        {
+            if status_of(&e) != Some(404) {
+                return Err(friendly(cfg, e));
+            }
+            info!(image = spec.image, "image not found locally, pulling");
+            pull(&docker, spec.image, None, None)
+                .await
+                .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, spec.image)))?;
+            docker
+                .create_container(Some(options), config)
+                .await
+                .map_err(|e| friendly(cfg, e))?;
+        }
+        Ok(())
+    })
+}
+
+/// Run `cmd` in a running container to completion (no TTY) and return its
+/// exit code with stdout and stderr interleaved — `nginx -t` in the web
+/// server container.
+pub fn exec_collect(cfg: &DockerConfig, container: &str, cmd: &[String]) -> Result<(i64, String)> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        let (exec_id, mut output, _input) = start_exec(&docker, cfg, container, cmd, false).await?;
+        let mut text = String::new();
+        while let Some(chunk) = output.next().await {
+            match chunk {
+                Ok(out) => text.push_str(&String::from_utf8_lossy(&out.into_bytes())),
+                Err(e) => return Err(friendly(cfg, e)),
+            }
+        }
+        let code = docker
+            .inspect_exec(&exec_id)
+            .await
+            .map_err(|e| friendly(cfg, e))?
+            .exit_code
+            .unwrap_or(-1);
+        Ok((code, text))
+    })
+}
+
+/// Send a signal (`HUP`, `QUIT`…) to a container's main process.
+pub fn signal(cfg: &DockerConfig, container: &str, signal: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        docker
+            .kill_container(
+                container,
+                Some(bollard::query_parameters::KillContainerOptions {
+                    signal: signal.to_string(),
+                }),
+            )
+            .await
+            .map_err(|e| friendly(cfg, e))
+    })
+}
+
+/// Whether the Engine answers at all — the web server's docker mode is only
+/// offered when it does.
+pub fn available(cfg: &DockerConfig) -> bool {
+    block_on(async {
+        match connect(cfg) {
+            Ok(docker) => docker.ping().await.is_ok(),
+            Err(_) => false,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BollardError, DockerConfig, Vertex, build_session_id, friendly, image_ref};

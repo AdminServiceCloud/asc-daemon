@@ -187,6 +187,12 @@ enum Command {
         #[command(subcommand)]
         action: ScheduleAction,
     },
+    /// The node's web server: nginx, sites proxied to apps, Let's Encrypt
+    /// and Cloudflare real IP (DMN-122)
+    Web {
+        #[command(subcommand)]
+        action: WebAction,
+    },
     /// Manage daemon configuration
     Config {
         #[command(subcommand)]
@@ -962,6 +968,7 @@ fn run() -> anyhow::Result<()> {
         Command::Auth { action } => auth_cmd(action),
         Command::Backup { action } => backup_cmd(action, &config),
         Command::Schedule { action } => schedule_cmd(action, &config),
+        Command::Web { action } => web_cmd(action, &config),
         Command::Config { action } => config_cmd(action, config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
         // Both were handled above, before the config was loaded.
@@ -5384,4 +5391,469 @@ mod tests {
             "got: {short:?}"
         );
     }
+}
+
+// ── asc web (DMN-122..DMN-125) ──────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum WebAction {
+    /// Show the web server: engine, mode, version, state, last apply
+    Status,
+    /// Install nginx (or adopt the one already on this host) and apply
+    Install {
+        /// system — distribution/nginx.org package under systemd;
+        /// docker — the asc-webserver container on the host network
+        #[arg(long, value_enum, default_value_t = WebModeArg::System)]
+        mode: WebModeArg,
+    },
+    /// Remove the web server (an adopted nginx gets its own config back)
+    Uninstall {
+        /// Also delete generated configs, sites and certificates
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Check the configuration with `nginx -t` without applying it
+    Test,
+    /// Re-render the configuration, check it and reload nginx
+    Reload,
+    /// Sites: domains proxied to apps or addresses
+    Site {
+        #[command(subcommand)]
+        action: WebSiteAction,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum WebModeArg {
+    System,
+    Docker,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum WebBalanceArg {
+    RoundRobin,
+    LeastConn,
+    IpHash,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum WebHealthArg {
+    Off,
+    Tcp,
+    Http,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum WebTlsArg {
+    None,
+    Letsencrypt,
+}
+
+#[derive(Subcommand)]
+enum WebSiteAction {
+    /// List sites with their TLS and apply state
+    List,
+    /// Add or replace a site: `asc web site add app.example.com --app grafana --port 3000 --tls letsencrypt`
+    Add(Box<WebSiteAddArgs>),
+    /// Show one site, including the last nginx error
+    Show { id: String },
+    /// Remove a site
+    Remove { id: String },
+    /// Request a Let's Encrypt certificate now, ignoring the retry backoff
+    Renew { id: String },
+}
+
+#[derive(clap::Args)]
+struct WebSiteAddArgs {
+    /// Domain names the site answers to
+    #[arg(required = true)]
+    names: Vec<String>,
+    /// Site id (default: the first name)
+    #[arg(long)]
+    id: Option<String>,
+    /// Installed app to proxy to (id or name)
+    #[arg(long)]
+    app: Option<String>,
+    /// The app's container-side port
+    #[arg(long)]
+    port: Option<u16>,
+    /// Proxy to an address instead of an app: host:port. Repeat it to load
+    /// balance between several servers
+    #[arg(long, conflicts_with_all = ["app", "port"])]
+    to: Vec<String>,
+    /// Load balancing method between several --to servers
+    #[arg(long, value_enum, default_value_t = WebBalanceArg::RoundRobin)]
+    balance: WebBalanceArg,
+    /// Active health checks of the servers: a failing one leaves rotation
+    #[arg(long, value_enum, default_value_t = WebHealthArg::Off)]
+    health: WebHealthArg,
+    /// Request path of an http health check
+    #[arg(long, default_value = "/")]
+    health_path: String,
+    /// HTTPS: none or a Let's Encrypt certificate issued by the daemon
+    #[arg(long, value_enum, default_value_t = WebTlsArg::None)]
+    tls: WebTlsArg,
+    /// The domain is proxied by Cloudflare: log visitors' real IPs
+    #[arg(long)]
+    cloudflare: bool,
+    /// Do not forward WebSocket upgrades
+    #[arg(long)]
+    no_websocket: bool,
+    /// Largest request body, nginx syntax (64m, 1g)
+    #[arg(long)]
+    max_body: Option<String>,
+}
+
+/// Where `asc web` sends its calls: the running daemon, or — with no daemon
+/// on this host — the web server manager in-process, as root.
+enum WebBackend {
+    Daemon(client::Daemon),
+    Local(Box<asc_daemon::daemon::webserver::WebServer>),
+}
+
+impl WebBackend {
+    fn open(config: &Config) -> anyhow::Result<Self> {
+        match daemon_backend(config)? {
+            Some(daemon) => Ok(Self::Daemon(daemon)),
+            None if UserContext::current().is_root => Ok(Self::Local(Box::new(
+                asc_daemon::daemon::webserver::WebServer::new(config),
+            ))),
+            None => anyhow::bail!("{}", t(Msg::WebRootRequired)),
+        }
+    }
+
+    fn overview(&self) -> anyhow::Result<serde_json::Value> {
+        match self {
+            Self::Daemon(d) => d.web("GET", "/v1/webserver", None),
+            Self::Local(w) => Ok(serde_json::to_value(w.overview())?),
+        }
+    }
+
+    fn sites(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let value = match self {
+            Self::Daemon(d) => d.web("GET", "/v1/webserver/sites", None)?["sites"].clone(),
+            Self::Local(w) => serde_json::to_value(w.sites(None)?)?,
+        };
+        Ok(value.as_array().cloned().unwrap_or_default())
+    }
+
+    fn site(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        let found = match self {
+            Self::Daemon(d) => d.web("GET", &format!("/v1/webserver/sites/{id}"), None),
+            Self::Local(w) => w
+                .site(id)
+                .map(|v| serde_json::to_value(v).unwrap_or_default()),
+        };
+        found.map_err(|_| anyhow::anyhow!(tf(Msg::WebSiteNotFound, id)))
+    }
+}
+
+fn web_cmd(action: WebAction, config: &Config) -> anyhow::Result<()> {
+    use asc_daemon::daemon::webserver::model;
+    let backend = WebBackend::open(config)?;
+    match action {
+        WebAction::Status => {
+            let o = backend.overview()?;
+            if !o["installed"].as_bool().unwrap_or(false) {
+                println!("{}", t(Msg::WebNotInstalled));
+                return Ok(());
+            }
+            print_web_overview(&o);
+        }
+        WebAction::Install { mode } => {
+            let mode = match mode {
+                WebModeArg::System => model::Mode::System,
+                WebModeArg::Docker => model::Mode::Docker,
+            };
+            eprintln!("{}", tf(Msg::WebInstalling, mode.label()));
+            let overview = match &backend {
+                WebBackend::Daemon(d) => {
+                    let json = d.web(
+                        "POST",
+                        "/v1/webserver/install",
+                        Some(serde_json::json!({ "mode": mode.label() })),
+                    )?;
+                    for line in json["log"].as_array().into_iter().flatten() {
+                        eprintln!("  {}", line.as_str().unwrap_or_default());
+                    }
+                    json["webserver"].clone()
+                }
+                WebBackend::Local(w) => {
+                    let overview = w.install(mode, &mut |line| eprintln!("  {line}"))?;
+                    serde_json::to_value(overview)?
+                }
+            };
+            println!("{}", tf(Msg::WebInstalled, web_engine_label(&overview)));
+        }
+        WebAction::Uninstall { purge } => {
+            match &backend {
+                WebBackend::Daemon(d) => {
+                    let path = format!("/v1/webserver?purge={purge}");
+                    let json = d.web("DELETE", &path, None)?;
+                    for line in json["log"].as_array().into_iter().flatten() {
+                        eprintln!("  {}", line.as_str().unwrap_or_default());
+                    }
+                }
+                WebBackend::Local(w) => w.uninstall(purge, &mut |line| eprintln!("  {line}"))?,
+            }
+            println!("{}", t(Msg::WebUninstalled));
+        }
+        WebAction::Test => {
+            let (ok, output) = match &backend {
+                WebBackend::Daemon(d) => {
+                    let json = d.web("POST", "/v1/webserver/test", None)?;
+                    (
+                        json["ok"].as_bool().unwrap_or(false),
+                        json["output"].as_str().unwrap_or_default().to_string(),
+                    )
+                }
+                WebBackend::Local(w) => w.test()?,
+            };
+            if ok {
+                println!("{}", t(Msg::WebTestOk));
+            } else {
+                println!("{}\n{}", t(Msg::WebTestFailed), output.trim());
+                std::process::exit(1);
+            }
+        }
+        WebAction::Reload => {
+            match &backend {
+                WebBackend::Daemon(d) => {
+                    d.web("POST", "/v1/webserver/reload", None)?;
+                }
+                WebBackend::Local(w) => w.reload()?,
+            }
+            println!("{}", t(Msg::WebReloaded));
+        }
+        WebAction::Site { action } => web_site_cmd(action, &backend)?,
+    }
+    Ok(())
+}
+
+fn web_engine_label(o: &serde_json::Value) -> String {
+    let mut label = format!(
+        "{} {}",
+        o["engine"].as_str().unwrap_or("nginx"),
+        o["version"].as_str().unwrap_or("")
+    )
+    .trim()
+    .to_string();
+    let mut notes = vec![o["mode"].as_str().unwrap_or("-").to_string()];
+    if o["adopted"].as_bool().unwrap_or(false) {
+        notes.push("adopted".into());
+    }
+    notes.push(if o["running"].as_bool().unwrap_or(false) {
+        "running".into()
+    } else {
+        "stopped".into()
+    });
+    label.push_str(&format!(" ({})", notes.join(", ")));
+    label
+}
+
+fn print_web_overview(o: &serde_json::Value) {
+    println!("{:<14} {}", "WEB SERVER", web_engine_label(o));
+    println!("{:<14} {}", "SITES", o["site_count"].as_u64().unwrap_or(0));
+    println!(
+        "{:<14} {}",
+        "LAST APPLY",
+        local_minute(o["last_applied"].as_i64().unwrap_or(0))
+    );
+    let cf = o["cloudflare_updated"].as_i64().unwrap_or(0);
+    println!(
+        "{:<14} {}",
+        "CLOUDFLARE",
+        if cf == 0 {
+            "embedded list".to_string()
+        } else {
+            local_minute(cf)
+        }
+    );
+    let error = o["last_error"].as_str().unwrap_or_default();
+    if !error.is_empty() {
+        println!("{:<14} {}", "LAST ERROR", error.trim());
+    }
+}
+
+fn web_site_target(site: &serde_json::Value) -> String {
+    site["upstream"]["servers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| match s["kind"].as_str() {
+            Some("app") => format!("{}:{}", s["app"].as_str().unwrap_or("?"), s["port"]),
+            _ => s["address"].as_str().unwrap_or("?").to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn web_site_cmd(action: WebSiteAction, backend: &WebBackend) -> anyhow::Result<()> {
+    use asc_daemon::daemon::webserver::model::{
+        Balance, HealthCheck, HealthKind, Proxy, RealIp, Site, Target, Tls, TlsMode, Upstream,
+        UpstreamServer,
+    };
+    match action {
+        WebSiteAction::List => {
+            let sites = backend.sites()?;
+            if sites.is_empty() {
+                println!("{}", t(Msg::WebSiteListEmpty));
+                return Ok(());
+            }
+            let id_w = sites
+                .iter()
+                .map(|s| s["id"].as_str().unwrap_or("").len())
+                .max()
+                .unwrap_or(2)
+                .max(2);
+            println!(
+                "{:<id_w$}  {:<32}  {:<24}  {:<12}  {:<16}  {:<8}  OWNER",
+                "ID", "NAMES", "TARGET", "TLS", "EXPIRES", "STATE"
+            );
+            for s in &sites {
+                let names = s["server_names"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!(
+                    "{:<id_w$}  {:<32}  {:<24}  {:<12}  {:<16}  {:<8}  {}",
+                    s["id"].as_str().unwrap_or(""),
+                    names,
+                    web_site_target(s),
+                    s["status"]["tls"]["state"].as_str().unwrap_or("none"),
+                    local_minute(s["status"]["tls"]["not_after"].as_i64().unwrap_or(0)),
+                    s["status"]["state"].as_str().unwrap_or("-"),
+                    s["managed_by"].as_str().unwrap_or("local"),
+                );
+            }
+        }
+        WebSiteAction::Show { id } => {
+            let s = backend.site(&id)?;
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        }
+        WebSiteAction::Add(args) => {
+            let targets: Vec<Target> = match (&args.app, args.port) {
+                _ if !args.to.is_empty() => args
+                    .to
+                    .iter()
+                    .map(|address| Target::Address {
+                        address: address.clone(),
+                    })
+                    .collect(),
+                (Some(app), Some(port)) => vec![Target::App {
+                    app: app.clone(),
+                    port,
+                }],
+                _ => anyhow::bail!("{}", t(Msg::WebSiteTargetRequired)),
+            };
+            let first = args.names[0]
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            let site = Site {
+                id: args.id.clone().unwrap_or(first),
+                server_names: args.names.clone(),
+                managed_by: None,
+                disabled: false,
+                upstream: Upstream {
+                    servers: targets
+                        .into_iter()
+                        .map(|target| UpstreamServer {
+                            target,
+                            weight: 1,
+                            backup: false,
+                            max_fails: 0,
+                            fail_timeout_secs: 0,
+                            down: false,
+                        })
+                        .collect(),
+                    balance: match args.balance {
+                        WebBalanceArg::RoundRobin => Balance::RoundRobin,
+                        WebBalanceArg::LeastConn => Balance::LeastConn,
+                        WebBalanceArg::IpHash => Balance::IpHash,
+                    },
+                    health_check: HealthCheck {
+                        kind: match args.health {
+                            WebHealthArg::Off => HealthKind::Off,
+                            WebHealthArg::Tcp => HealthKind::Tcp,
+                            WebHealthArg::Http => HealthKind::Http,
+                        },
+                        path: args.health_path.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                tls: Tls {
+                    mode: match args.tls {
+                        WebTlsArg::None => TlsMode::None,
+                        WebTlsArg::Letsencrypt => TlsMode::Acme,
+                    },
+                    redirect_http: true,
+                    hsts: false,
+                    http2: true,
+                    ..Default::default()
+                },
+                proxy: Proxy {
+                    websocket: !args.no_websocket,
+                    client_max_body_size: args.max_body.clone().unwrap_or_default(),
+                    ..Default::default()
+                },
+                real_ip: if args.cloudflare {
+                    RealIp::Cloudflare
+                } else {
+                    RealIp::Off
+                },
+                extra_server: String::new(),
+                extra_location: String::new(),
+                raw_config: None,
+            };
+            let id = site.id.clone();
+            let view = match backend {
+                WebBackend::Daemon(d) => d.web(
+                    "PUT",
+                    &format!("/v1/webserver/sites/{id}"),
+                    Some(serde_json::to_value(&site)?),
+                )?,
+                WebBackend::Local(w) => serde_json::to_value(w.upsert_site(site)?)?,
+            };
+            let state = view["status"]["state"].as_str().unwrap_or("-").to_string();
+            println!("{}", tf2(Msg::WebSiteSaved, &id, &state));
+            let message = view["status"]["message"].as_str().unwrap_or_default();
+            if !message.is_empty() {
+                println!("{message}");
+            }
+        }
+        WebSiteAction::Remove { id } => {
+            let removed = match backend {
+                WebBackend::Daemon(d) => {
+                    d.web("DELETE", &format!("/v1/webserver/sites/{id}"), None)?["removed"]
+                        .as_bool()
+                        .unwrap_or(false)
+                }
+                WebBackend::Local(w) => w.remove_site(&id)?,
+            };
+            if !removed {
+                anyhow::bail!(tf(Msg::WebSiteNotFound, &id));
+            }
+            println!("{}", tf(Msg::WebSiteRemoved, &id));
+        }
+        WebSiteAction::Renew { id } => {
+            let view = match backend {
+                WebBackend::Daemon(d) => {
+                    d.web("POST", &format!("/v1/webserver/sites/{id}/renew"), None)?
+                }
+                WebBackend::Local(w) => serde_json::to_value(w.renew(&id)?)?,
+            };
+            let tls = &view["status"]["tls"];
+            println!(
+                "{} {}",
+                tls["state"].as_str().unwrap_or("-"),
+                tls["last_error"].as_str().unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
 }

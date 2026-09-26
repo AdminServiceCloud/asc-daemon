@@ -35,6 +35,7 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "schedules",
         "processes",
         "app.repull",
+        "webserver",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()

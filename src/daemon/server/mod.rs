@@ -54,6 +54,10 @@ pub async fn run(mut config: Config) -> anyhow::Result<()> {
     // Cron-like scheduler (DMN-012): runs scheduled app backups (DMN-009).
     crate::daemon::scheduler::start(&state.config);
 
+    // Web server background pass (DMN-122..125): certificate renewals,
+    // Cloudflare ranges, moved app ports.
+    crate::daemon::webserver::start(std::sync::Arc::clone(&state.webserver));
+
     // One shutdown signal fans out to both listeners: the TCP API (bearer
     // token, for the platform) and the local unix socket (peer-cred auth,
     // for the CLI, DMN-042). The unix socket is best-effort — a host where

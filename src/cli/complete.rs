@@ -329,6 +329,8 @@ enum Dynamic {
     Credentials,
     /// Scheduled jobs, by id (DMN-114).
     Schedules,
+    /// Web server sites, by id (DMN-123).
+    Sites,
 }
 
 /// Which live list, if any, fills an argument — keyed by where the argument
@@ -349,6 +351,7 @@ fn dynamic_source(path: &[String], arg: &Arg) -> Option<Dynamic> {
         (["backup", "storage", "remove"], "name") => Dynamic::Storages,
         (["auth", "remove"], "target") => Dynamic::Credentials,
         (["schedule", _], "schedule") => Dynamic::Schedules,
+        (["web", "site", _], "id") => Dynamic::Sites,
         (_, "source") => Dynamic::Sources,
         (_, "storage") | (_, "storages") => Dynamic::Storages,
         // Every command that addresses an app spells it `id` (`asc app stop
@@ -368,6 +371,7 @@ impl Dynamic {
             Dynamic::Storages => storages(),
             Dynamic::Credentials => credentials(),
             Dynamic::Schedules => schedules(config),
+            Dynamic::Sites => sites(),
         }
     }
 }
@@ -382,6 +386,20 @@ fn schedules(config: &Config) -> Vec<Candidate> {
         .map(|job| Candidate {
             help: Some(format!("{} {}", job.trigger, job.action.label())),
             value: job.id,
+        })
+        .collect()
+}
+
+/// Web server sites from the site list — readable by root only; elsewhere
+/// simply no candidates.
+fn sites() -> Vec<Candidate> {
+    asc_daemon::daemon::webserver::WebServer::new(&Config::default())
+        .load_sites()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|site| Candidate {
+            help: Some(site.server_names.join(" ")),
+            value: site.id,
         })
         .collect()
 }

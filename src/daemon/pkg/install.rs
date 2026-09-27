@@ -1413,6 +1413,15 @@ pub(super) fn git_clone(
                 url: git_url.to_string(),
             }));
         }
+        if let Some(credential) = credential
+            && super::auth::is_auth_failure(&captured)
+        {
+            return Err(anyhow::Error::new(super::auth::AuthRejected {
+                url: git_url.to_string(),
+                method: credential.method.label(),
+                detail: captured.clone(),
+            }));
+        }
         if let Some(hint) = super::auth::host_key_hint(&captured, &clone_url) {
             bail!("git clone failed: {} — {hint}", captured.trim());
         }

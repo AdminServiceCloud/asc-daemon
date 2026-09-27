@@ -39,7 +39,7 @@ use tracing::{debug, warn};
 
 use super::sources::Scope;
 use crate::daemon::apps::UserContext;
-use crate::daemon::i18n::{Msg, tf, tf2};
+use crate::daemon::i18n::{Msg, t, tf, tf2};
 
 const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/auth.json";
 /// Pre-DMN-045 TOML store, read-only (migrated on the next write).
@@ -931,6 +931,30 @@ impl fmt::Display for AuthRequired {
 }
 
 impl std::error::Error for AuthRequired {}
+
+/// Typed error: a credential is configured for the repository but git
+/// rejected it. Unlike [`AuthRequired`] this is a hard error — offering to
+/// set up access again would hide the real reason — so the API renders it
+/// as `PermissionDenied` with git's own message.
+#[derive(Debug)]
+pub struct AuthRejected {
+    pub url: String,
+    /// "ssh key" / "token" — which credential kind was tried.
+    pub method: String,
+    pub detail: String,
+}
+
+impl fmt::Display for AuthRejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = t(Msg::PkgAuthRejected)
+            .replacen("{}", &self.url, 1)
+            .replacen("{}", &self.method, 1)
+            .replacen("{}", self.detail.trim(), 1);
+        write!(f, "{text}")
+    }
+}
+
+impl std::error::Error for AuthRejected {}
 
 /// Private SSH keys under `~/.ssh` a user can pick from (files that are not
 /// public keys or known config/metadata files).

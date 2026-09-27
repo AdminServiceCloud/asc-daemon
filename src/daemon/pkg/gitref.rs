@@ -67,6 +67,15 @@ pub fn ls_remote(git_url: &str, ctx: &UserContext) -> Result<RemoteRefs> {
                 url: git_url.to_string(),
             }));
         }
+        if let Some(credential) = credential
+            && auth::is_auth_failure(&stderr)
+        {
+            return Err(anyhow::Error::new(auth::AuthRejected {
+                url: git_url.to_string(),
+                method: credential.method.label(),
+                detail: stderr.to_string(),
+            }));
+        }
         if let Some(hint) = auth::host_key_hint(&stderr, &url) {
             bail!("git ls-remote failed: {} — {hint}", stderr.trim());
         }

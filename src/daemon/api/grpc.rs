@@ -111,6 +111,14 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
             P::Io(..) => Status::internal(msg),
         };
     }
+    // A configured credential that git rejected: explicit, never the
+    // generic internal error (the platform would render it as a bare 502).
+    if err
+        .downcast_ref::<crate::daemon::pkg::auth::AuthRejected>()
+        .is_some()
+    {
+        return Status::permission_denied(msg);
+    }
     if let Some(err) = err.downcast_ref::<users::UserError>() {
         use users::UserError as U;
         return match err {
@@ -121,6 +129,12 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
             U::CommandFailed { .. } => Status::failed_precondition(msg),
             U::Io(..) => Status::internal(msg),
         };
+    }
+    // Any other git failure (host key, network, missing ref) carries git's
+    // own message — surface it instead of an opaque internal error. Checked
+    // before "not found": git's "Repository not found" is not a daemon object.
+    if msg.contains("git clone failed") || msg.contains("git ls-remote failed") {
+        return Status::failed_precondition(msg);
     }
     if msg.contains("not found") || msg.contains("не найдено") {
         Status::not_found(msg)
@@ -2380,6 +2394,27 @@ mod tests {
     /// Before DMN-106, `to_status` had no branch for `pkg::auth::AuthRequired`
     /// and this fell through to a bare `Status::internal` — the exact bug the
     /// non-error `auth_required` field exists to fix.
+    #[test]
+    fn rejected_credential_is_an_explicit_permission_denied() {
+        let err = anyhow::Error::new(pkg::auth::AuthRejected {
+            url: "https://github.com/org/private".into(),
+            method: "ssh-key /etc/asc/keys/id".into(),
+            detail: "git@github.com: Permission denied (publickey).".into(),
+        });
+        let status = to_status(err);
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(status.message().contains("Permission denied (publickey)"));
+        assert!(status.message().contains("github.com/org/private"));
+    }
+
+    #[test]
+    fn git_failures_are_not_internal_errors() {
+        let status = to_status(anyhow::anyhow!(
+            "git clone failed: ERROR: Repository not found."
+        ));
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
     #[test]
     fn install_error_to_pb_renders_auth_required_instead_of_a_grpc_error() {
         let err = anyhow::Error::new(pkg::auth::AuthRequired {

@@ -5809,6 +5809,7 @@ fn web_site_cmd(action: WebSiteAction, backend: &WebBackend) -> anyhow::Result<(
                 extra_server: String::new(),
                 extra_location: String::new(),
                 raw_config: None,
+                logs: Default::default(),
             };
             let id = site.id.clone();
             let view = match backend {

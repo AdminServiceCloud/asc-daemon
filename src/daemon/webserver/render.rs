@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::cloudflare::Ranges;
-use super::model::{Balance, RealIp, Settings, Site};
+use super::model::{
+    API_SITE_OWNER, Balance, DefaultSiteMode, ERROR_CODES, LogKind, RealIp, Settings, Site,
+    site_log_file,
+};
 
 /// Where the web server's files live.
 #[derive(Debug, Clone)]
@@ -19,6 +22,9 @@ pub struct Paths {
     pub state: PathBuf,
     /// HTTP-01 webroot, readable by the nginx worker user.
     pub webroot: PathBuf,
+    /// Per-site access and error logs (DMN-128), bound into the docker
+    /// container under the same path.
+    pub logs: PathBuf,
 }
 
 impl Paths {
@@ -27,6 +33,7 @@ impl Paths {
             root: PathBuf::from("/etc/asc/webserver"),
             state: PathBuf::from("/var/lib/asc/webserver"),
             webroot: PathBuf::from("/var/www/asc-acme"),
+            logs: PathBuf::from(super::model::LOG_DIR),
         }
     }
 
@@ -93,6 +100,14 @@ pub const CUSTOM_HTTP: &str = "http.d/custom.conf";
 pub const CLOUDFLARE: &str = "snippets/cloudflare-realip.conf";
 pub const ACME_SNIPPET: &str = "snippets/acme.conf";
 pub const PROXY_SNIPPET: &str = "snippets/proxy.conf";
+pub const ERRORS_SNIPPET: &str = "snippets/errors.conf";
+/// Error pages: `errors/<code>.html`.
+pub const ERRORS_DIR: &str = "errors";
+/// The default site's page in `page` mode.
+pub const DEFAULT_PAGE_DIR: &str = "default";
+/// The internal location the error pages are served from. Odd on purpose:
+/// it shadows the same path of every proxied app.
+const ERRORS_LOCATION: &str = "/__asc_errors/";
 
 pub fn site_file(id: &str) -> PathBuf {
     PathBuf::from("sites").join(format!("{id}.conf"))
@@ -212,16 +227,7 @@ pub fn render_global(
     h.push('\n');
     let v6 = features.ipv6;
     if docker || !host.foreign_default_http {
-        h.push_str(
-            "# Unknown names: ACME challenges only.\nserver {\n    listen 80 default_server;\n",
-        );
-        if v6 {
-            h.push_str("    listen [::]:80 default_server;\n");
-        }
-        h.push_str(&format!(
-            "    server_name _;\n    include {};\n    location / {{\n        return 444;\n    }}\n}}\n\n",
-            p(base, ACME_SNIPPET)
-        ));
+        h.push_str(&default_server(settings, v6, base));
     }
     if features.reject_handshake && (docker || !host.foreign_default_https) {
         h.push_str("server {\n    listen 443 ssl default_server;\n");
@@ -247,6 +253,33 @@ pub fn render_global(
     );
     files.insert(PathBuf::from(CLOUDFLARE), cloudflare.directives());
     files.insert(
+        PathBuf::from(ERRORS_SNIPPET),
+        errors_snippet(settings, base),
+    );
+    if settings.error_pages.enabled {
+        for (code, reason) in ERROR_CODES {
+            let html = settings
+                .error_pages
+                .custom
+                .get(&code.to_string())
+                .filter(|html| !html.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| builtin_error_page(*code, reason));
+            files.insert(PathBuf::from(ERRORS_DIR).join(format!("{code}.html")), html);
+        }
+    }
+    if settings.default_site.mode == DefaultSiteMode::Page {
+        let html = settings.default_site.page_html.trim();
+        files.insert(
+            PathBuf::from(DEFAULT_PAGE_DIR).join("index.html"),
+            if html.is_empty() {
+                builtin_default_page()
+            } else {
+                format!("{html}\n")
+            },
+        );
+    }
+    files.insert(
         PathBuf::from(ACME_SNIPPET),
         format!(
             "# ACME HTTP-01 challenges, answered from the daemon's webroot.\n\
@@ -265,6 +298,129 @@ pub fn render_global(
             .to_string(),
     );
     files
+}
+
+/// The catch-all `default_server` on :80. ACME challenges are answered in
+/// every mode: a certificate for a name whose site is not applied yet is
+/// still validated here.
+fn default_server(settings: &Settings, v6: bool, base: &Path) -> String {
+    let default = &settings.default_site;
+    let mut out = format!(
+        "# Unknown names: the default site ({}).\nserver {{\n    listen 80 default_server;\n",
+        default.mode.label()
+    );
+    if v6 {
+        out.push_str("    listen [::]:80 default_server;\n");
+    }
+    out.push_str(&format!(
+        "    server_name _;\n    include {};\n",
+        p(base, ACME_SNIPPET)
+    ));
+    let errors = settings.error_pages.enabled;
+    match default.mode {
+        DefaultSiteMode::Drop => {
+            out.push_str("    location / {\n        return 444;\n    }\n");
+        }
+        DefaultSiteMode::Page => {
+            if errors {
+                out.push_str(&format!("    include {};\n", p(base, ERRORS_SNIPPET)));
+            }
+            out.push_str(&format!(
+                "    root {};\n    location / {{\n        try_files /index.html =404;\n        \
+                 add_header Cache-Control \"no-store\" always;\n    }}\n",
+                p(base, DEFAULT_PAGE_DIR)
+            ));
+        }
+        DefaultSiteMode::Root => {
+            if errors {
+                out.push_str(&format!("    include {};\n", p(base, ERRORS_SNIPPET)));
+            }
+            out.push_str(&format!(
+                "    root {};\n    index index.html index.htm;\n    \
+                 location / {{\n        try_files $uri $uri/ =404;\n    }}\n",
+                default.root.trim()
+            ));
+        }
+        DefaultSiteMode::Redirect => {
+            out.push_str(&format!(
+                "    location / {{\n        return 302 {};\n    }}\n",
+                default.redirect_url.trim()
+            ));
+        }
+    }
+    out.push_str("}\n\n");
+    out
+}
+
+/// `error_page` for every known status plus the internal location serving
+/// them. Only a comment while the pages are off, so includes stay valid.
+fn errors_snippet(settings: &Settings, base: &Path) -> String {
+    let mut out = String::from("# Error pages (asc web settings: error_pages).\n");
+    if !settings.error_pages.enabled {
+        return out;
+    }
+    for (code, _) in ERROR_CODES {
+        out.push_str(&format!(
+            "error_page {code} {ERRORS_LOCATION}{code}.html;\n"
+        ));
+    }
+    out.push_str(&format!(
+        "location ^~ {ERRORS_LOCATION} {{\n    internal;\n    alias {}/;\n    \
+         add_header Cache-Control \"no-store\" always;\n}}\n",
+        p(base, ERRORS_DIR)
+    ));
+    out
+}
+
+const PAGE_STYLE: &str = "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;\
+align-items:center;justify-content:center;padding:24px;font-family:system-ui,-apple-system,\
+'Segoe UI',Roboto,sans-serif;background:#f6f7f9;color:#1f2328}main{max-width:32rem;text-align:center}\
+.code{font-size:72px;font-weight:700;letter-spacing:-.04em;line-height:1;color:#8c959f}\
+h1{margin:16px 0 8px;font-size:22px}p{margin:0;color:#57606a;line-height:1.5}\
+@media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}.code{color:#6e7681}\
+p{color:#9198a1}}";
+
+fn page(title: &str, big: &str, heading: &str, text: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
+         <meta name=\"robots\" content=\"noindex\">\n<title>{title}</title>\n\
+         <style>{PAGE_STYLE}</style>\n</head>\n<body>\n<main>\n\
+         <div class=\"code\">{big}</div>\n<h1>{heading}</h1>\n<p>{text}</p>\n\
+         </main>\n</body>\n</html>\n"
+    )
+}
+
+/// The built-in page for one status: self-contained, no external assets.
+pub fn builtin_error_page(code: u16, reason: &str) -> String {
+    let text = match code {
+        400 => "The server could not understand the request.",
+        401 => "This page requires authentication.",
+        403 => "You do not have permission to access this page.",
+        404 => "The page you are looking for does not exist or has been moved.",
+        405 => "This method is not allowed for the requested page.",
+        408 => "The server timed out waiting for the request.",
+        413 => "The request is larger than the server is willing to accept.",
+        429 => "Too many requests. Please slow down and try again later.",
+        502 => {
+            "The application behind this address is not responding. Please try again in a moment."
+        }
+        503 => "The service is temporarily unavailable. Please try again later.",
+        504 => "The application took too long to respond. Please try again in a moment.",
+        _ => "Something went wrong on our side. Please try again later.",
+    };
+    page(&format!("{code} {reason}"), &code.to_string(), reason, text)
+}
+
+/// The default site's stub page: the address works, nothing is published
+/// under this name.
+pub fn builtin_default_page() -> String {
+    page(
+        "Nothing here yet",
+        "&#9679;",
+        "Nothing is published at this address",
+        "The server is up, but no site is configured for this name.",
+    )
 }
 
 /// `asc_<id>_<hash>`: `.`/`-` are not allowed in every nginx variable
@@ -289,8 +445,10 @@ pub fn render_site(
     settings: &Settings,
     features: Features,
     base: &Path,
+    logs: &Path,
 ) -> String {
     let site = resolved.site;
+    let api = is_api_site(site);
     let mut out = format!(
         "# asc-daemon site {} ({}).\n{}",
         site.id,
@@ -335,7 +493,9 @@ pub fn render_site(
         line.push_str(";\n");
         out.push_str(&line);
     }
-    if up.keepalive > 0 {
+    // The API site mixes HTTP/1.1 (REST) and h2 (gRPC) on one upstream, and
+    // a shared keepalive pool breaks gRPC — see WebServer::set_api_proxy.
+    if up.keepalive > 0 && !is_api_site(site) {
         out.push_str(&format!("    keepalive {};\n", up.keepalive));
     }
     out.push_str("}\n\n");
@@ -353,7 +513,10 @@ pub fn render_site(
         "    server_name {names};\n    include {};\n",
         p(base, ACME_SNIPPET)
     ));
-    if https && site.tls.redirect_http {
+    out.push_str(&log_directives(site, logs));
+    // The API site never answers over plain HTTP: the bearer token must not
+    // cross the network in the clear, even before the certificate exists.
+    if api || (https && site.tls.redirect_http) {
         out.push_str(
             "\n    location / {\n        return 301 https://$host$request_uri;\n    }\n}\n",
         );
@@ -363,7 +526,8 @@ pub fn render_site(
     }
 
     if let Some((cert, key)) = &resolved.cert {
-        let http2 = site.tls.http2 && settings.http2;
+        // gRPC needs HTTP/2 whatever the node-wide default says.
+        let http2 = api || (site.tls.http2 && settings.http2);
         let h2_listen = if http2 && !features.http2_directive {
             " http2"
         } else {
@@ -381,10 +545,81 @@ pub fn render_site(
             cert.display(),
             key.display()
         ));
-        out.push_str(&proxy_body(site, settings, &name, true, base));
+        out.push_str(&log_directives(site, logs));
+        if api {
+            out.push_str(&api_body(site, &name, base));
+        } else {
+            out.push_str(&proxy_body(site, settings, &name, true, base));
+        }
         out.push_str("}\n");
     }
     out
+}
+
+/// The daemon's own API site (DMN-129).
+pub fn is_api_site(site: &Site) -> bool {
+    site.managed_by.as_deref() == Some(API_SITE_OWNER)
+}
+
+/// A site's own logs (DMN-128). nginx has no `error_log off`: a disabled
+/// error log goes to /dev/null at the quietest level instead.
+fn log_directives(site: &Site, logs: &Path) -> String {
+    let mut out = String::new();
+    if site.logs.access {
+        out.push_str(&format!(
+            "    access_log {} asc;\n",
+            site_log_file(logs, &site.id, LogKind::Access).display()
+        ));
+    } else {
+        out.push_str("    access_log off;\n");
+    }
+    if site.logs.error {
+        out.push_str(&format!(
+            "    error_log {} warn;\n",
+            site_log_file(logs, &site.id, LogKind::Error).display()
+        ));
+    } else {
+        out.push_str("    error_log /dev/null crit;\n");
+    }
+    out
+}
+
+/// The HTTPS body of the API site: gRPC (h2) to `grpc_pass`, everything
+/// else — REST and the WebSocket console — to `proxy_pass`. nginx cannot
+/// switch handlers inside one location, so gRPC requests jump to a named
+/// one through an otherwise unused status code.
+fn api_body(site: &Site, upstream: &str, base: &Path) -> String {
+    let (http, grpc) = if site.upstream.tls {
+        ("https", "grpcs")
+    } else {
+        ("http", "grpc")
+    };
+    let mut b = String::from("    client_max_body_size 0;\n");
+    b.push_str(&format!(
+        "\n    location / {{\n        error_page 418 = @asc_grpc;\n        \
+         if ($content_type ~* \"^application/grpc\") {{\n            return 418;\n        }}\n        \
+         proxy_pass {http}://{upstream};\n        include {};\n        \
+         proxy_set_header Host $host;\n        \
+         proxy_set_header Upgrade $http_upgrade;\n        \
+         proxy_set_header Connection $connection_upgrade;\n        \
+         proxy_read_timeout 3600s;\n        proxy_send_timeout 3600s;\n        \
+         proxy_buffering off;\n        proxy_request_buffering off;\n    }}\n",
+        p(base, PROXY_SNIPPET)
+    ));
+    b.push_str(&format!(
+        "\n    location @asc_grpc {{\n        grpc_pass {grpc}://{upstream};\n        \
+         grpc_set_header X-Real-IP $remote_addr;\n        \
+         grpc_read_timeout 3600s;\n        grpc_send_timeout 3600s;\n    }}\n"
+    ));
+    if site.upstream.tls {
+        // The listener's certificate is self-signed or issued for another
+        // name; this hop never leaves the machine.
+        b = b.replace(
+            "        grpc_read_timeout",
+            "        grpc_ssl_verify off;\n        grpc_read_timeout",
+        );
+    }
+    b
 }
 
 fn proxy_body(
@@ -395,6 +630,9 @@ fn proxy_body(
     base: &Path,
 ) -> String {
     let mut b = String::new();
+    if settings.error_pages.enabled {
+        b.push_str(&format!("    include {};\n", p(base, ERRORS_SNIPPET)));
+    }
     if site.real_ip == RealIp::Cloudflare && !settings.cloudflare_real_ip {
         b.push_str(&format!("    include {};\n", p(base, CLOUDFLARE)));
     }
@@ -441,6 +679,9 @@ fn proxy_body(
     if site.proxy.no_buffering {
         b.push_str("        proxy_buffering off;\n        proxy_request_buffering off;\n");
     }
+    if settings.error_pages.enabled && settings.error_pages.intercept_upstream {
+        b.push_str("        proxy_intercept_errors on;\n");
+    }
     for header in &site.proxy.request_headers {
         b.push_str(&format!(
             "        proxy_set_header {} \"{}\";\n",
@@ -477,6 +718,7 @@ mod tests {
             root: "/etc/asc/webserver".into(),
             state: "/var/lib/asc/webserver".into(),
             webroot: "/var/www/asc-acme".into(),
+            logs: "/var/log/asc/webserver".into(),
         }
     }
 
@@ -519,7 +761,124 @@ mod tests {
             extra_server: String::new(),
             extra_location: String::new(),
             raw_config: None,
+            logs: Default::default(),
         }
+    }
+
+    #[test]
+    fn sites_write_their_own_logs_unless_turned_off() {
+        let s = site();
+        let r = Resolved {
+            site: &s,
+            addresses: vec!["127.0.0.1:32768".into()],
+            cert: Some(("/c/fullchain.pem".into(), "/c/privkey.pem".into())),
+            down: vec![],
+        };
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
+        // Both server blocks, :80 and :443.
+        assert_eq!(
+            out.matches("access_log /logs/grafana.access.log asc;")
+                .count(),
+            2
+        );
+        assert_eq!(
+            out.matches("error_log /logs/grafana.error.log warn;")
+                .count(),
+            2
+        );
+
+        let mut quiet = s.clone();
+        quiet.logs = SiteLogs {
+            access: false,
+            error: false,
+        };
+        let r = Resolved {
+            site: &quiet,
+            addresses: r.addresses.clone(),
+            cert: r.cert.clone(),
+            down: vec![],
+        };
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
+        assert!(out.contains("access_log off;"));
+        assert!(out.contains("error_log /dev/null crit;"));
+        assert!(!out.contains("/logs/grafana"));
+    }
+
+    #[test]
+    fn the_api_site_routes_grpc_and_never_serves_plain_http() {
+        let mut s = site();
+        s.id = API_SITE_ID.into();
+        s.managed_by = Some(API_SITE_OWNER.into());
+        s.upstream.keepalive = 16;
+        s.upstream.servers[0].target = Target::Address {
+            address: "127.0.0.1:8420".into(),
+        };
+        // No certificate yet: :80 still refuses to proxy.
+        let r = Resolved {
+            site: &s,
+            addresses: vec!["127.0.0.1:8420".into()],
+            cert: None,
+            down: vec![],
+        };
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
+        assert!(out.contains("return 301 https://$host$request_uri;"));
+        assert!(!out.contains("proxy_pass"));
+        assert!(!out.contains("grpc_pass"));
+
+        // With it: HTTP/2 even when the node disables it, gRPC to grpc_pass.
+        let settings = Settings {
+            http2: false,
+            ..Default::default()
+        };
+        let r = Resolved {
+            cert: Some(("/c/fullchain.pem".into(), "/c/privkey.pem".into())),
+            ..r
+        };
+        let out = render_site(&r, &settings, modern(), Path::new("/b"), Path::new("/logs"));
+        assert!(out.contains("http2 on;"));
+        assert!(out.contains("error_page 418 = @asc_grpc;"));
+        assert!(out.contains("if ($content_type ~* \"^application/grpc\")"));
+        assert!(out.contains("location @asc_grpc {"));
+        let upstream = upstream_name(API_SITE_ID);
+        assert!(out.contains(&format!("grpc_pass grpc://{upstream};")));
+        assert!(out.contains(&format!("proxy_pass http://{upstream};")));
+        assert!(out.contains("client_max_body_size 0;"));
+        assert!(!out.contains("grpc_ssl_verify"));
+        // One upstream serves HTTP/1.1 and h2: a keepalive pool would hand
+        // gRPC an HTTP/1.1 connection.
+        assert!(!out.contains("keepalive"));
+
+        // A TLS listener behind it is dialled with TLS, unverified on loopback.
+        let mut tls = s.clone();
+        tls.upstream.tls = true;
+        let r = Resolved {
+            site: &tls,
+            addresses: r.addresses.clone(),
+            cert: r.cert.clone(),
+            down: vec![],
+        };
+        let out = render_site(&r, &settings, modern(), Path::new("/b"), Path::new("/logs"));
+        assert!(out.contains(&format!("grpc_pass grpcs://{upstream};")));
+        assert!(out.contains(&format!("proxy_pass https://{upstream};")));
+        assert!(out.contains("grpc_ssl_verify off;"));
     }
 
     #[test]
@@ -540,7 +899,13 @@ mod tests {
             cert: None,
             down: vec![],
         };
-        let out = render_site(&r, &Settings::default(), modern(), Path::new("/b"));
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
         assert!(out.contains("server 127.0.0.1:32768;"));
         assert!(out.contains("include /b/snippets/acme.conf;"));
         assert!(!out.contains("listen 443"));
@@ -558,7 +923,13 @@ mod tests {
             cert: Some(("/c/fullchain.pem".into(), "/c/privkey.pem".into())),
             down: vec![],
         };
-        let out = render_site(&r, &Settings::default(), modern(), Path::new("/b"));
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
         assert!(out.contains("return 301 https://$host$request_uri;"));
         assert!(out.contains("listen 443 ssl;\n    listen [::]:443 ssl;\n    http2 on;"));
         assert!(out.contains("ssl_certificate /c/fullchain.pem;"));
@@ -566,7 +937,13 @@ mod tests {
         assert!(out.contains("proxy_set_header Connection $connection_upgrade;"));
 
         let old = Features::for_version(Some("1.24.0"), false);
-        let out = render_site(&r, &Settings::default(), old, Path::new("/b"));
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            old,
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
         assert!(out.contains("listen 443 ssl http2;"));
         assert!(!out.contains("[::]"));
     }
@@ -584,7 +961,7 @@ mod tests {
             cert: None,
             down: vec![],
         };
-        let out = render_site(&r, &settings, modern(), Path::new("/b"));
+        let out = render_site(&r, &settings, modern(), Path::new("/b"), Path::new("/logs"));
         assert!(!out.contains("cloudflare-realip"));
         let files = render_global(
             &settings,
@@ -621,7 +998,13 @@ mod tests {
             cert: None,
             down: vec![],
         };
-        let out = render_site(&r, &Settings::default(), modern(), Path::new("/b"));
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
         assert!(out.contains("    ip_hash;\n"));
         assert!(
             out.contains("server 127.0.0.1:1;\n"),
@@ -641,7 +1024,13 @@ mod tests {
             cert: None,
             down: vec![],
         };
-        let out = render_site(&r, &Settings::default(), modern(), Path::new("/b"));
+        let out = render_site(
+            &r,
+            &Settings::default(),
+            modern(),
+            Path::new("/b"),
+            Path::new("/logs"),
+        );
         assert!(out.ends_with("server { listen 80; }\n"));
         assert!(!out.contains("upstream"));
     }
@@ -678,6 +1067,124 @@ mod tests {
         assert!(files[Path::new(ACME_SNIPPET)].contains("root /var/www/asc-acme;"));
     }
 
+    fn global(settings: &Settings) -> Files {
+        render_global(
+            settings,
+            modern(),
+            &Ranges::embedded(),
+            &paths(),
+            Path::new("/b"),
+            true,
+        )
+    }
+
+    #[test]
+    fn default_site_modes() {
+        let mut settings = Settings::default();
+        let conf = global(&settings)[Path::new(NGINX_CONF)].clone();
+        assert!(conf.contains("the default site (drop)"));
+        assert!(conf.contains("return 444;"));
+        assert!(!global(&settings).contains_key(Path::new("default/index.html")));
+
+        settings.default_site.mode = DefaultSiteMode::Page;
+        let files = global(&settings);
+        assert!(files[Path::new(NGINX_CONF)].contains("root /b/default;"));
+        assert!(files[Path::new(NGINX_CONF)].contains("include /b/snippets/errors.conf;"));
+        assert!(files[Path::new("default/index.html")].contains("Nothing is published"));
+        settings.default_site.page_html = "<h1>Hi</h1>".into();
+        assert_eq!(
+            global(&settings)[Path::new("default/index.html")],
+            "<h1>Hi</h1>\n"
+        );
+
+        settings.default_site.mode = DefaultSiteMode::Root;
+        settings.default_site.root = "/srv/www".into();
+        let conf = global(&settings)[Path::new(NGINX_CONF)].clone();
+        assert!(conf.contains("root /srv/www;"));
+        assert!(conf.contains("try_files $uri $uri/ =404;"));
+        // ACME challenges keep working whatever the mode.
+        assert!(conf.contains("include /b/snippets/acme.conf;"));
+
+        settings.default_site.mode = DefaultSiteMode::Redirect;
+        settings.default_site.redirect_url = "https://example.com/".into();
+        let conf = global(&settings)[Path::new(NGINX_CONF)].clone();
+        assert!(conf.contains("return 302 https://example.com/;"));
+    }
+
+    #[test]
+    fn error_pages_are_rendered_and_included() {
+        let mut settings = Settings::default();
+        settings
+            .error_pages
+            .custom
+            .insert("404".into(), "<p>custom</p>".into());
+        let files = global(&settings);
+        let snippet = &files[Path::new(ERRORS_SNIPPET)];
+        assert!(snippet.contains("error_page 502 /__asc_errors/502.html;"));
+        assert!(snippet.contains("alias /b/errors/;"));
+        assert_eq!(files[Path::new("errors/404.html")], "<p>custom</p>");
+        assert!(files[Path::new("errors/502.html")].contains("Bad Gateway"));
+        assert_eq!(
+            files
+                .keys()
+                .filter(|path| path.starts_with(ERRORS_DIR))
+                .count(),
+            ERROR_CODES.len()
+        );
+
+        let s = site();
+        let r = Resolved {
+            site: &s,
+            addresses: vec!["127.0.0.1:3000".into()],
+            cert: None,
+            down: vec![],
+        };
+        let out = render_site(&r, &settings, modern(), Path::new("/b"), Path::new("/l"));
+        assert!(out.contains("include /b/snippets/errors.conf;"));
+        assert!(!out.contains("proxy_intercept_errors"));
+        settings.error_pages.intercept_upstream = true;
+        let out = render_site(&r, &settings, modern(), Path::new("/b"), Path::new("/l"));
+        assert!(out.contains("proxy_intercept_errors on;"));
+
+        settings.error_pages.enabled = false;
+        let files = global(&settings);
+        assert!(!files[Path::new(ERRORS_SNIPPET)].contains("error_page 404"));
+        assert!(!files.keys().any(|path| path.starts_with(ERRORS_DIR)));
+        let out = render_site(&r, &settings, modern(), Path::new("/b"), Path::new("/l"));
+        assert!(!out.contains("errors.conf"));
+    }
+
+    #[test]
+    fn default_site_and_error_pages_are_validated() {
+        let mut settings = Settings::default();
+        settings.default_site.mode = DefaultSiteMode::Root;
+        for bad in [
+            "",
+            "relative",
+            "/",
+            "/srv/../etc",
+            "/srv/a b",
+            "/etc/asc",
+            "/srv/x;y",
+        ] {
+            settings.default_site.root = bad.into();
+            assert!(settings.validate().is_err(), "{bad:?} must be rejected");
+        }
+        settings.default_site.root = "/srv/www".into();
+        settings.validate().unwrap();
+
+        settings.default_site.mode = DefaultSiteMode::Redirect;
+        settings.default_site.redirect_url = "ftp://x".into();
+        assert!(settings.validate().is_err());
+        settings.default_site.redirect_url = "https://example.com/a b".into();
+        assert!(settings.validate().is_err());
+        settings.default_site.redirect_url = "https://example.com/".into();
+        settings.validate().unwrap();
+
+        settings.error_pages.custom.insert("418".into(), "x".into());
+        assert!(settings.validate().is_err());
+    }
+
     /// Writes a representative configuration tree to `$ASC_RENDER_DIR` so it
     /// can be checked by a real `nginx -t` (see docs/english/webserver.md):
     /// `docker run --rm -v $D:$D nginx:stable-alpine nginx -t -c $D/nginx.conf`.
@@ -692,9 +1199,18 @@ mod tests {
             root: base.clone(),
             state: base.join("state"),
             webroot: base.join("www"),
+            logs: base.join("logs"),
         };
         let settings = Settings {
             custom_http: "# operator snippet\nproxy_headers_hash_max_size 1024;".into(),
+            default_site: DefaultSite {
+                mode: DefaultSiteMode::Page,
+                ..Default::default()
+            },
+            error_pages: ErrorPages {
+                intercept_upstream: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let features = Features::for_version(Some("1.28.0"), false);
@@ -747,7 +1263,34 @@ mod tests {
             fail_timeout_secs: 5,
             down: false,
         });
+        // The daemon's own API site (DMN-129) on the same certificate, and a
+        // site with both logs off (DMN-128).
+        let mut api = site();
+        api.id = API_SITE_ID.into();
+        api.managed_by = Some(API_SITE_OWNER.into());
+        api.server_names = vec!["node.example.com".into()];
+        api.upstream.tls = true;
+        let mut quiet = site();
+        quiet.id = "quiet".into();
+        quiet.server_names = vec!["quiet.example.com".into()];
+        quiet.logs = SiteLogs {
+            access: false,
+            error: false,
+        };
+        std::fs::create_dir_all(&paths.logs).unwrap();
         let sites = [
+            Resolved {
+                site: &api,
+                addresses: vec!["127.0.0.1:8420".into()],
+                cert: Some((base.join(&c), base.join(&k))),
+                down: vec![],
+            },
+            Resolved {
+                site: &quiet,
+                addresses: vec!["127.0.0.1:3003".into()],
+                cert: None,
+                down: vec![],
+            },
             Resolved {
                 site: &plain,
                 addresses: vec!["127.0.0.1:3000".into()],
@@ -770,7 +1313,7 @@ mod tests {
         for resolved in &sites {
             files.insert(
                 site_file(&resolved.site.id),
-                render_site(resolved, &settings, features, &base),
+                render_site(resolved, &settings, features, &base, &paths.logs),
             );
         }
         for (rel, content) in files {

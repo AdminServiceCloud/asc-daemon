@@ -67,12 +67,41 @@ acme_directory = ""         # пусто — Let's Encrypt production
 custom_main = ""            # вставляется в main-контекст
 custom_http = ""            # вставляется в http {}
 
+[default_site]              # что :80 отвечает на имя, не занятое сайтами (DMN-130)
+mode = "drop"               # drop (444) | page | root | redirect
+root = ""                   # root: абсолютный каталог на хосте
+redirect_url = ""           # redirect: http(s)-адрес (302)
+page_html = ""              # page: свой HTML; пусто — встроенная заглушка
+
+[error_pages]               # страницы ошибок, которые отдаёт nginx (DMN-130)
+enabled = true
+intercept_upstream = false  # true — подменять и ошибки самих приложений
+[error_pages.custom]        # код → HTML; коды без записи — встроенная страница
+"404" = "<!doctype html>…"
+
 [host]                      # факты о хосте, снятые при установке
 user = "www-data"
 pid = "/run/nginx.pid"
 ```
 
 Меняются через API (`UpdateWebServerSettings`): новые настройки сначала проходят `nginx -t` и сохраняются только при успехе.
+
+### 🚪 Сайт по умолчанию и страницы ошибок (DMN-130)
+
+**Сайт по умолчанию** — `default_server` на :80 отвечает на любое имя, которое не занял ни один сайт (голый IP, устаревшая DNS-запись, сканер). ACME-проверки на нём проходят в любом режиме.
+
+| `mode` | Поведение |
+|---|---|
+| `drop` (по умолчанию) | `return 444` — соединение закрывается без ответа |
+| `page` | одна страница: `page_html` или встроенная заглушка «здесь ничего не опубликовано», пишется в `default/index.html` |
+| `root` | статика из каталога `root` (`index.html`, `try_files $uri $uri/ =404`); в режиме docker каталог монтируется в контейнер только для чтения, а контейнер один раз пересоздаётся, если монтирования нет |
+| `redirect` | `return 302 <redirect_url>` |
+
+`root` — абсолютный нормализованный каталог без пробелов, кавычек, `$`, `:` и `;{}`, не внутри `/etc`, `/var/lib/asc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot` и `/run`. HTTPS для неизвестных имён по-прежнему отклоняет рукопожатие: сертификата для них нет. Если `default_server` на :80 уже объявлен чужим конфигом (`host.foreign_default_http`), сайт по умолчанию не рендерится.
+
+**Страницы ошибок** — `snippets/errors.conf` объявляет `error_page` для 400, 401, 403, 404, 405, 408, 413, 429, 500, 502, 503, 504 и `internal`-локацию `/__asc_errors/`, отдающую `errors/<код>.html`. Его подключают все сгенерированные сайты (кроме raw и сайта API демона) и сайт по умолчанию в режимах `page`/`root`. Код без записи в `error_pages.custom` получает встроенную самодостаточную страницу (без внешних ресурсов, светлая и тёмная тема). По умолчанию страницу получают только ошибки самого nginx — приложение не отвечает (502/504), слишком большое тело (413); `intercept_upstream = true` добавляет `proxy_intercept_errors on` и подменяет ещё и ответы-ошибки приложений. Размер каждой своей страницы — до 64 КиБ.
+
+В API обе группы — сообщения (`WebServerDefaultSite`, `WebServerErrorPages`); клиент, который их не передал, оставляет то, что уже на ноде.
 
 ### 🧱 Файлы
 
@@ -161,6 +190,19 @@ Site
 
 `snippets/cloudflare-realip.conf` — `set_real_ip_from` для всех диапазонов Cloudflare, `real_ip_header CF-Connecting-IP`, `real_ip_recursive on`. Список раз в сутки обновляется с `https://www.cloudflare.com/ips-v4` и `/ips-v6`. Каждая строка проверяется как CIDR: любая невалидная строка отбрасывает весь ответ, чтобы страница ошибки или captive portal не стали списком доверенных прокси. В бинарник вшит запасной список. Сниппет подключается в `http {}` (`cloudflare_real_ip = true`) или в `server {}` отдельного сайта.
 
+### 📜 Логи сайтов (DMN-128)
+
+У каждого сайта свои журналы: `/var/log/asc/webserver/<id>.access.log` (формат `asc`) и `<id>.error.log` (уровень `warn`) — директивы стоят в обоих `server {}` (:80 и :443). Сайт с `raw_config` пишет туда, куда скажет оператор.
+
+- Выключить можно каждый лог отдельно: в модели `logs = { access, error }`, в proto — `Site.access_log_off` / `Site.error_log_off` (инверсия, чтобы клиент без этих полей логи не выключал). Выключенный access — `access_log off;`, выключенный error — `error_log /dev/null crit;` (у nginx нет `error_log off`).
+- Каталог создаётся перед `nginx -t`. В docker-режиме он примонтирован в контейнер тем же путём (rw); контейнер, созданный до DMN-128, пересоздаётся при следующем применении — один раз.
+- Ротация — `/etc/logrotate.d/asc-webserver` (пишется один раз, правки оператора сохраняются): `daily`, `rotate 14`, `compress`, `copytruncate` — без сигнала nginx, одинаково для хоста и контейнера.
+- `ReadSiteLog(id, kind, tail, query)` читает не больше 8 МиБ с конца файла, фильтрует по подстроке без учёта регистра и отдаёт до `tail` последних совпадений (по умолчанию 200, максимум 5000), `enabled`, размер файла и `truncated`. Capability — `webserver.logs`.
+
+### 🔌 Сайт API демона (DMN-129)
+
+`TokenService.SetApiProxy(domain, certificate?)` публикует API самого демона через nginx: сайт `asc-api` с `managed_by = "daemon-api"` — `ReplaceSites` платформы его не трогает. Upstream — слушатель API на `127.0.0.1:<порт>` (если слушатель сам на TLS, nginx говорит с ним по TLS без проверки — это loopback). На :80 сайт только редиректит на HTTPS даже до выпуска сертификата: токен не должен идти открытым текстом. На :443 — HTTP/2 всегда (gRPC), gRPC-запросы уходят в `grpc_pass` через именованный location (`error_page 418 = @asc_grpc`), REST и WebSocket-консоль — в `proxy_pass` с таймаутами в час и без буферизации, `client_max_body_size 0`. HTTPS — Let's Encrypt или переданный PEM. `RemoveApiProxy` снимает сайт. Оба вызова — только основным токеном; capability — `api.proxy`.
+
 ### 📡 API — `WebServerService`
 
 | RPC | REST (CLI) | Назначение |
@@ -176,8 +218,9 @@ Site
 | `RenderSite` | — | отрендерить сайт без применения (превью для UI) |
 | `RenewCertificate` | `POST /v1/webserver/sites/{id}/renew` | немедленный выпуск |
 | `ProbeTcp` | — | TCP-подключение с ноды к адресу (DMN-126) |
+| `ReadSiteLog` | — | хвост access/error лога сайта с фильтром (DMN-128) |
 
-Capability в `GetStatus` — `webserver`.
+Capability в `GetStatus` — `webserver`, `webserver.logs`.
 
 ### ⌨️ CLI
 
@@ -198,4 +241,4 @@ asc web site renew <id>
 
 ## 🔗 Связанные задачи
 
-DMN-122, DMN-123, DMN-124, DMN-125, DMN-126 (health checks для балансировщика), DMN-067 (ACME для API демона) в [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-122, DMN-123, DMN-124, DMN-125, DMN-126 (health checks для балансировщика), DMN-128 (логи сайтов), DMN-129 (сайт API демона), DMN-130 (сайт по умолчанию и страницы ошибок), DMN-067 (ACME для API демона) в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

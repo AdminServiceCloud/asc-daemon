@@ -171,6 +171,10 @@ facts once and stops there — it does not send heartbeats and the panel does no
 show it as online. Commands from the panel, log streaming and metrics arrive
 with the platform tunnel (NODE-002 on the platform side).
 
+### 🪪 A certificate from the platform (DMN-127)
+
+`TokenService.SetApiCertificate(certificate_pem, private_key_pem, domain)` (primary token only) checks the pair, writes `api-custom.crt` / `api-custom.key` (`0600`) next to config.toml, switches `[api]` to `tls = "files"` and swaps the certificate of a running TLS listener in place — new connections get it at once. It answers with the new fingerprint and `restart_required` when the listener is not TLS yet. The daemon now reports the fingerprint for `files` too: the certificate may come from a private CA (Cloudflare Origin), where only a pin can vouch for it. Capability `api.certificate`.
+
 ## 🔗 Related tasks
 
 DMN-058 in the [ROADMAP](../../../asc-platform/ROADMAP.md); on the platform

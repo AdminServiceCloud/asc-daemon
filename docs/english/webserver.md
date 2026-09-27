@@ -67,12 +67,41 @@ acme_directory = ""         # empty — Let's Encrypt production
 custom_main = ""            # inserted into the main context
 custom_http = ""            # inserted into http {}
 
+[default_site]              # what :80 answers for names no site claims (DMN-130)
+mode = "drop"               # drop (444) | page | root | redirect
+root = ""                   # root: an absolute host directory
+redirect_url = ""           # redirect: an http(s) URL (302)
+page_html = ""              # page: your HTML; empty — the built-in stub
+
+[error_pages]               # branded pages for errors nginx produces (DMN-130)
+enabled = true
+intercept_upstream = false  # true — also replace the apps' own errors
+[error_pages.custom]        # status → HTML; missing codes get the built-in page
+"404" = "<!doctype html>…"
+
 [host]                      # host facts captured at install time
 user = "www-data"
 pid = "/run/nginx.pid"
 ```
 
 Changed through the API (`UpdateWebServerSettings`): new settings go through `nginx -t` first and are saved only if it passes.
+
+### 🚪 Default site and error pages (DMN-130)
+
+**Default site** — the `default_server` on :80 answers every name no site claims (a bare IP, a stale DNS record, a scanner). ACME challenges are answered there in every mode.
+
+| `mode` | Behaviour |
+|---|---|
+| `drop` (default) | `return 444` — the connection is closed without a response |
+| `page` | a single page: `page_html` or the built-in "nothing is published here" stub, written to `default/index.html` |
+| `root` | static files from `root` (`index.html`, `try_files $uri $uri/ =404`); in docker mode the directory is bound into the container read-only and the container is recreated once when the bind is missing |
+| `redirect` | `return 302 <redirect_url>` |
+
+`root` must be an absolute, normalized directory without spaces, quotes, `$`, `:` or `;{}`, and not inside `/etc`, `/var/lib/asc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot` or `/run`. HTTPS for unknown names keeps rejecting the handshake: there is no certificate to serve them with. When another config already owns `default_server` on :80 (`host.foreign_default_http`), the default site is not rendered.
+
+**Error pages** — `snippets/errors.conf` declares `error_page` for 400, 401, 403, 404, 405, 408, 413, 429, 500, 502, 503, 504 and an `internal` location `/__asc_errors/` serving `errors/<code>.html`. Every generated site (not raw ones, not the daemon's API site) and the `page`/`root` default site include it. A code without `error_pages.custom` gets a self-contained built-in page (no external assets, light and dark). By default only errors nginx produces itself get the page — an app that is down (502/504), a body too large (413); `intercept_upstream = true` adds `proxy_intercept_errors on` and replaces the apps' own error responses as well. Each custom page is limited to 64 KiB.
+
+Over the API both groups are messages (`WebServerDefaultSite`, `WebServerErrorPages`); a client that does not send them keeps what the node has.
 
 ### 🧱 Files
 
@@ -161,6 +190,14 @@ Every 10 minutes, and right after sites with Let's Encrypt change:
 
 `snippets/cloudflare-realip.conf` holds `set_real_ip_from` for every Cloudflare range, `real_ip_header CF-Connecting-IP` and `real_ip_recursive on`. The list is refreshed daily from `https://www.cloudflare.com/ips-v4` and `/ips-v6`. Every line is validated as a CIDR, and any invalid line discards the whole response, so an error page or captive portal never becomes the list of trusted proxies. A fallback list is embedded in the binary. The snippet is included in `http {}` (`cloudflare_real_ip = true`) or in one site's `server {}`.
 
+### 📜 Site logs (DMN-128)
+
+Every site writes its own logs: `/var/log/asc/webserver/<id>.access.log` (`asc` format) and `<id>.error.log` (`warn`), in both `server {}` blocks. Each can be turned off (`Site.access_log_off` / `Site.error_log_off` — negated so an older client keeps them on): `access_log off;` and `error_log /dev/null crit;`. The directory is created before `nginx -t`; in docker mode it is bound into the container under the same path (a container created earlier is recreated once). Rotation: `/etc/logrotate.d/asc-webserver` (daily, 14 archives, `copytruncate`). `ReadSiteLog(id, kind, tail, query)` reads at most the last 8 MiB, filters case-insensitively and returns up to `tail` lines (default 200, max 5000). Capability `webserver.logs`.
+
+### 🔌 The daemon's own API site (DMN-129)
+
+`TokenService.SetApiProxy(domain, certificate?)` publishes the daemon API through nginx as site `asc-api` (`managed_by = "daemon-api"`, never touched by the platform's `ReplaceSites`): :80 only redirects to HTTPS, :443 always speaks HTTP/2, gRPC goes to `grpc_pass` through a named location, REST and the WebSocket console to `proxy_pass` (hour-long timeouts, no buffering). HTTPS is Let's Encrypt or the PEM passed in. `RemoveApiProxy` takes it down. Primary token only; capability `api.proxy`.
+
 ### 📡 API — `WebServerService`
 
 | RPC | REST (CLI) | Purpose |
@@ -198,4 +235,4 @@ With no daemon running, the commands work in-process as root.
 
 ## 🔗 Related tasks
 
-DMN-122, DMN-123, DMN-124, DMN-125, DMN-126 (health checks for the load balancer), DMN-067 (ACME for the daemon API) in [ROADMAP.md](../../../asc-platform/ROADMAP.md).
+DMN-122, DMN-123, DMN-124, DMN-125, DMN-126 (health checks for the load balancer), DMN-130 (default site and error pages), DMN-067 (ACME for the daemon API) in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

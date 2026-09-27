@@ -237,8 +237,23 @@ impl WebServer {
         let mut rejected: HashSet<String> = HashSet::new();
         let mut kept_live: HashSet<String> = HashSet::new();
         let mut messages: HashMap<String, String> = HashMap::new();
+        // Site logs (DMN-128): nginx opens every file at `-t` already, and
+        // it creates files but not directories.
+        std::fs::create_dir_all(&self.paths.logs)
+            .with_context(|| format!("cannot create {}", self.paths.logs.display()))?;
+        if docker && stage != Stage::WriteOnly {
+            self.engine(settings.mode).ensure_binds(settings)?;
+        }
+        super::ensure_logrotate(&self.paths);
         let test_output = loop {
-            let rendered = render_sites(&candidates, &rejected, settings, features, &staging);
+            let rendered = render_sites(
+                &candidates,
+                &rejected,
+                settings,
+                features,
+                &staging,
+                &self.paths.logs,
+            );
             write_tree(&staging, &global, &rendered, &kept_live, &live_sites)?;
             if stage == Stage::WriteOnly {
                 break String::new();
@@ -285,7 +300,14 @@ impl WebServer {
         // Swap: render once more against the live root and write it.
         let global_live =
             render::render_global(settings, features, &ranges, &self.paths, &live_root, docker);
-        let rendered_live = render_sites(&candidates, &rejected, settings, features, &live_root);
+        let rendered_live = render_sites(
+            &candidates,
+            &rejected,
+            settings,
+            features,
+            &live_root,
+            &self.paths.logs,
+        );
         let main_conf = engine::main_conf_path(settings.mode, &self.paths);
         for (rel, content) in &global_live {
             let target = if rel.as_path() == Path::new(render::NGINX_CONF) {
@@ -374,6 +396,7 @@ fn render_sites(
     settings: &Settings,
     features: Features,
     base: &Path,
+    logs: &Path,
 ) -> Vec<Rendered> {
     candidates
         .iter()
@@ -390,7 +413,7 @@ fn render_sites(
             }
             Rendered {
                 id: site.id.clone(),
-                file: render::render_site(&resolved, settings, features, base),
+                file: render::render_site(&resolved, settings, features, base, logs),
                 certs,
                 addresses: r.addresses.clone(),
             }

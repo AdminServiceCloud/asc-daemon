@@ -31,6 +31,17 @@ pub fn key_path() -> PathBuf {
     Config::path().with_file_name("api.key")
 }
 
+/// A certificate the platform handed in (DMN-127) — kept apart from the
+/// self-signed pair and from an operator's own `tls_cert`, so neither is
+/// overwritten.
+pub fn custom_cert_path() -> PathBuf {
+    Config::path().with_file_name("api-custom.crt")
+}
+
+pub fn custom_key_path() -> PathBuf {
+    Config::path().with_file_name("api-custom.key")
+}
+
 /// Where ACME material lives: the account key, and the certificate and key
 /// issued for the configured domain (DMN-067). Kept apart from the
 /// self-signed pair so switching modes never overwrites the other's files.
@@ -128,7 +139,28 @@ pub fn prepare(config: &Config) -> Result<Option<Materials>> {
     }
     let key = PrivateKeyDer::from_pem_file(&key_file)
         .with_context(|| format!("cannot read private key {}", key_file.display()))?;
+    build(certificates, key).map(Some)
+}
 
+/// A PEM pair handed in over the API, checked the same way `prepare` checks
+/// files — before anything is written.
+pub fn materials_from_pem(certificate_pem: &str, key_pem: &str) -> Result<Materials> {
+    let certificates: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(certificate_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .context("cannot parse the certificate")?;
+    if certificates.is_empty() {
+        bail!("the certificate PEM contains no certificate");
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .context("cannot parse the private key")?;
+    build(certificates, key)
+}
+
+fn build(
+    certificates: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<Materials> {
     let print = fingerprint(&certificates[0]);
     let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
@@ -137,10 +169,55 @@ pub fn prepare(config: &Config) -> Result<Option<Materials>> {
     // gRPC needs h2; REST and the WebSocket console stay on HTTP/1.1.
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    Ok(Some(Materials {
+    Ok(Materials {
         config: Arc::new(server_config),
         fingerprint: print,
-    }))
+    })
+}
+
+/// Serve the API with a certificate the platform handed in (DMN-127):
+/// validate the pair, write it next to config.toml, switch `[api] tls` to
+/// `files` and save. The caller swaps the running listener over with
+/// [`Live::set`]; a listener that is not TLS picks it up on restart.
+pub fn install_custom(
+    config: &mut Config,
+    certificate_pem: &str,
+    key_pem: &str,
+    domain: Option<&str>,
+) -> Result<Materials> {
+    let materials = materials_from_pem(certificate_pem, key_pem)?;
+    write_secret(&custom_cert_path(), certificate_pem.as_bytes(), 0o644)?;
+    write_secret(&custom_key_path(), key_pem.as_bytes(), 0o600)?;
+    config.api.tls = TlsMode::Files;
+    config.api.tls_cert = Some(custom_cert_path());
+    config.api.tls_key = Some(custom_key_path());
+    if let Some(domain) = domain.map(str::trim).filter(|d| !d.is_empty()) {
+        config.api.domain = Some(domain.to_ascii_lowercase());
+    }
+    config.api.validate()?;
+    config.save()?;
+    info!(fingerprint = %materials.fingerprint, "installed an API certificate from the platform");
+    Ok(materials)
+}
+
+/// The TLS configuration the running listener hands to each new connection
+/// (DMN-127). Empty while the listener is plain (loopback) — then a new
+/// certificate needs a restart. Connections already open keep the one they
+/// were accepted with, so swapping never cuts the call that asked for it.
+#[derive(Clone, Default)]
+pub struct Live(Arc<std::sync::RwLock<Option<Arc<ServerConfig>>>>);
+
+impl Live {
+    pub fn get(&self) -> Option<Arc<ServerConfig>> {
+        self.0
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    pub fn set(&self, config: Arc<ServerConfig>) {
+        *self.0.write().unwrap_or_else(|poison| poison.into_inner()) = Some(config);
+    }
 }
 
 /// Issues a self-signed certificate if none exists yet. The SANs cover
@@ -201,6 +278,34 @@ fn write_secret(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pem_pair_is_checked_before_anything_is_written() {
+        let one = rcgen::generate_simple_self_signed(vec!["node.example.com".to_string()]).unwrap();
+        let two = rcgen::generate_simple_self_signed(vec!["node.example.com".to_string()]).unwrap();
+        let cert = one.cert.pem();
+        let key = one.signing_key.serialize_pem();
+
+        let materials = materials_from_pem(&cert, &key).unwrap();
+        assert_eq!(
+            materials.fingerprint,
+            fingerprint(&CertificateDer::from(one.cert.der().to_vec()))
+        );
+        assert!(materials_from_pem(&cert, &two.signing_key.serialize_pem()).is_err());
+        assert!(materials_from_pem("not a certificate", &key).is_err());
+        assert!(materials_from_pem(&cert, "not a key").is_err());
+    }
+
+    #[test]
+    fn the_live_config_swaps() {
+        let live = Live::default();
+        assert!(live.get().is_none());
+        let one = rcgen::generate_simple_self_signed(vec!["a.example.com".to_string()]).unwrap();
+        let materials =
+            materials_from_pem(&one.cert.pem(), &one.signing_key.serialize_pem()).unwrap();
+        live.set(Arc::clone(&materials.config));
+        assert!(Arc::ptr_eq(&live.get().unwrap(), &materials.config));
+    }
 
     #[test]
     fn fingerprints_are_stable_and_prefixed() {

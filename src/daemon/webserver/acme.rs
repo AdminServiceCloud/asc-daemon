@@ -273,6 +273,7 @@ mod tests {
             root: dir.path().join("root"),
             state: dir.path().join("state"),
             webroot: dir.path().join("www"),
+            logs: dir.path().join("logs"),
         };
         match self_check(&paths, "nonexistent.invalid") {
             SelfCheck::Wrong(message) => assert!(message.contains("does not resolve")),

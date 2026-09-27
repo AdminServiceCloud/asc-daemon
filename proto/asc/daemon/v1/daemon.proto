@@ -1244,6 +1244,52 @@ service TokenService {
   rpc CommitPrimaryTokenRotation(CommitPrimaryTokenRotationRequest) returns (CommitPrimaryTokenRotationResponse);
   // Token state without any token material.
   rpc GetTokenStatus(GetTokenStatusRequest) returns (GetTokenStatusResponse);
+  // Serve the API with a certificate the caller hands in (DMN-127): the pair
+  // is checked, written next to config.toml as api-custom.{crt,key}, `[api] tls`
+  // becomes "files" and a running TLS listener switches to it without a
+  // restart. Capability "api.certificate".
+  rpc SetApiCertificate(SetApiCertificateRequest) returns (SetApiCertificateResponse);
+  // Publish the API through the node's web server on a domain (DMN-129):
+  // nginx site "asc-api" proxying gRPC, REST and the console to the loopback
+  // listener. Capability "api.proxy".
+  rpc SetApiProxy(SetApiProxyRequest) returns (SetApiProxyResponse);
+  rpc RemoveApiProxy(RemoveApiProxyRequest) returns (RemoveApiProxyResponse);
+}
+
+message SetApiCertificateRequest {
+  // Leaf first, then the chain.
+  string certificate_pem = 1;
+  string private_key_pem = 2;
+  // Written to `[api] domain` when set — what the node advertises.
+  string domain = 3;
+}
+
+message SetApiCertificateResponse {
+  // SHA-256 of the new leaf, "SHA256:<hex>" — what the caller pins.
+  string fingerprint = 1;
+  // The listener does not run TLS now (loopback or `tls = "off"`): the new
+  // settings take effect after `asc service restart`.
+  bool restart_required = 2;
+}
+
+message SetApiProxyRequest {
+  string domain = 1;
+  // Empty — Let's Encrypt, issued by the daemon; set — this certificate.
+  string certificate_pem = 2;
+  string private_key_pem = 3;
+}
+
+message SetApiProxyResponse {
+  // The API site as the web server reports it (status, TLS state).
+  Site site = 1;
+  // The loopback address nginx proxies to.
+  string upstream = 2;
+}
+
+message RemoveApiProxyRequest {}
+
+message RemoveApiProxyResponse {
+  bool removed = 1;
 }
 
 enum DaemonTokenKind {
@@ -2349,6 +2395,9 @@ service WebServerService {
   // Whether this node can open a TCP connection to an address — checks that
   // a load balancer member on another node is reachable (DMN-126).
   rpc ProbeTcp(ProbeTcpRequest) returns (ProbeTcpResponse);
+  // The tail of a site's own access or error log, optionally filtered
+  // (DMN-128). Capability "webserver.logs".
+  rpc ReadSiteLog(ReadSiteLogRequest) returns (ReadSiteLogResponse);
 }
 
 enum WebServerMode {
@@ -2385,6 +2434,33 @@ message WebServerSettings {
   string custom_http = 16;
   // Docker mode only; empty — nginx:stable-alpine.
   string image = 17;
+  // What :80 answers for names no site claims. Absent — keep the current
+  // default site (a client that predates the field).
+  WebServerDefaultSite default_site = 18;
+  // Branded error pages. Absent — keep the current ones.
+  WebServerErrorPages error_pages = 19;
+}
+
+message WebServerDefaultSite {
+  // "drop" (close the connection, 444), "page" (a single HTML page),
+  // "root" (static files from a host directory), "redirect".
+  string mode = 1;
+  // "root": an absolute host directory.
+  string root = 2;
+  // "redirect": an http(s) URL.
+  string redirect_url = 3;
+  // "page": the page's HTML; empty — the built-in stub.
+  string page_html = 4;
+}
+
+message WebServerErrorPages {
+  bool enabled = 1;
+  // Also replace the apps' own error responses (proxy_intercept_errors).
+  bool intercept_upstream = 2;
+  // Status code ("404") → HTML; a missing code gets the built-in page.
+  map<string, string> custom = 3;
+  // Read-only: the statuses that get a page, in order.
+  repeated uint32 codes = 4;
 }
 
 message GetWebServerRequest {}
@@ -2583,6 +2659,10 @@ message Site {
   string extra_location = 10;
   // Set — the site's whole configuration, rendered as is.
   optional string raw_config = 11;
+  // The site's own nginx logs under /var/log/asc/webserver (DMN-128). Negated
+  // on purpose: a caller that predates these fields keeps both logs on.
+  bool access_log_off = 12;
+  bool error_log_off = 13;
   // Read-only.
   SiteStatus status = 20;
 }
@@ -2695,4 +2775,30 @@ message ProbeTcpResponse {
   bool reachable = 1;
   uint32 latency_ms = 2;
   string error = 3;
+}
+
+enum SiteLogKind {
+  SITE_LOG_KIND_UNSPECIFIED = 0;
+  SITE_LOG_KIND_ACCESS = 1;
+  SITE_LOG_KIND_ERROR = 2;
+}
+
+message ReadSiteLogRequest {
+  string id = 1;
+  SiteLogKind kind = 2;
+  // Lines to return; 0 — 200, at most 5000.
+  uint32 tail = 3;
+  // Case-insensitive substring; empty — every line.
+  string query = 4;
+}
+
+message ReadSiteLogResponse {
+  // Oldest first.
+  repeated string lines = 1;
+  // False — the site has this log turned off.
+  bool enabled = 2;
+  // Size of the log file in bytes; 0 when it does not exist yet.
+  uint64 size_bytes = 3;
+  // Only the last 8 MiB are searched; true when the file is larger.
+  bool truncated = 4;
 }

@@ -1649,6 +1649,113 @@ impl TokenService for Grpc {
             ttl_default_secs: status.ttl_default_secs as u32,
         }))
     }
+
+    async fn set_api_certificate(
+        &self,
+        request: Request<pb::SetApiCertificateRequest>,
+    ) -> Result<Response<pb::SetApiCertificateResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        crate::daemon::users::require_root(&ctx).map_err(|err| to_status(err.into()))?;
+        let req = request.into_inner();
+        if req.certificate_pem.trim().is_empty() || req.private_key_pem.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "both the certificate and the private key are required",
+            ));
+        }
+        let materials = tokio::task::spawn_blocking(move || {
+            // Re-read from disk: the in-memory copy is the one the daemon
+            // started with, and saving it would undo later CLI changes.
+            let mut config = crate::daemon::config::Config::load()?;
+            let domain = (!req.domain.trim().is_empty()).then_some(req.domain.as_str());
+            super::tls::install_custom(
+                &mut config,
+                &req.certificate_pem,
+                &req.private_key_pem,
+                domain,
+            )
+        })
+        .await
+        .map_err(|err| Status::internal(format!("worker panicked: {err}")))?
+        .map_err(|err| {
+            let msg = format!("{err:#}");
+            if msg.contains("parse")
+                || msg.contains("do not match")
+                || msg.contains("no certificate")
+            {
+                Status::invalid_argument(msg)
+            } else {
+                Status::internal(msg)
+            }
+        })?;
+        // A running TLS listener switches now; a plain one on the next start.
+        let restart_required = self.0.api_tls.get().is_none();
+        if !restart_required {
+            self.0.api_tls.set(materials.config);
+        }
+        Ok(Response::new(pb::SetApiCertificateResponse {
+            fingerprint: materials.fingerprint,
+            restart_required,
+        }))
+    }
+
+    async fn set_api_proxy(
+        &self,
+        request: Request<pb::SetApiProxyRequest>,
+    ) -> Result<Response<pb::SetApiProxyResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        let req = request.into_inner();
+        let domain = req.domain.trim().to_ascii_lowercase();
+        if crate::daemon::webserver::model::validate_server_name(&domain).is_err()
+            || domain.starts_with("*.")
+        {
+            return Err(Status::invalid_argument("domain must be a plain host name"));
+        }
+        let certificate = match (
+            req.certificate_pem.trim().is_empty(),
+            req.private_key_pem.trim().is_empty(),
+        ) {
+            (true, true) => None,
+            (false, false) => {
+                // Refuse a broken pair here rather than as an nginx -t failure.
+                super::tls::materials_from_pem(&req.certificate_pem, &req.private_key_pem)
+                    .map_err(|err| Status::invalid_argument(format!("{err:#}")))?;
+                Some((req.certificate_pem, req.private_key_pem))
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "a certificate needs both the certificate and the private key",
+                ));
+            }
+        };
+        let (view, upstream) = self
+            .0
+            .set_api_proxy(&ctx, domain, certificate)
+            .await
+            .map_err(|err| {
+                let msg = format!("{err:#}");
+                if msg.contains("not installed") {
+                    Status::failed_precondition(msg)
+                } else {
+                    to_status(err)
+                }
+            })?;
+        Ok(Response::new(pb::SetApiProxyResponse {
+            site: Some(super::webserver::api_site_to_pb(view)),
+            upstream,
+        }))
+    }
+
+    async fn remove_api_proxy(
+        &self,
+        request: Request<pb::RemoveApiProxyRequest>,
+    ) -> Result<Response<pb::RemoveApiProxyResponse>, Status> {
+        let ctx = ctx_of(&request);
+        tokens::require_primary(kind_of(&request), &ctx).map_err(denied_to_status)?;
+        let removed = self.0.remove_api_proxy(&ctx).await.map_err(to_status)?;
+        Ok(Response::new(pb::RemoveApiProxyResponse { removed }))
+    }
 }
 
 // ── Files (DMN-070) — see docs/files.md ──

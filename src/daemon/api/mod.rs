@@ -70,6 +70,9 @@ pub const CAPABILITIES: &[&str] = &[
     "processes",
     "app.repull",
     "webserver",
+    "webserver.logs",
+    "api.certificate",
+    "api.proxy",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -98,6 +101,9 @@ pub struct ApiState {
     pub tokens: TokenStore,
     /// The node's web server and its sites (DMN-122).
     pub webserver: Arc<crate::daemon::webserver::WebServer>,
+    /// The certificate the TLS listener serves, swappable at runtime
+    /// (DMN-127). Empty while the API is plain.
+    pub api_tls: tls::Live,
 }
 
 /// Apps-wide disk report (`asc disk` with no app): what each app occupies,
@@ -815,6 +821,7 @@ impl ApiState {
             monitor,
             tokens: TokenStore::new(token),
             webserver,
+            api_tls: tls::Live::default(),
         })
     }
 
@@ -2753,7 +2760,9 @@ pub async fn serve(
         fingerprint = %materials.fingerprint,
         "API listening over TLS (gRPC + REST)"
     );
-    serve_tls(listener, router(state), materials, shutdown).await
+    state.api_tls.set(materials.config);
+    let live = state.api_tls.clone();
+    serve_tls(listener, router(state), live, shutdown).await
 }
 
 /// TLS accept loop. axum::serve has no TLS support, and the API has to keep
@@ -2762,10 +2771,9 @@ pub async fn serve(
 async fn serve_tls(
     listener: tokio::net::TcpListener,
     app: axum::Router,
-    materials: tls::Materials,
+    live: tls::Live,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(materials.config);
     let mut shutdown = std::pin::pin!(shutdown);
 
     loop {
@@ -2773,7 +2781,12 @@ async fn serve_tls(
             accepted = listener.accept() => accepted.context("cannot accept a connection")?,
             () = &mut shutdown => return Ok(()),
         };
-        let acceptor = acceptor.clone();
+        // Read per connection: a certificate installed at runtime
+        // (SetApiCertificate) applies to the next handshake.
+        let Some(config) = live.get() else {
+            continue;
+        };
+        let acceptor = tokio_rustls::TlsAcceptor::from(config);
         let service = hyper_util::service::TowerToHyperService::new(app.clone());
         tokio::spawn(async move {
             let stream = match acceptor.accept(stream).await {

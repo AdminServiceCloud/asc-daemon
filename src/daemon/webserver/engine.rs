@@ -26,6 +26,24 @@ const APT_PIN: &str = "/etc/apt/preferences.d/99nginx-asc";
 const YUM_REPO: &str = "/etc/yum.repos.d/nginx-asc.repo";
 const NGINX_KEY_URL: &str = "https://nginx.org/keys/nginx_signing.key";
 
+/// The read-write bind of the site log directory (DMN-128).
+fn log_bind(paths: &Paths) -> String {
+    format!("{0}:{0}", paths.logs.display())
+}
+
+/// Read-only binds of host directories the settings serve from — the
+/// default site's `root` (the only one today). A directory that does not
+/// exist yet is left out: docker would create it owned by root.
+fn content_binds(settings: &Settings) -> Vec<String> {
+    settings
+        .default_site
+        .host_dir()
+        .filter(|dir| Path::new(dir).is_dir())
+        .map(|dir| format!("{dir}:{dir}:ro"))
+        .into_iter()
+        .collect()
+}
+
 /// Progress sink for long operations: one human line at a time.
 pub type Progress<'a> = &'a mut dyn FnMut(&str);
 
@@ -430,6 +448,14 @@ impl Engine<'_> {
                 );
             }
         }
+        self.create_container(settings, progress)?;
+        settings.host = HostProfile::default();
+        Ok(())
+    }
+
+    /// Creates and starts the `asc-webserver` container. Ports are the
+    /// caller's to check: a recreate frees them by removing the old one.
+    fn create_container(&self, settings: &Settings, progress: Progress<'_>) -> Result<()> {
         let image = settings.image().to_string();
         progress(&format!("creating container {CONTAINER} from {image}"));
         let conf = main_conf_path(Mode::Docker, self.paths)
@@ -438,7 +464,16 @@ impl Engine<'_> {
         let acme_certs = self.paths.state.join("acme").join("certs");
         std::fs::create_dir_all(&acme_certs)
             .with_context(|| format!("cannot create {}", acme_certs.display()))?;
+        std::fs::create_dir_all(&self.paths.logs)
+            .with_context(|| format!("cannot create {}", self.paths.logs.display()))?;
         let bind = |p: &Path| format!("{0}:{0}:ro", p.display());
+        let mut binds = vec![
+            bind(&self.paths.root),
+            bind(&self.paths.webroot),
+            bind(&acme_certs),
+            log_bind(self.paths),
+        ];
+        binds.extend(content_binds(settings));
         let spec = docker::ServiceContainerSpec {
             name: CONTAINER,
             image: &image,
@@ -447,18 +482,34 @@ impl Engine<'_> {
             // they still run would hit the shell instead of nginx.
             entrypoint: Some(vec!["nginx".into()]),
             cmd: vec!["-g".into(), "daemon off;".into(), "-c".into(), conf],
-            binds: vec![
-                bind(&self.paths.root),
-                bind(&self.paths.webroot),
-                bind(&acme_certs),
-            ],
+            binds,
             labels: HashMap::from([("asc.managed".to_string(), "webserver".to_string())]),
         };
         docker::create_host_service(self.docker, &spec)?;
         docker::start(self.docker, CONTAINER)?;
-        settings.host = HostProfile::default();
         progress("container started");
         Ok(())
+    }
+
+    /// A container created before site logs existed (DMN-128) does not see
+    /// the log directory, and one created before the default site pointed at
+    /// a host directory does not see that one: nginx would fail to open the
+    /// files. Recreate it with the binds — same image, same configuration.
+    pub fn ensure_binds(&self, settings: &Settings) -> Result<()> {
+        if self.mode != Mode::Docker {
+            return Ok(());
+        }
+        let Some(applied) = docker::container_applied(self.docker, CONTAINER)? else {
+            return Ok(());
+        };
+        let mut wanted = content_binds(settings);
+        wanted.push(log_bind(self.paths));
+        if wanted.iter().all(|bind| applied.binds.contains(bind)) {
+            return Ok(());
+        }
+        tracing::info!("recreating {CONTAINER} with the directories it serves from");
+        docker::remove(self.docker, CONTAINER)?;
+        self.create_container(settings, &mut |line| tracing::info!("{line}"))
     }
 
     /// Removes what install added. An adopted nginx gets its original

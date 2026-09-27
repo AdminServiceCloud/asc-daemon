@@ -22,8 +22,9 @@ use super::rest::ApiError;
 use crate::daemon::apps::UserContext;
 use crate::daemon::users;
 use crate::daemon::webserver::model::{
-    Balance, Header, HealthCheck, HealthKind, Mode, Proxy, RealIp, Settings, Site, SiteState,
-    SiteView, Target, Tls, TlsMode, TlsState, Upstream, UpstreamServer,
+    Balance, DefaultSite, DefaultSiteMode, ERROR_CODES, ErrorPages, Header, HealthCheck,
+    HealthKind, LogKind, Mode, Proxy, RealIp, Settings, Site, SiteLogs, SiteState, SiteView,
+    Target, Tls, TlsMode, TlsState, Upstream, UpstreamServer,
 };
 use crate::daemon::webserver::{Overview, WebServer};
 
@@ -65,6 +66,44 @@ impl ApiState {
         });
         rx
     }
+}
+
+impl ApiState {
+    /// Publishes the API through the node's nginx (DMN-129). The upstream is
+    /// the API listener on loopback; when the listener itself runs TLS, nginx
+    /// talks TLS to it.
+    pub(super) async fn set_api_proxy(
+        self: &Arc<Self>,
+        ctx: &UserContext,
+        domain: String,
+        certificate: Option<(String, String)>,
+    ) -> Result<(SiteView, String)> {
+        let port = self
+            .config
+            .api
+            .listen
+            .rsplit(':')
+            .next()
+            .and_then(|port| port.parse::<u16>().ok())
+            .unwrap_or(8420);
+        let upstream = format!("127.0.0.1:{port}");
+        let upstream_tls = self.config.api.tls != crate::daemon::config::TlsMode::Off;
+        let address = upstream.clone();
+        let view = self
+            .web(ctx, move |w| {
+                w.set_api_proxy(&domain, &address, upstream_tls, certificate)
+            })
+            .await?;
+        Ok((view, upstream))
+    }
+
+    pub(super) async fn remove_api_proxy(self: &Arc<Self>, ctx: &UserContext) -> Result<bool> {
+        self.web(ctx, |w| w.remove_api_proxy()).await
+    }
+}
+
+pub(super) fn api_site_to_pb(view: SiteView) -> pb::Site {
+    view_to_pb(view)
 }
 
 enum InstallEvent {
@@ -110,10 +149,56 @@ fn settings_to_pb(s: &Settings) -> pb::WebServerSettings {
         custom_main: s.custom_main.clone(),
         custom_http: s.custom_http.clone(),
         image: s.image.clone(),
+        default_site: Some(pb::WebServerDefaultSite {
+            mode: s.default_site.mode.label().to_string(),
+            root: s.default_site.root.clone(),
+            redirect_url: s.default_site.redirect_url.clone(),
+            page_html: s.default_site.page_html.clone(),
+        }),
+        error_pages: Some(pb::WebServerErrorPages {
+            enabled: s.error_pages.enabled,
+            intercept_upstream: s.error_pages.intercept_upstream,
+            custom: s.error_pages.custom.clone().into_iter().collect(),
+            codes: ERROR_CODES
+                .iter()
+                .map(|(code, _)| u32::from(*code))
+                .collect(),
+        }),
     }
 }
 
-fn settings_from_pb(p: pb::WebServerSettings) -> Settings {
+/// The settings a client sent. The default site and the error pages are
+/// `None` when the client predates them — the caller keeps the current ones.
+fn settings_from_pb(
+    p: pb::WebServerSettings,
+) -> Result<(Settings, Option<DefaultSite>, Option<ErrorPages>), Status> {
+    let default_site = p
+        .default_site
+        .clone()
+        .map(|d| -> Result<DefaultSite, Status> {
+            Ok(DefaultSite {
+                mode: DefaultSiteMode::parse(&d.mode)
+                    .map_err(|err| Status::invalid_argument(err.to_string()))?,
+                root: d.root.trim().to_string(),
+                redirect_url: d.redirect_url.trim().to_string(),
+                page_html: d.page_html,
+            })
+        })
+        .transpose()?;
+    let error_pages = p.error_pages.clone().map(|e| ErrorPages {
+        enabled: e.enabled,
+        intercept_upstream: e.intercept_upstream,
+        // An emptied editor means "the built-in page", not an empty one.
+        custom: e
+            .custom
+            .into_iter()
+            .filter(|(_, html)| !html.trim().is_empty())
+            .collect(),
+    });
+    Ok((settings_fields_from_pb(p), default_site, error_pages))
+}
+
+fn settings_fields_from_pb(p: pb::WebServerSettings) -> Settings {
     Settings {
         worker_processes: p.worker_processes,
         worker_connections: p.worker_connections,
@@ -361,6 +446,8 @@ fn site_to_pb(site: Site) -> pb::Site {
         extra_server: site.extra_server,
         extra_location: site.extra_location,
         raw_config: site.raw_config,
+        access_log_off: !site.logs.access,
+        error_log_off: !site.logs.error,
         status: None,
     }
 }
@@ -428,6 +515,10 @@ fn site_from_pb(p: pb::Site) -> Result<Site, Status> {
         extra_server: p.extra_server,
         extra_location: p.extra_location,
         raw_config: p.raw_config.filter(|r| !r.trim().is_empty()),
+        logs: SiteLogs {
+            access: !p.access_log_off,
+            error: !p.error_log_off,
+        },
     })
 }
 
@@ -524,10 +615,15 @@ impl WebServerService for Grpc {
             .into_inner()
             .settings
             .ok_or_else(|| Status::invalid_argument("settings are required"))?;
-        let settings = settings_from_pb(settings);
+        let (mut settings, default_site, error_pages) = settings_from_pb(settings)?;
         let overview = self
             .0
-            .web(&ctx, move |w| w.update_settings(settings))
+            .web(&ctx, move |w| {
+                let current = w.load_settings();
+                settings.default_site = default_site.unwrap_or(current.default_site);
+                settings.error_pages = error_pages.unwrap_or(current.error_pages);
+                w.update_settings(settings)
+            })
             .await
             .map_err(web_status)?;
         Ok(GrpcResponse::new(pb::UpdateWebServerSettingsResponse {
@@ -678,6 +774,32 @@ impl WebServerService for Grpc {
             reachable,
             latency_ms,
             error,
+        }))
+    }
+
+    async fn read_site_log(
+        &self,
+        request: Request<pb::ReadSiteLogRequest>,
+    ) -> Result<GrpcResponse<pb::ReadSiteLogResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let kind = match pb::SiteLogKind::try_from(req.kind) {
+            Ok(pb::SiteLogKind::Access) => LogKind::Access,
+            Ok(pb::SiteLogKind::Error) => LogKind::Error,
+            _ => return Err(Status::invalid_argument("kind must be ACCESS or ERROR")),
+        };
+        let log = self
+            .0
+            .web(&ctx, move |w| {
+                w.read_site_log(&req.id, kind, req.tail as usize, &req.query)
+            })
+            .await
+            .map_err(web_status)?;
+        Ok(GrpcResponse::new(pb::ReadSiteLogResponse {
+            lines: log.lines,
+            enabled: log.enabled,
+            size_bytes: log.size,
+            truncated: log.truncated,
         }))
     }
 
@@ -901,6 +1023,7 @@ mod tests {
             extra_server: "x".into(),
             extra_location: String::new(),
             raw_config: None,
+            logs: Default::default(),
         };
         let back = site_from_pb(site_to_pb(site.clone())).unwrap();
         assert_eq!(

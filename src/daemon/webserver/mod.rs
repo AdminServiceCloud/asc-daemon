@@ -84,6 +84,85 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))
 }
 
+/// How much of a log's end `ReadSiteLog` looks at (DMN-128).
+const LOG_WINDOW: u64 = 8 * 1024 * 1024;
+/// Lines `ReadSiteLog` returns by default and at most.
+const LOG_TAIL_DEFAULT: usize = 200;
+const LOG_TAIL_MAX: usize = 5000;
+
+/// The tail of one site log.
+#[derive(Debug, Clone, Default)]
+pub struct SiteLog {
+    /// Oldest first.
+    pub lines: Vec<String>,
+    /// The site has this log turned on.
+    pub enabled: bool,
+    pub size: u64,
+    /// The file is larger than the searched window.
+    pub truncated: bool,
+}
+
+/// Up to `tail` last lines of `path` containing `query` (case-insensitive),
+/// looking at no more than the last [`LOG_WINDOW`] bytes. A missing file is
+/// an empty log: nginx creates it on the first request.
+pub fn read_log_tail(path: &Path, tail: usize, query: &str) -> Result<(Vec<String>, u64, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), 0, false));
+        }
+        Err(err) => return Err(err).with_context(|| format!("cannot open {}", path.display())),
+    };
+    let size = file
+        .metadata()
+        .with_context(|| format!("cannot stat {}", path.display()))?
+        .len();
+    let start = size.saturating_sub(LOG_WINDOW);
+    file.seek(SeekFrom::Start(start))
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let mut bytes = Vec::with_capacity((size - start) as usize);
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    // The window most likely starts mid-line.
+    if start > 0 {
+        lines.next();
+    }
+    let needle = query.trim().to_lowercase();
+    let mut picked: Vec<String> = lines
+        .rev()
+        .filter(|line| !line.is_empty())
+        .filter(|line| needle.is_empty() || line.to_lowercase().contains(&needle))
+        .take(tail)
+        .map(str::to_string)
+        .collect();
+    picked.reverse();
+    Ok((picked, size, start > 0))
+}
+
+/// Rotation for the site logs (DMN-128): nginx keeps them open, so the files
+/// are copied and truncated in place — no signal, which works the same for
+/// the host nginx and the container. Written once; an operator's edits stay.
+pub(crate) fn ensure_logrotate(paths: &Paths) {
+    if paths.logs != Path::new(model::LOG_DIR) {
+        return;
+    }
+    let dir = Path::new("/etc/logrotate.d");
+    let file = dir.join("asc-webserver");
+    if !dir.is_dir() || file.exists() {
+        return;
+    }
+    let body = format!(
+        "# asc-daemon: per-site nginx logs (DMN-128).\n{}/*.log {{\n    daily\n    rotate 14\n    missingok\n    notifempty\n    compress\n    delaycompress\n    copytruncate\n}}\n",
+        model::LOG_DIR
+    );
+    if let Err(err) = write_atomic(&file, body.as_bytes(), 0o644) {
+        warn!(error = %format!("{err:#}"), "cannot write the logrotate rule for site logs");
+    }
+}
+
 /// Per-site statuses plus the outcome of the last apply.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -499,6 +578,120 @@ impl WebServer {
         Ok(true)
     }
 
+    /// The tail of a site's own access or error log (DMN-128).
+    pub fn read_site_log(
+        &self,
+        id: &str,
+        kind: model::LogKind,
+        tail: usize,
+        query: &str,
+    ) -> Result<SiteLog> {
+        Self::require_root()?;
+        model::validate_site_id(id)?;
+        let site = self
+            .load_sites()?
+            .into_iter()
+            .find(|s| s.id == id)
+            .with_context(|| format!("site {id:?} not found"))?;
+        let on = match kind {
+            model::LogKind::Access => site.logs.access,
+            model::LogKind::Error => site.logs.error,
+        };
+        let tail = if tail == 0 {
+            LOG_TAIL_DEFAULT
+        } else {
+            tail.min(LOG_TAIL_MAX)
+        };
+        let path = model::site_log_file(&self.paths.logs, id, kind);
+        let (lines, size, truncated) = read_log_tail(&path, tail, query)?;
+        Ok(SiteLog {
+            lines,
+            // A raw configuration writes wherever the operator told it to.
+            enabled: on && site.raw_config.is_none(),
+            size,
+            truncated,
+        })
+    }
+
+    /// Publishes the daemon API through nginx on `domain` (DMN-129): the
+    /// `asc-api` site, owned by [`model::API_SITE_OWNER`] so the platform's
+    /// `ReplaceSites` never touches it. `certificate` — a PEM pair to serve;
+    /// `None` — Let's Encrypt.
+    pub fn set_api_proxy(
+        &self,
+        domain: &str,
+        upstream: &str,
+        upstream_tls: bool,
+        certificate: Option<(String, String)>,
+    ) -> Result<SiteView> {
+        Self::require_root()?;
+        if self.load_settings().mode == Mode::None {
+            bail!("the web server is not installed on this node — enable it first");
+        }
+        let (mode, certificate_pem, private_key_pem) = match certificate {
+            Some((certificate, key)) => (TlsMode::Provided, certificate, key),
+            None => (TlsMode::Acme, String::new(), String::new()),
+        };
+        let site = Site {
+            id: model::API_SITE_ID.to_string(),
+            server_names: vec![domain.trim().to_ascii_lowercase()],
+            managed_by: Some(model::API_SITE_OWNER.to_string()),
+            disabled: false,
+            upstream: model::Upstream {
+                servers: vec![model::UpstreamServer {
+                    target: model::Target::Address {
+                        address: upstream.to_string(),
+                    },
+                    weight: 1,
+                    backup: false,
+                    max_fails: 0,
+                    fail_timeout_secs: 0,
+                    down: false,
+                }],
+                // No pool: REST (HTTP/1.1) and gRPC (h2) share this upstream,
+                // and nginx fails a gRPC request handed an HTTP/1.1
+                // keepalive connection ("no connection data found for
+                // keepalive http2 connection") — found on a live nginx.
+                keepalive: 0,
+                tls: upstream_tls,
+                ..Default::default()
+            },
+            tls: model::Tls {
+                mode,
+                certificate_pem,
+                private_key_pem,
+                redirect_http: true,
+                hsts: false,
+                http2: true,
+            },
+            proxy: model::Proxy {
+                websocket: true,
+                read_timeout_secs: 3600,
+                send_timeout_secs: 3600,
+                no_buffering: true,
+                ..Default::default()
+            },
+            real_ip: model::RealIp::Off,
+            extra_server: String::new(),
+            extra_location: String::new(),
+            raw_config: None,
+            logs: Default::default(),
+        };
+        self.upsert_site(site)
+    }
+
+    /// Takes the API site down again. `false` — there was none.
+    pub fn remove_api_proxy(&self) -> Result<bool> {
+        Self::require_root()?;
+        let ours = self.load_sites()?.iter().any(|s| {
+            s.id == model::API_SITE_ID && s.managed_by.as_deref() == Some(model::API_SITE_OWNER)
+        });
+        if !ours {
+            return Ok(false);
+        }
+        self.remove_site(model::API_SITE_ID)
+    }
+
     /// Saves the site list and applies it. The list is saved even when the
     /// apply fails: it is the desired state, and each site's status says
     /// what nginx made of it.
@@ -537,6 +730,7 @@ impl WebServer {
             &settings,
             features,
             &self.paths.root,
+            &self.paths.logs,
         ))
     }
 
@@ -851,6 +1045,54 @@ mod tests {
             fail(&mut st, 0, TlsState::Error, "x".into());
         }
         assert_eq!(st.tls.next_attempt, 24 * 3600);
+    }
+
+    #[test]
+    fn log_tail_filters_and_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.access.log");
+        assert_eq!(
+            read_log_tail(&path, 10, "").unwrap(),
+            (Vec::new(), 0, false)
+        );
+
+        let text: String = (1..=50)
+            .map(|n| {
+                format!(
+                    "GET /page/{n} {}\n",
+                    if n % 10 == 0 { "500" } else { "200" }
+                )
+            })
+            .collect();
+        std::fs::write(&path, &text).unwrap();
+        let (lines, size, truncated) = read_log_tail(&path, 3, "").unwrap();
+        assert_eq!(
+            lines,
+            ["GET /page/48 200", "GET /page/49 200", "GET /page/50 500"]
+        );
+        assert_eq!(size, text.len() as u64);
+        assert!(!truncated);
+
+        let (lines, _, _) = read_log_tail(&path, 100, " 500").unwrap();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "GET /page/10 500");
+        let (lines, _, _) = read_log_tail(&path, 100, "PAGE/4").unwrap();
+        assert_eq!(lines.first().map(String::as_str), Some("GET /page/4 200"));
+    }
+
+    #[test]
+    fn log_tail_skips_the_cut_line_of_a_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.log");
+        let line = format!("{}\n", "x".repeat(1023));
+        let count = (LOG_WINDOW as usize / line.len()) + 10;
+        let mut text = line.repeat(count);
+        text.push_str("last line\n");
+        std::fs::write(&path, &text).unwrap();
+        let (lines, _, truncated) = read_log_tail(&path, 5000, "").unwrap();
+        assert!(truncated);
+        assert_eq!(lines.last().map(String::as_str), Some("last line"));
+        assert!(lines.iter().all(|l| l == "last line" || l.len() == 1023));
     }
 
     #[test]

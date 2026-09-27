@@ -166,9 +166,11 @@ pub fn direct_endpoint(config: &Config) -> Advertised {
         return Advertised::default();
     }
 
-    // Pinning is for the self-signed case only: an ACME or operator-supplied
-    // certificate is verified against its chain, and pinning one would break
-    // the node the first time it renews.
+    // Self-signed must be pinned. An operator's own certificate is reported
+    // too (DMN-127): it may come from a private CA — a Cloudflare Origin
+    // certificate is one — where the fingerprint is the only thing that can
+    // vouch for it; the platform still verifies the chain when it can. ACME
+    // is chain-verified only: pinning it would break at the first renewal.
     let fingerprint = match config.api.tls {
         TlsMode::SelfSigned => {
             let print = tls::current_fingerprint().unwrap_or_default();
@@ -177,6 +179,12 @@ pub fn direct_endpoint(config: &Config) -> Advertised {
             }
             print
         }
+        TlsMode::Files => config
+            .api
+            .tls_cert
+            .as_deref()
+            .and_then(tls::fingerprint_of)
+            .unwrap_or_default(),
         _ => String::new(),
     };
     Advertised {

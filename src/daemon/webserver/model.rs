@@ -87,6 +87,10 @@ pub struct Settings {
     pub acme_directory: String,
     pub custom_main: String,
     pub custom_http: String,
+    /// What the `default_server` on :80 does with names no site claims.
+    pub default_site: DefaultSite,
+    /// Branded pages for the errors nginx itself produces.
+    pub error_pages: ErrorPages,
     pub host: HostProfile,
 }
 
@@ -113,6 +117,8 @@ impl Default for Settings {
             acme_directory: String::new(),
             custom_main: String::new(),
             custom_http: String::new(),
+            default_site: DefaultSite::default(),
+            error_pages: ErrorPages::default(),
             host: HostProfile::default(),
         }
     }
@@ -169,8 +175,198 @@ impl Settings {
         {
             bail!("image must not contain whitespace");
         }
+        self.default_site.validate()?;
+        self.error_pages.validate()?;
         Ok(())
     }
+}
+
+/// What the catch-all `default_server` on :80 answers to a request for a
+/// name no site claims (a bare IP, a stale DNS record, a scanner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultSiteMode {
+    /// Close the connection without a response (`return 444`).
+    #[default]
+    Drop,
+    /// A single page: the built-in stub or the operator's HTML.
+    Page,
+    /// Static files from a directory on the host.
+    Root,
+    /// A redirect to another address.
+    Redirect,
+}
+
+impl DefaultSiteMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Drop => "drop",
+            Self::Page => "page",
+            Self::Root => "root",
+            Self::Redirect => "redirect",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "drop" => Ok(Self::Drop),
+            "page" => Ok(Self::Page),
+            "root" => Ok(Self::Root),
+            "redirect" => Ok(Self::Redirect),
+            other => {
+                bail!("unknown default site mode {other:?}: expected drop, page, root or redirect")
+            }
+        }
+    }
+}
+
+/// The node's default site. HTTPS keeps rejecting the handshake whatever the
+/// mode: there is no certificate an unknown name could be served with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefaultSite {
+    pub mode: DefaultSiteMode,
+    /// `root` mode: an absolute directory on the host (bound read-only into
+    /// the docker container).
+    pub root: String,
+    /// `redirect` mode: an http(s) URL; the request path is not appended.
+    pub redirect_url: String,
+    /// `page` mode: the page's HTML; empty — the built-in stub.
+    pub page_html: String,
+}
+
+/// Largest HTML the settings file keeps for one page.
+pub const MAX_PAGE_HTML: usize = 64 * 1024;
+
+impl DefaultSite {
+    pub fn validate(&self) -> Result<()> {
+        match self.mode {
+            DefaultSiteMode::Root => validate_host_dir("default_site.root", &self.root)?,
+            DefaultSiteMode::Redirect => {
+                let url = self.redirect_url.trim();
+                if !(url.starts_with("https://") || url.starts_with("http://"))
+                    || url.len() > 2048
+                    || url.chars().any(|c| {
+                        c.is_whitespace()
+                            || c.is_control()
+                            || matches!(c, '"' | '\\' | ';' | '{' | '}' | '\'')
+                    })
+                {
+                    bail!(
+                        "default_site.redirect_url must be an http(s) URL without spaces, quotes or ;{{}}"
+                    );
+                }
+            }
+            DefaultSiteMode::Drop | DefaultSiteMode::Page => {}
+        }
+        if self.page_html.len() > MAX_PAGE_HTML {
+            bail!("default_site.page_html must be at most {MAX_PAGE_HTML} bytes");
+        }
+        Ok(())
+    }
+
+    /// The host directory the docker container has to see, if any.
+    pub fn host_dir(&self) -> Option<&str> {
+        (self.mode == DefaultSiteMode::Root).then(|| self.root.trim())
+    }
+}
+
+/// The statuses nginx gets a branded page for, with their reason phrases.
+pub const ERROR_CODES: &[(u16, &str)] = &[
+    (400, "Bad Request"),
+    (401, "Unauthorized"),
+    (403, "Forbidden"),
+    (404, "Not Found"),
+    (405, "Method Not Allowed"),
+    (408, "Request Timeout"),
+    (413, "Content Too Large"),
+    (429, "Too Many Requests"),
+    (500, "Internal Server Error"),
+    (502, "Bad Gateway"),
+    (503, "Service Unavailable"),
+    (504, "Gateway Timeout"),
+];
+
+/// Error pages (`error_page`) for every generated site and the default site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ErrorPages {
+    pub enabled: bool,
+    /// Also replace the error responses of the apps themselves
+    /// (`proxy_intercept_errors`) — otherwise only the errors nginx produces
+    /// (an app that is down: 502/504, a body too large: 413) get the page.
+    pub intercept_upstream: bool,
+    /// Status code (`"404"`) → the operator's HTML; a code without an entry
+    /// gets the built-in page.
+    pub custom: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for ErrorPages {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intercept_upstream: false,
+            custom: Default::default(),
+        }
+    }
+}
+
+impl ErrorPages {
+    pub fn validate(&self) -> Result<()> {
+        for (code, html) in &self.custom {
+            if !ERROR_CODES
+                .iter()
+                .any(|(known, _)| known.to_string() == *code)
+            {
+                let known: Vec<String> = ERROR_CODES.iter().map(|(c, _)| c.to_string()).collect();
+                bail!(
+                    "error_pages.custom: unsupported status {code:?}, expected one of {}",
+                    known.join(", ")
+                );
+            }
+            if html.len() > MAX_PAGE_HTML {
+                bail!("error_pages.custom.{code} must be at most {MAX_PAGE_HTML} bytes");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An absolute, normalized host directory that is safe to paste into a
+/// directive and to bind into a container.
+fn validate_host_dir(field: &str, value: &str) -> Result<()> {
+    let value = value.trim();
+    if !value.starts_with('/') || value == "/" {
+        bail!("{field} must be an absolute directory other than /");
+    }
+    if value.len() > 1024
+        || value.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, '"' | '\'' | '\\' | ';' | '{' | '}' | '$' | ':')
+        })
+    {
+        bail!("{field} must not contain spaces, quotes, $, : or ;{{}}");
+    }
+    if value.split('/').any(|part| part == ".." || part == ".") || value.contains("//") {
+        bail!("{field} must be a normalized path (no ., .. or //)");
+    }
+    // The daemon's own trees: serving them would publish keys and state.
+    for private in [
+        "/etc",
+        "/var/lib/asc",
+        "/root",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/boot",
+        "/run",
+    ] {
+        if value == private || value.starts_with(&format!("{private}/")) {
+            bail!("{field} must not point into {private}");
+        }
+    }
+    Ok(())
 }
 
 /// nginx size syntax: digits with an optional k/m/g suffix.
@@ -420,7 +616,65 @@ pub struct Site {
     pub extra_location: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_config: Option<String>,
+    /// The site's own access and error logs (DMN-128).
+    #[serde(default, skip_serializing_if = "SiteLogs::is_default")]
+    pub logs: SiteLogs,
 }
+
+/// Whether a site writes its own nginx logs under [`LOG_DIR`]. Both are on by
+/// default: a site stored before this existed keeps logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SiteLogs {
+    pub access: bool,
+    pub error: bool,
+}
+
+impl Default for SiteLogs {
+    fn default() -> Self {
+        Self {
+            access: true,
+            error: true,
+        }
+    }
+}
+
+impl SiteLogs {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Where site logs live on the host — in docker mode the same path is bound
+/// into the container, so the daemon reads them the same way in both modes.
+pub const LOG_DIR: &str = "/var/log/asc/webserver";
+
+/// Which of a site's logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    Access,
+    Error,
+}
+
+impl LogKind {
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Access => "access",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// `/var/log/asc/webserver/<site>.<kind>.log` under `dir`.
+pub fn site_log_file(dir: &std::path::Path, site: &str, kind: LogKind) -> std::path::PathBuf {
+    dir.join(format!("{site}.{}.log", kind.suffix()))
+}
+
+/// `managed_by` of the daemon's own API site (DMN-129): the platform's
+/// `ReplaceSites` never touches it, and the renderer routes gRPC for it.
+pub const API_SITE_OWNER: &str = "daemon-api";
+/// Its id.
+pub const API_SITE_ID: &str = "asc-api";
 
 pub const MAX_SITE_ID: usize = 64;
 const MAX_SNIPPET: usize = 64 * 1024;
@@ -745,6 +999,7 @@ mod tests {
             extra_server: String::new(),
             extra_location: String::new(),
             raw_config: None,
+            logs: Default::default(),
         }
     }
 

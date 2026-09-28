@@ -1024,11 +1024,17 @@ pub fn registry_digest(
 
 /// Pull `image` unconditionally — unlike [`ensure_pulled`], an image already
 /// on the host is refreshed from its registry (`docker pull`). Used by the
-/// repull of a mutable tag (DMN-120).
-pub fn pull_image(cfg: &DockerConfig, image: &str, auth: Option<&RegistryAuth>) -> Result<()> {
+/// repull of a mutable tag (DMN-120); `report` gets the pull's progress lines
+/// for the streamed repull (DMN-132).
+pub fn pull_image(
+    cfg: &DockerConfig,
+    image: &str,
+    auth: Option<&RegistryAuth>,
+    report: Option<&dyn progress::InstallReporter>,
+) -> Result<()> {
     block_on(async {
         let docker = connect(cfg)?;
-        pull(&docker, image, auth, None)
+        pull(&docker, image, auth, report)
             .await
             .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image)))
     })

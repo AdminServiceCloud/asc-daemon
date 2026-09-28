@@ -16,6 +16,7 @@ pub mod registry;
 pub mod resources;
 pub mod settings;
 pub mod sources;
+mod sparse;
 pub mod upgrade;
 
 pub use clone::clone_app;

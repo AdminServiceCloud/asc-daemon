@@ -219,3 +219,59 @@ async fn grpc_inspect_package_without_a_manifest_reports_unknown_and_detected_me
         .unwrap();
     assert_eq!(compose.supported, compose.unsupported_reason.is_empty());
 }
+
+/// DMN-131: the inspect answers the two questions an install used to find
+/// out only by failing — the license to accept and whether the host can
+/// cover the requirements — so the installer asks both up front and runs
+/// the one real install with the answers.
+#[tokio::test]
+async fn grpc_inspect_package_reports_license_and_resource_shortfall() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not available");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let repo = ws.path().join("licensed");
+    fs::create_dir_all(&repo).unwrap();
+    // Far more memory than any test host has.
+    fs::write(
+        repo.join("asc.yaml"),
+        "name: hungry\nversion: 1.0.0\ntype: native\nrequirements:\n  ram: 64T\nruntime:\n  start: ./run.sh\n",
+    )
+    .unwrap();
+    fs::write(repo.join("LICENSE.md"), "Hungry License 1.0\n").unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let url = repo.display().to_string().replace('\\', "/");
+
+    let mut config = Config::default();
+    config.daemon.data_dir = ws.path().join("data");
+    config.daemon.apps_dir = ws.path().join("apps");
+    let state = ApiState::new(config, TOKEN.into());
+    let addr = spawn_server(state).await;
+    let mut apps = pb::app_service_client::AppServiceClient::new(channel(addr).await);
+
+    let response = apps
+        .inspect_package(with_auth(tonic::Request::new(pb::InspectPackageRequest {
+            git_url: url.clone(),
+            branch: None,
+            tag: None,
+            path: None,
+        })))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.kind, pb::PackageKind::App as i32);
+
+    let license = response.license.expect("the LICENSE.md must be reported");
+    assert_eq!(license.license, "Hungry License 1.0\n");
+    assert_eq!(license.package, "hungry");
+    assert_eq!(license.git, url);
+
+    let shortfall = response
+        .requirements_not_met
+        .expect("64T of RAM cannot fit on a test host");
+    assert_eq!(shortfall.app, "hungry");
+    assert!(shortfall.shortages.iter().any(|s| s.resource == "RAM"));
+}

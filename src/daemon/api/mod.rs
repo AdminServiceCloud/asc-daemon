@@ -69,6 +69,7 @@ pub const CAPABILITIES: &[&str] = &[
     "schedules",
     "processes",
     "app.repull",
+    "app.repull.stream",
     "webserver",
     "webserver.logs",
     "api.certificate",
@@ -733,6 +734,15 @@ pub enum UpgradeStreamEvent {
 /// returns (the clone's meta and the bytes copied). Boxed: `AppMeta` is
 /// large enough on its own to make `Line(String)` the small variant
 /// (clippy::large_enum_variant), and this event is created once per stream.
+/// One event of [`ApiState::repull_stream`] (DMN-132): a progress line of the
+/// image pull, or the terminal result — the same `Result` the unary
+/// [`ApiState::repull_app`] returns (the outcome and whether the app was
+/// restarted onto the new image).
+pub enum RepullStreamEvent {
+    Line(String),
+    Done(Result<(pkg::image::RepullOutcome, bool)>),
+}
+
 pub enum CloneStreamEvent {
     Line(String),
     Done(Box<Result<(AppMeta, u64)>>),
@@ -941,19 +951,56 @@ impl ApiState {
         ctx: UserContext,
         id: String,
     ) -> Result<(pkg::image::RepullOutcome, bool)> {
-        self.blocking(move |s| {
-            let meta = s.manager.get_authorized(&ctx, &id)?;
-            let dir = s.manager.store().app_dir(&meta.id)?;
-            let outcome = pkg::image::repull(&s.config, &meta, &dir)?;
-            let running = s.manager.status(&ctx, &meta.id)?.state == RuntimeState::Running;
-            let restarted = outcome.changed && running;
-            if restarted {
-                s.manager.restart(&ctx, &meta.id)?;
+        self.blocking(move |s| s.repull_one(&ctx, &id, None)).await
+    }
+
+    /// Shared by [`Self::repull_app`] and [`Self::repull_stream`].
+    fn repull_one(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        report: Option<&dyn progress::InstallReporter>,
+    ) -> Result<(pkg::image::RepullOutcome, bool)> {
+        let meta = self.manager.get_authorized(ctx, id)?;
+        let dir = self.manager.store().app_dir(&meta.id)?;
+        let outcome = pkg::image::repull(&self.config, &meta, &dir, report)?;
+        let running = self.manager.status(ctx, &meta.id)?.state == RuntimeState::Running;
+        let restarted = outcome.changed && running;
+        if restarted {
+            if let Some(report) = report {
+                report.line(&format!("restarting '{}' onto the new image", meta.id));
             }
-            info!(app = %meta.id, image = %outcome.image, changed = outcome.changed, restarted, "app image re-pulled");
-            Ok((outcome, restarted))
-        })
-        .await
+            self.manager.restart(ctx, &meta.id)?;
+        }
+        info!(app = %meta.id, image = %outcome.image, changed = outcome.changed, restarted, "app image re-pulled");
+        Ok((outcome, restarted))
+    }
+
+    /// Streamed sibling of [`Self::repull_app`] (DMN-132), built exactly like
+    /// [`Self::upgrade_stream`]: the pull's progress lines, then the result.
+    /// A disconnect does not cancel the pull — the worker runs to the end.
+    pub fn repull_stream(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+    ) -> tokio::sync::mpsc::Receiver<RepullStreamEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        struct ChannelReporter(tokio::sync::mpsc::Sender<RepullStreamEvent>);
+        impl progress::InstallReporter for ChannelReporter {
+            fn line(&self, text: &str) {
+                send_progress_line(&self.0, RepullStreamEvent::Line(text.to_string()));
+            }
+        }
+
+        let state = Arc::clone(self);
+        let result_tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let reporter = ChannelReporter(tx);
+            let outcome =
+                catching_panics("repull", || state.repull_one(&ctx, &id, Some(&reporter)));
+            let _ = result_tx.blocking_send(RepullStreamEvent::Done(outcome));
+        });
+        rx
     }
 
     /// Space taken by every app the caller may see, largest first, with the
@@ -1198,10 +1245,12 @@ impl ApiState {
     }
 
     /// What a package repository ships — one app or a stack of them, with
-    /// the stack's apps and their declared requirements (DMN-098). A shallow
-    /// clone into a temporary directory that is thrown away again: nothing is
-    /// installed, no app directory is created. The install dialog calls it to
-    /// show what an install is about to put on the node.
+    /// the stack's apps and their declared requirements (DMN-098), the
+    /// license an install would ask consent for and whether this host can
+    /// cover the requirements right now (DMN-131). A sparse, blobless
+    /// snapshot into a temporary directory that is thrown away again: only
+    /// the manifests and the license are downloaded, nothing is installed.
+    /// The install dialog calls it before the one real install.
     pub async fn inspect_package(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -1210,14 +1259,20 @@ impl ApiState {
         tag: Option<String>,
         path: Option<String>,
     ) -> Result<pkg::PackageInfo> {
-        self.blocking(move |_s| {
+        self.blocking(move |s| {
             let git_ref = match (branch.as_deref(), tag.as_deref()) {
                 (Some(b), None) => Some(pkg::GitRef::Branch(b)),
                 (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
                 (None, None) => None,
                 (Some(_), Some(_)) => anyhow::bail!("pass either branch or tag, not both"),
             };
-            pkg::inspect_git(&git_url, git_ref, path.as_deref(), &ctx)
+            pkg::inspect_git(
+                &git_url,
+                git_ref,
+                path.as_deref(),
+                &ctx,
+                &s.config.daemon.apps_dir,
+            )
         })
         .await
     }

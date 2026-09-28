@@ -43,7 +43,7 @@ impl std::fmt::Display for Shortage {
 /// Mirrors [`super::install::LicenseRequired`]'s shape: a structured detail
 /// the CLI turns into an interactive prompt and the platform turns into its
 /// own "not enough resources, install anyway?" screen.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequirementsNotMet {
     pub app: String,
     pub shortages: Vec<Shortage>,

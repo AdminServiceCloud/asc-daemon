@@ -542,6 +542,19 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
     }
 }
 
+fn repull_outcome_to_pb(
+    outcome: pkg::image::RepullOutcome,
+    restarted: bool,
+) -> pb::RepullAppResponse {
+    pb::RepullAppResponse {
+        image: outcome.image,
+        image_id: outcome.image_id,
+        previous_image_id: outcome.previous_image_id,
+        updated: outcome.changed,
+        restarted,
+    }
+}
+
 /// The inspected package (DMN-098) in its wire form. `compose_available`
 /// reflects whether the `docker compose` plugin was found on this host
 /// (DMN-109) — unlike every other method, `DockerCompose.supported()` cannot
@@ -549,7 +562,16 @@ fn install_outcome_to_pb(outcome: InstallOutcome) -> pb::InstallAppResponse {
 fn package_info_to_pb(
     info: pkg::PackageInfo,
     compose_available: bool,
+    git_url: &str,
 ) -> pb::InspectPackageResponse {
+    // Built before the fields below move out of `info`.
+    let license = info.license.map(|license| pb::LicenseRequiredDetail {
+        package: info.name.clone(),
+        source: "git".to_string(),
+        git: git_url.to_string(),
+        license,
+    });
+    let requirements_not_met = info.shortfall.map(requirements_not_met_detail);
     pb::InspectPackageResponse {
         kind: match info.kind {
             pkg::PackageKind::Unknown => pb::PackageKind::Unspecified as i32,
@@ -581,6 +603,8 @@ fn package_info_to_pb(
             .map(|method| detected_method_to_pb(method, compose_available))
             .collect(),
         auth_required: None,
+        license,
+        requirements_not_met,
     }
 }
 
@@ -695,19 +719,25 @@ fn license_required_to_pb(required: pkg::LicenseRequired) -> pb::InstallAppRespo
 /// retries with `force = true`.
 fn requirements_not_met_to_pb(not_met: pkg::RequirementsNotMet) -> pb::InstallAppResponse {
     pb::InstallAppResponse {
-        requirements_not_met: Some(pb::RequirementsNotMetDetail {
-            app: not_met.app,
-            shortages: not_met
-                .shortages
-                .into_iter()
-                .map(|s| pb::ResourceShortage {
-                    resource: s.resource,
-                    need: s.need,
-                    have: s.have,
-                })
-                .collect(),
-        }),
+        requirements_not_met: Some(requirements_not_met_detail(not_met)),
         ..Default::default()
+    }
+}
+
+/// The wire form of a resource shortfall — an install's typed error and the
+/// inspect preflight (DMN-131) alike.
+fn requirements_not_met_detail(not_met: pkg::RequirementsNotMet) -> pb::RequirementsNotMetDetail {
+    pb::RequirementsNotMetDetail {
+        app: not_met.app,
+        shortages: not_met
+            .shortages
+            .into_iter()
+            .map(|s| pb::ResourceShortage {
+                resource: s.resource,
+                need: s.need,
+                have: s.have,
+            })
+            .collect(),
     }
 }
 
@@ -784,6 +814,8 @@ impl AppService for Grpc {
         Pin<Box<dyn Stream<Item = Result<pb::InstallAppEvent, Status>> + Send>>;
     type UpgradeAppStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::UpgradeAppEvent, Status>> + Send>>;
+    type RepullAppStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::RepullAppEvent, Status>> + Send>>;
     type CloneAppStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::CloneAppEvent, Status>> + Send>>;
 
@@ -876,13 +908,36 @@ impl AppService for Grpc {
             .repull_app(ctx, request.into_inner().id)
             .await
             .map_err(to_status)?;
-        Ok(Response::new(pb::RepullAppResponse {
-            image: outcome.image,
-            image_id: outcome.image_id,
-            previous_image_id: outcome.previous_image_id,
-            updated: outcome.changed,
-            restarted,
-        }))
+        Ok(Response::new(repull_outcome_to_pb(outcome, restarted)))
+    }
+
+    async fn repull_app_stream(
+        &self,
+        request: Request<pb::RepullAppRequest>,
+    ) -> Result<Response<Self::RepullAppStreamStream>, Status> {
+        let ctx = ctx_of(&request);
+        let rx = self.0.repull_stream(ctx, request.into_inner().id);
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(super::RepullStreamEvent::Line(line)) => Some((
+                    Ok(pb::RepullAppEvent {
+                        event: Some(pb::repull_app_event::Event::Line(line)),
+                    }),
+                    rx,
+                )),
+                Some(super::RepullStreamEvent::Done(Ok((outcome, restarted)))) => Some((
+                    Ok(pb::RepullAppEvent {
+                        event: Some(pb::repull_app_event::Event::Result(repull_outcome_to_pb(
+                            outcome, restarted,
+                        ))),
+                    }),
+                    rx,
+                )),
+                Some(super::RepullStreamEvent::Done(Err(err))) => Some((Err(to_status(err)), rx)),
+                None => None,
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn install_app(
@@ -997,6 +1052,7 @@ impl AppService for Grpc {
     ) -> Result<Response<pb::InspectPackageResponse>, Status> {
         let ctx = ctx_of(&request);
         let request = request.into_inner();
+        let git_url = request.git_url.clone();
         match self
             .0
             .inspect_package(
@@ -1011,6 +1067,7 @@ impl AppService for Grpc {
             Ok(info) => Ok(Response::new(package_info_to_pb(
                 info,
                 crate::daemon::compose::available(&self.0.config.docker),
+                &git_url,
             ))),
             // The repository is private and nothing the caller configured
             // opens it (DMN-062) — not a gRPC error, the same "otherwise

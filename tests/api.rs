@@ -35,6 +35,7 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "schedules",
         "processes",
         "app.repull",
+        "app.repull.stream",
         "webserver",
         "webserver.logs",
         "api.certificate",

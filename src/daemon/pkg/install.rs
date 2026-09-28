@@ -139,8 +139,10 @@ fn license_in(dir: &Path) -> Option<String> {
 
 /// License text of a cloned package: the package's own directory wins
 /// (monorepos may license packages individually), the repository root is
-/// the fallback. `None` — no license file in either place.
-fn repo_license(package_dir: &Path, repo_root: &Path) -> Option<String> {
+/// the fallback. `None` — no license file in either place. Also read by the
+/// inspect preflight (DMN-131), so the installer can ask for consent before
+/// the install starts rather than after a failed first run.
+pub(super) fn repo_license(package_dir: &Path, repo_root: &Path) -> Option<String> {
     license_in(package_dir).or_else(|| {
         (package_dir != repo_root)
             .then(|| license_in(repo_root))
@@ -279,6 +281,7 @@ pub fn install(
         // git install can point at a bare Dockerfile instead.
         install_method: None,
         stack: None,
+        prepared: None,
     };
     let origin = Origin::Registry(&resolved);
     if resolved.entry.package_type == "stack" {
@@ -352,6 +355,26 @@ struct InstallOpts<'a> {
     /// `asc stacks` group a git-installed stack the same way as one from a
     /// registry.
     stack: Option<&'a str>,
+    /// A clone of the package repository that already exists on disk
+    /// (DMN-131): [`install_stack`] clones once and every member copies that
+    /// clone instead of fetching the repository again.
+    prepared: Option<PreparedClone<'a>>,
+}
+
+/// See [`InstallOpts::prepared`].
+#[derive(Clone, Copy)]
+struct PreparedClone<'a> {
+    repo: &'a Path,
+    /// The ref the clone checked out — what [`Origin::clone_into`] returned.
+    tag: Option<&'a str>,
+}
+
+/// Copy a prepared clone into an app's `repository/` (symlinks recreated,
+/// never followed — same rules as the file manager's copy).
+fn copy_prepared(prepared: PreparedClone<'_>, dest: &Path) -> Result<()> {
+    crate::daemon::files::walk::copy_recursive(prepared.repo, dest)
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!("cannot copy the package clone: {err}"))
 }
 
 /// Validate a user-chosen app name (DMN-024): printable, sane length, and
@@ -488,7 +511,9 @@ fn install_stack(
         path: probe_dir.clone(),
         armed: true,
     };
-    origin.clone_into(&probe_dir, opts.version, ctx, opts.report)?;
+    // The one clone of the whole stack install (DMN-131): every member below
+    // copies it rather than fetching the repository again.
+    let probe_tag = origin.clone_into(&probe_dir, opts.version, ctx, opts.report)?;
     let stack_root = manifest_dir(&probe_dir, origin.path())?;
     // One repository = one license: consent is asked once for the stack.
     require_license_ack(origin, package, &stack_root, &probe_dir, opts.license_ack)?;
@@ -549,6 +574,10 @@ fn install_stack(
             // was requested as.
             install_method: None,
             stack: Some(package),
+            prepared: Some(PreparedClone {
+                repo: &probe_dir,
+                tag: probe_tag.as_deref(),
+            }),
             ..opts
         };
         let report = install_one(config, ctx, origin, &id, Some(&app.name), app_opts)?;
@@ -582,7 +611,16 @@ fn install_one(
     };
 
     let repo_dir = app_dir.join("repository");
-    let cloned_tag = origin.clone_into(&repo_dir, opts.version, ctx, opts.report)?;
+    let cloned_tag = match opts.prepared {
+        Some(prepared) => {
+            if let Some(report) = opts.report {
+                report.line(&format!("reusing the stack's clone for '{name}'"));
+            }
+            copy_prepared(prepared, &repo_dir)?;
+            prepared.tag.map(str::to_string)
+        }
+        None => origin.clone_into(&repo_dir, opts.version, ctx, opts.report)?,
+    };
 
     let (manifest_dir, _) = locate_manifest(&repo_dir, origin.path(), stack_app)?;
     // The clone may turn out to hold a stack root rather than an app: a
@@ -1016,14 +1054,21 @@ pub fn install_from_git(
         report,
         install_method,
         stack: None,
+        prepared: None,
     };
     let base = install_from_git_app_base(url, path)?;
 
-    // Whether the repository holds an app or a stack is only visible after
-    // the clone, so the app install runs first and restarts as a stack
-    // install when it reports one. Naming an app of the stack up front says
-    // it is a stack already — no point cloning twice to find out.
-    if stack_app.is_none() {
+    // Whether the repository holds an app or a stack is not known up front.
+    // A lightweight snapshot (DMN-131: trees plus the manifests, no content)
+    // answers it before the one full clone, so a stack goes straight to the
+    // stack install instead of cloning as an app first and restarting.
+    // Naming an app of the stack says it is a stack already.
+    let is_stack = stack_app.is_some()
+        || (!matches!(
+            install_method,
+            Some(detect::InstallMethod::Dockerfile) | Some(detect::InstallMethod::DockerCompose)
+        ) && probe_is_stack(url, git_ref, path, ctx, report));
+    if !is_stack {
         let store = AppStore::new(config.daemon.apps_dir.clone());
         let id = instance_id(&store, &base)?;
         match install_one(config, ctx, origin, &id, None, opts) {
@@ -1041,6 +1086,52 @@ pub fn install_from_git(
         }
     }
     install_stack(config, ctx, origin, &base, stack_app, opts)
+}
+
+/// Whether the package at `path` is a stack root (`asc.stack.yaml` without an
+/// `asc.yaml` of its own), read from a sparse snapshot (DMN-131). A probe that
+/// fails for any reason answers "not a stack": the app install that follows
+/// clones for real, reports the actual error, and still falls back to the
+/// stack install on [`StackPackage`].
+fn probe_is_stack(
+    url: &str,
+    git_ref: Option<GitRef<'_>>,
+    path: Option<&str>,
+    ctx: &UserContext,
+    report: Option<&dyn InstallReporter>,
+) -> bool {
+    let dir = std::env::temp_dir().join(format!(
+        "asc-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let _cleanup = RemoveOnDrop {
+        path: dir.clone(),
+        armed: true,
+    };
+    let checkout = match git_ref {
+        Some(GitRef::Branch(r)) | Some(GitRef::Tag(r)) => Some(r),
+        None => None,
+    };
+    if let Some(report) = report {
+        report.line("reading the package manifest (sparse checkout)");
+    }
+    let result = super::sparse::sparse_clone(url, checkout, path, &dir, ctx)
+        .and_then(|()| manifest_dir(&dir, path));
+    match result {
+        Ok(package_dir) => {
+            !package_dir.join(Manifest::FILE).exists()
+                && package_dir.join(StackManifest::FILE).exists()
+        }
+        Err(err) => {
+            debug!(error = %format!("{err:#}"), "package probe failed; installing as an app");
+            false
+        }
+    }
 }
 
 /// Root policy (DMN-003): regular users may be limited to Docker apps.
@@ -1348,6 +1439,20 @@ pub(super) fn git_clone(
     ctx: &UserContext,
     report: Option<&dyn InstallReporter>,
 ) -> Result<()> {
+    git_clone_with(git_url, tag, dest, ctx, report, &[])
+}
+
+/// [`git_clone`] with extra `git clone` flags — the sparse snapshot's
+/// `--filter=blob:none --no-checkout` (DMN-131). Credentials, URL rewriting
+/// and the typed auth errors are exactly the same.
+pub(super) fn git_clone_with(
+    git_url: &str,
+    tag: Option<&str>,
+    dest: &Path,
+    ctx: &UserContext,
+    report: Option<&dyn InstallReporter>,
+    extra: &[&str],
+) -> Result<()> {
     // Credentials for private repositories (DMN-003), looked up in the
     // stores the *calling* user can reach (DMN-062) — the daemon runs as
     // root, so its own store is not where `asc auth add` put them. An
@@ -1368,6 +1473,7 @@ pub(super) fn git_clone(
     }
 
     let mut args: Vec<&str> = vec!["clone", "--depth", "1", "--progress"];
+    args.extend_from_slice(extra);
     if let Some(tag) = tag {
         args.extend(["--branch", tag]);
     }

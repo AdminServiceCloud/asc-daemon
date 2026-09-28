@@ -10,7 +10,7 @@
 
 pub mod path;
 pub mod scope;
-mod walk;
+pub(crate) mod walk;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

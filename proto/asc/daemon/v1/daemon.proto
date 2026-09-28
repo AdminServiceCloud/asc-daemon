@@ -61,6 +61,10 @@ service AppService {
   // image. FAILED_PRECONDITION for a pinned tag, a digest, a locally built
   // image or a non-Docker app.
   rpc RepullApp(RepullAppRequest) returns (RepullAppResponse);
+  // Same re-pull as a live progress feed (DMN-132): the image pull's layer
+  // lines, then the same RepullAppResponse. Lets the platform show a repull
+  // as a background task with a log. Capability "app.repull.stream".
+  rpc RepullAppStream(RepullAppRequest) returns (stream RepullAppEvent);
   // Install from the configured registries: "name" or "name@version".
   rpc InstallApp(InstallAppRequest) returns (InstallAppResponse);
   // Same install, but as a live progress feed instead of one blocking call
@@ -479,6 +483,14 @@ message InspectPackageResponse {
   // field existed the gRPC layer had no downcast for pkg::auth::AuthRequired
   // and this case surfaced as a bare INTERNAL status.
   optional AuthRequiredDetail auth_required = 9;
+  // The license an install of this package asks consent for (DMN-131) —
+  // the same fields InstallAppResponse.license_required carries, known before
+  // the install instead of after a first failed run. Absent: no LICENSE file.
+  optional LicenseRequiredDetail license = 10;
+  // Whether this host can cover the package's requirements and runtime quota
+  // right now (DMN-131) — the check InstallApp runs without `force`, run
+  // ahead of it. Absent: everything fits, or metrics were unavailable.
+  optional RequirementsNotMetDetail requirements_not_met = 11;
 }
 
 enum PackageKind {
@@ -592,6 +604,16 @@ message UpgradeAppEvent {
   oneof event {
     string line = 1;
     UpgradeAppResponse result = 2;
+  }
+}
+
+// One event of RepullAppStream (DMN-132): a progress line or the terminal
+// result. A stream that ends without `result` ended in an error — the gRPC
+// status carries it, same as RepullApp.
+message RepullAppEvent {
+  oneof event {
+    string line = 1;
+    RepullAppResponse result = 2;
   }
 }
 

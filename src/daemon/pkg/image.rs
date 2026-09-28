@@ -224,7 +224,12 @@ pub fn status(
 
 /// Pull a Docker app's mutable-tag image afresh. The container is left as
 /// is — see the module docs for how the new image gets applied.
-pub fn repull(config: &Config, meta: &AppMeta, app_dir: &Path) -> Result<RepullOutcome> {
+pub fn repull(
+    config: &Config,
+    meta: &AppMeta,
+    app_dir: &Path,
+    report: Option<&dyn crate::daemon::progress::InstallReporter>,
+) -> Result<RepullOutcome> {
     let not = |reason| NotRepullable {
         app: meta.id.clone(),
         reason,
@@ -243,7 +248,7 @@ pub fn repull(config: &Config, meta: &AppMeta, app_dir: &Path) -> Result<RepullO
     }
     let previous_image_id = docker::container_image_id(&config.docker, container)?;
     let auth = registry_auth_for(&image, &[Some(meta.id.as_str()), meta.uuid.as_deref()]);
-    docker::pull_image(&config.docker, &image, auth.as_ref())?;
+    docker::pull_image(&config.docker, &image, auth.as_ref(), report)?;
     let image_id = docker::inspect_local_image(&config.docker, &image)?
         .map(|l| l.id)
         .unwrap_or_default();
@@ -298,7 +303,7 @@ mod tests {
     fn live_local_digest_matches_registry() {
         let cfg = crate::daemon::config::DockerConfig::default();
         let image = "alpine:latest";
-        docker::pull_image(&cfg, image, None).unwrap();
+        docker::pull_image(&cfg, image, None, None).unwrap();
         let local = docker::inspect_local_image(&cfg, image).unwrap().unwrap();
         let remote = docker::registry_digest(&cfg, image, None).unwrap();
         assert_eq!(

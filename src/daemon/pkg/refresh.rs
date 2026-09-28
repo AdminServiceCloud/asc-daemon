@@ -131,7 +131,16 @@ impl Desired {
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
         let (manifest, settings) = dockerfile::resolve_installed(meta, &manifest_dir)?;
         let config_dir = app_dir.join("config");
-        let quota = load_quota(settings.as_ref(), &config_dir)?;
+        // Capped to the host's cores exactly as at install (DMN-099): the
+        // Engine rejects NanoCpus above nproc, so an unclamped quota here
+        // both read as drift against the capped container and recreated it
+        // into a 400 — an app installed "anyway" could never start again.
+        let quota = super::resources::clamp_cpu(
+            load_quota(settings.as_ref(), &config_dir)?,
+            super::resources::host_cores(),
+            &meta.id,
+            None,
+        );
         let inputs = runtime_inputs(settings.as_ref(), &config_dir)?;
         let command = inputs
             .start_command

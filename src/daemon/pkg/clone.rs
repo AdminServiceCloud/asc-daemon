@@ -126,7 +126,14 @@ pub fn clone_app(
     // only lands in meta.json on the app's next start (DMN-017/030), so
     // meta and settings.json can disagree until then — settings.json (just
     // copied verbatim) is the authoritative one.
-    let quota = load_quota(settings.as_ref(), &dest_dir.join("config"))?;
+    // Capped to the host like at install — the Engine rejects NanoCpus
+    // above nproc (DMN-099).
+    let quota = super::resources::clamp_cpu(
+        load_quota(settings.as_ref(), &dest_dir.join("config"))?,
+        super::resources::host_cores(),
+        &new_id,
+        None,
+    );
 
     // A clone is a distinct instance, so it gets its own identity rather than
     // inheriting the source's (DMN-044) — minted before provisioning so an

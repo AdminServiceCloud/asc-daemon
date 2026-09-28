@@ -132,6 +132,15 @@ pub fn check(
     shortages
 }
 
+/// Logical cores the Engine validates `NanoCpus` against — cheap enough for
+/// every start (no metrics sampling). Falls back to 1 when unknown, which
+/// only ever caps a quota harder, never lets an invalid one through.
+pub fn host_cores() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+}
+
 /// Cap a quota's CPU limit to the host's total logical core count. Real
 /// clamping only — never invents a quota that was not there, and never
 /// raises one. `report`, when given, gets one line describing the cap;
@@ -271,6 +280,11 @@ mod tests {
     fn clamp_cpu_leaves_a_quota_within_capacity_untouched() {
         let clamped = clamp_cpu(Some(quota(0.5)), 4, "demo", None).unwrap();
         assert_eq!(clamped.cpu_cores, Some(0.5));
+    }
+
+    #[test]
+    fn host_cores_is_at_least_one() {
+        assert!(host_cores() >= 1);
     }
 
     #[test]

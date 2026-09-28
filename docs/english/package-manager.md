@@ -171,6 +171,8 @@ Before an install pulls or builds anything, the daemon compares the manifest's `
 - **The CPU quota is still capped to the host's total core count, `--force` or not.** A quota above `nproc` is not a risk a human can accept away — the Engine hard-rejects it — so the effective `NanoCpus` sent to `docker create` is silently clamped down to the host's own core count whenever it would otherwise exceed it, with a warning line (`asc install`'s live output, or the daemon's own log for a caller with no progress channel) naming the cap. RAM/disk are never clamped: nothing downstream enforces them against host capacity the way the Engine enforces CPU, so `--force` really does mean "install it your way."
 - **API shape**: mirrors `LicenseRequired`'s license-consent shape field-for-field — `InstallAppResponse.requirements_not_met` (`RequirementsNotMetDetail{ app, shortages: [{ resource, need, have }] }`) instead of a gRPC error, so the platform's install dialog renders its own "not enough resources, install anyway?" screen and retries with `force = true`, the same round trip license consent already uses.
 
+- **The same ceiling at start and on clone** (DMN-133): the `pkg::refresh` drift check that recreates the container before `start`/`restart`, and `asc app clone`, cap the quota to the host's core count too (`resources::host_cores()`, no metrics sampling). The cap used to apply at install only — at start the desired configuration was read uncapped, drifted from the container and recreated it into that very 400, so an app installed "anyway" could never start again.
+
 ### 🚀 The start command (start_command)
 
 The application's start command is configured in `asc.settings.yaml`. The string can **interpolate the package's environment variables** — `${VAR}` syntax:
@@ -339,4 +341,4 @@ apps:
 
 ## 🔗 Related tasks
 
-DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, DMN-053, DMN-059, DMN-084, DMN-087, DMN-096, DMN-097, DMN-098, DMN-099, DMN-106, DMN-107, DMN-108, DMN-109, DMN-131, REG-001, REG-002, REG-005, REG-006, BE-002, BE-003, BE-028, BE-029, BE-030, NODE-031, NODE-032, NODE-033, NODE-040, NODE-041, NODE-042, NODE-043, BE-041, BE-043, BE-044, FE-090, FE-091, FE-111, FE-113, FE-114, FE-115 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).
+DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, DMN-053, DMN-059, DMN-084, DMN-087, DMN-096, DMN-097, DMN-098, DMN-099, DMN-106, DMN-107, DMN-108, DMN-109, DMN-131, DMN-133, REG-001, REG-002, REG-005, REG-006, BE-002, BE-003, BE-028, BE-029, BE-030, NODE-031, NODE-032, NODE-033, NODE-040, NODE-041, NODE-042, NODE-043, BE-041, BE-043, BE-044, FE-090, FE-091, FE-111, FE-113, FE-114, FE-115 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).

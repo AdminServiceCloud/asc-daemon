@@ -113,6 +113,12 @@ impl AppDriver for SystemdAppDriver {
         systemctl(&["stop", unit(meta)?])
     }
 
+    /// SIGKILL to every process of the unit; systemd then settles it as
+    /// inactive/failed on its own — no `stop` job that could hang.
+    fn kill(&self, meta: &AppMeta, _dir: &Path) -> Result<()> {
+        systemctl(&["kill", "--signal=SIGKILL", unit(meta)?])
+    }
+
     fn restart(&self, meta: &AppMeta, _dir: &Path) -> Result<()> {
         systemctl(&["restart", unit(meta)?])
     }

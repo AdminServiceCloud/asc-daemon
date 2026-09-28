@@ -1226,6 +1226,21 @@ impl AppService for Grpc {
         }))
     }
 
+    async fn kill_app(
+        &self,
+        request: Request<pb::KillAppRequest>,
+    ) -> Result<Response<pb::KillAppResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let outcome = self
+            .0
+            .kill(ctx, request.into_inner().id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::KillAppResponse {
+            already_stopped: outcome == Outcome::AlreadyInState,
+        }))
+    }
+
     async fn restart_app(
         &self,
         request: Request<pb::RestartAppRequest>,

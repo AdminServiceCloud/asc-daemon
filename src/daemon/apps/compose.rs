@@ -47,6 +47,11 @@ impl AppDriver for ComposeDriver {
         compose::stop(&self.cfg, project, &working_dir, files)
     }
 
+    fn kill(&self, meta: &AppMeta, dir: &Path) -> Result<()> {
+        let (project, files, working_dir) = fields(meta, dir)?;
+        compose::kill(&self.cfg, project, &working_dir, files)
+    }
+
     fn state(&self, meta: &AppMeta, dir: &Path) -> Result<RuntimeState> {
         let (project, files, working_dir) = fields(meta, dir)?;
         let containers = compose::ps(&self.cfg, project, &working_dir, files)?;

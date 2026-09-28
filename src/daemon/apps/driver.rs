@@ -52,6 +52,11 @@ pub trait AppDriver {
     fn start(&self, meta: &AppMeta, dir: &Path) -> Result<()>;
     fn stop(&self, meta: &AppMeta, dir: &Path) -> Result<()>;
 
+    /// Force-stop (DMN-134): SIGKILL, no grace period. Must be safe to call
+    /// while a graceful [`AppDriver::stop`] of the same app is still running
+    /// on another thread, and on an app that is already stopped.
+    fn kill(&self, meta: &AppMeta, dir: &Path) -> Result<()>;
+
     /// Restart; drivers with a native restart (systemd) override this.
     fn restart(&self, meta: &AppMeta, dir: &Path) -> Result<()> {
         self.stop(meta, dir)?;

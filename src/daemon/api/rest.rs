@@ -59,6 +59,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/apps/{id}/name", put(rename_app))
         .route("/v1/apps/{id}/start", post(start_app))
         .route("/v1/apps/{id}/stop", post(stop_app))
+        .route("/v1/apps/{id}/kill", post(kill_app))
         .route("/v1/apps/{id}/restart", post(restart_app))
         .route("/v1/apps/{id}/logs", get(app_logs))
         .route(
@@ -1270,6 +1271,18 @@ async fn stop_app(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let outcome = state.stop(ctx, id).await?;
+    Ok(Json(serde_json::json!({
+        "already_stopped": outcome == Outcome::AlreadyInState
+    }))
+    .into_response())
+}
+
+async fn kill_app(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let outcome = state.kill(ctx, id).await?;
     Ok(Json(serde_json::json!({
         "already_stopped": outcome == Outcome::AlreadyInState
     }))

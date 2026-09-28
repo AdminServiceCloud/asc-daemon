@@ -82,6 +82,7 @@ pub enum Msg {
     AppStarted,
     AppAlreadyRunning,
     AppStopped,
+    AppKilled,
     AppNotRunning,
     AppRestarted,
     AppCloned,
@@ -343,6 +344,10 @@ pub fn t(msg: Msg) -> &'static str {
             "Приложение '{}' уже запущено",
         ),
         Msg::AppStopped => ("App '{}' stopped", "Приложение '{}' остановлено"),
+        Msg::AppKilled => (
+            "App '{}' killed",
+            "Приложение '{}' принудительно остановлено",
+        ),
         Msg::AppNotRunning => (
             "App '{}' is not running",
             "Приложение '{}' и так остановлено",

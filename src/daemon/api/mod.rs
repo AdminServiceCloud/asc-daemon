@@ -1471,6 +1471,10 @@ impl ApiState {
         self.blocking(move |s| s.manager.stop(&ctx, &id)).await
     }
 
+    pub async fn kill(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {
+        self.blocking(move |s| s.manager.kill(&ctx, &id)).await
+    }
+
     pub async fn restart(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<()> {
         self.blocking(move |s| s.manager.restart(&ctx, &id)).await
     }

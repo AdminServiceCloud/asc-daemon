@@ -23,8 +23,8 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     AttachContainerOptions, BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
-    CreateImageOptions, ListContainersOptions, ListImagesOptions, LogsOptions,
-    RemoveContainerOptions, RemoveImageOptions, StartContainerOptions, StatsOptions,
+    CreateImageOptions, KillContainerOptions, ListContainersOptions, ListImagesOptions,
+    LogsOptions, RemoveContainerOptions, RemoveImageOptions, StartContainerOptions, StatsOptions,
     StopContainerOptions,
 };
 use futures_util::{Stream, StreamExt};
@@ -205,6 +205,22 @@ pub fn stop(cfg: &DockerConfig, container: &str) -> Result<()> {
         match docker.stop_container(container, Some(opts)).await {
             Ok(()) => Ok(()),
             Err(e) if status_of(&e) == Some(304) => Ok(()),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// Kill a container outright (SIGKILL, DMN-134) — no grace period. 409 = not
+/// running, 404 = gone: either way there is nothing left to kill.
+pub fn kill(cfg: &DockerConfig, container: &str) -> Result<()> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker
+            .kill_container(container, None::<KillContainerOptions>)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) if matches!(status_of(&e), Some(404 | 409)) => Ok(()),
             Err(e) => Err(friendly(cfg, e)),
         }
     })

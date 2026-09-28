@@ -123,6 +123,19 @@ pub fn stop(
     run(cmd, "stop").map(|_| ())
 }
 
+/// Kills the project's containers (SIGKILL, DMN-134) — the forced
+/// counterpart of [`stop`]; the containers stay, same as after a stop.
+pub fn kill(
+    docker: &DockerConfig,
+    project: &str,
+    working_dir: &Path,
+    files: &[String],
+) -> Result<()> {
+    let mut cmd = command(docker, project, working_dir, files);
+    cmd.arg("kill");
+    run(cmd, "kill").map(|_| ())
+}
+
 /// Tears the project down entirely (`asc app remove`): containers and
 /// networks, `--remove-orphans` for services dropped from the compose file
 /// since install. Named volumes are left alone, same as any other runtime.

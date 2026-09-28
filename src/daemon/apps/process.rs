@@ -197,6 +197,19 @@ impl AppDriver for ProcessDriver {
         Ok(())
     }
 
+    fn kill(&self, meta: &AppMeta, dir: &Path) -> Result<()> {
+        let _ = command_of(meta)?;
+        let Some(pid) = read_pid(dir)? else {
+            return Ok(());
+        };
+        if alive(pid) {
+            send_signal(pid, libc::SIGKILL)?;
+        }
+        // A graceful stop racing this one may have removed it already.
+        fs::remove_file(dir.join(PID_FILE)).ok();
+        Ok(())
+    }
+
     fn state(&self, meta: &AppMeta, dir: &Path) -> Result<RuntimeState> {
         let _ = command_of(meta)?;
         match read_pid(dir)? {

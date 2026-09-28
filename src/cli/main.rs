@@ -643,6 +643,10 @@ enum AppAction {
     Stop {
         id: String,
     },
+    /// Force-stop: SIGKILL, no graceful shutdown (for an app stuck stopping)
+    Kill {
+        id: String,
+    },
     Restart {
         id: String,
     },
@@ -2398,6 +2402,7 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             | AppAction::Info { .. }
             | AppAction::Start { .. }
             | AppAction::Stop { .. }
+            | AppAction::Kill { .. }
             | AppAction::Restart { .. }
             | AppAction::Logs { .. }
             | AppAction::Remove { .. }
@@ -2460,6 +2465,10 @@ fn app_cmd_daemon(
         AppAction::Settings { id } => app_settings_cmd_daemon(daemon, &id)?,
         AppAction::Stop { id } => match with_spinner(|| daemon.stop(&id))? {
             false => println!("{}", tf(Msg::AppStopped, &id)),
+            true => println!("{}", tf(Msg::AppNotRunning, &id)),
+        },
+        AppAction::Kill { id } => match with_spinner(|| daemon.kill(&id))? {
+            false => println!("{}", tf(Msg::AppKilled, &id)),
             true => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
         AppAction::Restart { id } => {
@@ -2569,6 +2578,10 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
         }
         AppAction::Stop { id } => match with_spinner(|| manager.stop(&ctx, &id))? {
             Outcome::Done => println!("{}", tf(Msg::AppStopped, &id)),
+            Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
+        },
+        AppAction::Kill { id } => match with_spinner(|| manager.kill(&ctx, &id))? {
+            Outcome::Done => println!("{}", tf(Msg::AppKilled, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
         AppAction::Restart { id } => {

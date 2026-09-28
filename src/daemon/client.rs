@@ -526,6 +526,12 @@ impl Daemon {
         Ok(json["already_stopped"].as_bool().unwrap_or(false))
     }
 
+    /// `true` when the app was already stopped (DMN-134).
+    pub fn kill(&self, id: &str) -> Result<bool> {
+        let json = self.request(Method::POST, &format!("/v1/apps/{id}/kill"), None)?;
+        Ok(json["already_stopped"].as_bool().unwrap_or(false))
+    }
+
     pub fn restart(&self, id: &str) -> Result<()> {
         self.request(Method::POST, &format!("/v1/apps/{id}/restart"), None)?;
         Ok(())

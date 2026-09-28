@@ -36,6 +36,10 @@ impl AppDriver for DockerDriver {
         docker::stop(&self.cfg, container_name(meta)?)
     }
 
+    fn kill(&self, meta: &AppMeta, _dir: &Path) -> Result<()> {
+        docker::kill(&self.cfg, container_name(meta)?)
+    }
+
     fn restart(&self, meta: &AppMeta, _dir: &Path) -> Result<()> {
         docker::restart(&self.cfg, container_name(meta)?)
     }

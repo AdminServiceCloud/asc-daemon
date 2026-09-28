@@ -497,6 +497,25 @@ impl AppManager {
         Ok(outcome)
     }
 
+    /// Force-stop (DMN-134): like [`Self::stop`], but SIGKILL right away.
+    /// Runs alongside a graceful stop that is stuck waiting on the app —
+    /// there is no per-app lock, so the kill is what makes that stop return.
+    pub fn kill(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
+        let mut meta = self.get_authorized(ctx, id)?;
+        let dir = self.store.app_dir(&meta.id)?;
+        let outcome = if self.state_of(&meta) == RuntimeState::Stopped {
+            Outcome::AlreadyInState
+        } else {
+            driver::for_runtime(&meta.runtime, &self.config.docker).kill(&meta, &dir)?;
+            Outcome::Done
+        };
+        if meta.desired_state != DesiredState::Stopped {
+            meta.desired_state = DesiredState::Stopped;
+            self.store.save(&meta)?;
+        }
+        Ok(outcome)
+    }
+
     pub fn restart(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;

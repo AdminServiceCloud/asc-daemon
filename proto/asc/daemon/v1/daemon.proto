@@ -79,6 +79,10 @@ service AppService {
   rpc RenameApp(RenameAppRequest) returns (RenameAppResponse);
   rpc StartApp(StartAppRequest) returns (StartAppResponse);
   rpc StopApp(StopAppRequest) returns (StopAppResponse);
+  // Force-stop (DMN-134): SIGKILL instead of a graceful stop — the way out of
+  // a StopApp stuck on an app that ignores SIGTERM. Safe to call while that
+  // StopApp is still in flight; it returns as soon as the app is dead.
+  rpc KillApp(KillAppRequest) returns (KillAppResponse);
   rpc RestartApp(RestartAppRequest) returns (RestartAppResponse);
   rpc GetAppLogs(GetAppLogsRequest) returns (GetAppLogsResponse);
   // Removes the app and all its data. Irreversible.
@@ -669,6 +673,15 @@ message StopAppRequest {
 }
 
 message StopAppResponse {
+  bool already_stopped = 1;
+}
+
+message KillAppRequest {
+  string id = 1;
+}
+
+message KillAppResponse {
+  // True when the app was not running (idempotent call).
   bool already_stopped = 1;
 }
 

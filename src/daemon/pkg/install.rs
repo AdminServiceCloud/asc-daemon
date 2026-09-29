@@ -621,6 +621,10 @@ fn install_one(
         }
         None => origin.clone_into(&repo_dir, opts.version, ctx, opts.report)?,
     };
+    // DMN-137 checkpoint: the clone is done — nothing pulled or built yet,
+    // so a cancelled install only leaves this directory, which the cleanup
+    // guard removes.
+    progress::ensure_not_cancelled(opts.report)?;
 
     let (manifest_dir, _) = locate_manifest(&repo_dir, origin.path(), stack_app)?;
     // The clone may turn out to hold a stack root rather than an app: a
@@ -743,6 +747,11 @@ fn install_one(
         values.merge_defaults(&settings.settings);
         values.save(&app_dir.join("config"))?;
     }
+
+    // DMN-137 checkpoint: last stop before the image pull/build and the
+    // container. Once provisioning succeeds the app is finished rather than
+    // torn down — a cancel that arrives that late has nothing left to save.
+    progress::ensure_not_cancelled(opts.report)?;
 
     // Minted before provisioning, not with the rest of the metadata below, so
     // a credential bound to this app's uuid already applies to its first
@@ -1487,6 +1496,7 @@ pub(super) fn git_clone_with(
     cmd.stderr(Stdio::piped());
     let _askpass = super::auth::configure_git(&mut cmd, credential.map(|c| &c.method))?;
 
+    progress::ensure_not_cancelled(report)?;
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(t(Msg::ErrGitNotFound)),
@@ -1499,18 +1509,29 @@ pub(super) fn git_clone_with(
     if let Some(report) = report {
         report.line(&format!("$ git clone {}", args.join(" ")));
     }
+    // DMN-137: git prints progress several times a second, so every line is
+    // a chance to notice a cancelled caller and kill the clone — stderr then
+    // hits EOF and the read below ends on its own.
+    let mut killed = false;
     let captured = read_progress_lines(&mut stderr, |line| {
         if let (Some(bar), Some((phase, pct))) = (&bar, progress::parse_git_progress(line)) {
             bar.update(phase, pct);
         }
         if let Some(report) = report {
             report.line(line);
+            if !killed && report.cancelled() {
+                killed = true;
+                let _ = child.kill();
+            }
         }
     });
     if let Some(bar) = bar {
         bar.finish();
     }
     let status = child.wait().context("cannot wait for git clone")?;
+    if killed {
+        return Err(anyhow::Error::new(progress::Cancelled));
+    }
     if !status.success() {
         // Only when no credential matched: with one configured, a plain
         // error (with the real git message) beats an offer to reconfigure.

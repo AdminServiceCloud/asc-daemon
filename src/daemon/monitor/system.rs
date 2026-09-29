@@ -125,11 +125,20 @@ pub struct Collector {
     /// last known reading is repeated in between.
     last_gpu_poll_ms: Option<i64>,
     cached_gpus: Vec<GpuMetrics>,
+    /// Millisecond clock and last reading of the mounted filesystems
+    /// (DMN-135): `/proc/self/mounts` on a Docker host lists every
+    /// container's overlay, and `statvfs` on a network filesystem can stall —
+    /// neither belongs in a 100ms loop when sizes barely move.
+    last_disks_poll_ms: Option<i64>,
+    cached_disks: Vec<DiskMetrics>,
 }
 
 /// Minimum gap between two GPU polls. Fast enough that a graph feels live,
 /// slow enough that `nvidia-smi` never overlaps itself under a 100ms sampler.
 const GPU_POLL_MIN_INTERVAL_MS: i64 = 1000;
+
+/// Minimum gap between two filesystem usage reads (DMN-135).
+const DISKS_POLL_MIN_INTERVAL_MS: i64 = 2000;
 
 impl Collector {
     pub fn new() -> Self {
@@ -210,6 +219,14 @@ impl Collector {
             self.last_gpu_poll_ms = Some(timestamp_ms);
         }
 
+        let disks_due = self
+            .last_disks_poll_ms
+            .is_none_or(|last| timestamp_ms - last >= DISKS_POLL_MIN_INTERVAL_MS);
+        if disks_due {
+            self.cached_disks = collect_disks();
+            self.last_disks_poll_ms = Some(timestamp_ms);
+        }
+
         let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
         let uptime_secs = parse_uptime(&uptime).unwrap_or(0);
 
@@ -223,7 +240,7 @@ impl Collector {
                 load15,
             },
             memory,
-            disks: collect_disks(),
+            disks: self.cached_disks.clone(),
             network,
             disk_io,
             gpus: self.cached_gpus.clone(),

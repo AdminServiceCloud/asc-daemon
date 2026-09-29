@@ -40,6 +40,9 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "webserver.logs",
         "api.certificate",
         "api.proxy",
+        "monitor.settings",
+        "app.install.cancel",
+        "app.setup",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()

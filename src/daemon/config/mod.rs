@@ -110,9 +110,12 @@ pub enum UserInstall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorConfig {
-    /// Milliseconds between samples. `None` means the 100ms default — see
-    /// [`MonitorConfig::interval_ms`].
+    /// Milliseconds between samples while someone watches the live stream.
+    /// `None` means the 100ms default — see [`MonitorConfig::interval_ms`].
     pub interval_ms: Option<u64>,
+    /// Milliseconds between samples while nobody is subscribed (DMN-135).
+    /// `None` means the 5s default — see [`MonitorConfig::idle_interval_ms`].
+    pub idle_interval_ms: Option<u64>,
     /// Deprecated and ignored (DMN-075): seconds between samples, written by
     /// daemons that predate millisecond sampling. Every install older than
     /// DMN-072 carries `interval_secs = 10` here, and honouring it kept those
@@ -136,12 +139,33 @@ impl MonitorConfig {
     pub fn interval_ms(&self) -> u64 {
         self.interval_ms.unwrap_or(100).max(10)
     }
+
+    /// The idle cadence (DMN-135): an explicit `idle_interval_ms`, otherwise
+    /// 5s — never faster than the live cadence, which would make "idle" the
+    /// busier of the two.
+    pub fn idle_interval_ms(&self) -> u64 {
+        self.idle_interval_ms
+            .unwrap_or(DEFAULT_IDLE_INTERVAL_MS)
+            .max(self.interval_ms())
+    }
 }
+
+/// Idle sampling cadence when `[monitor] idle_interval_ms` is unset: fresh
+/// enough for a once-a-minute resource sample or `GetSystemMetrics`, cheap
+/// enough to run around the clock on a node nobody is looking at.
+pub const DEFAULT_IDLE_INTERVAL_MS: u64 = 5_000;
+
+/// Bounds `SetMonitorSettings` accepts (DMN-135). The live floor keeps a
+/// misclick from turning the sampler into a busy loop; the ceilings keep a
+/// panel from looking frozen.
+pub const MONITOR_INTERVAL_MS_RANGE: std::ops::RangeInclusive<u64> = 100..=60_000;
+pub const MONITOR_IDLE_INTERVAL_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=300_000;
 
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
             interval_ms: None,
+            idle_interval_ms: None,
             interval_secs: None,
             history_samples: 300,
         }
@@ -532,6 +556,7 @@ mod tests {
         // ten seconds behind on a daemon that can stream every 100ms.
         let cfg = MonitorConfig {
             interval_ms: None,
+            idle_interval_ms: None,
             interval_secs: Some(10),
             history_samples: 300,
         };
@@ -542,10 +567,22 @@ mod tests {
     fn monitor_interval_ms_wins_over_legacy_seconds() {
         let cfg = MonitorConfig {
             interval_ms: Some(250),
+            idle_interval_ms: None,
             interval_secs: Some(10),
             history_samples: 300,
         };
         assert_eq!(cfg.interval_ms(), 250);
+    }
+
+    #[test]
+    fn idle_interval_defaults_to_five_seconds_and_never_undercuts_the_live_one() {
+        assert_eq!(MonitorConfig::default().idle_interval_ms(), 5_000);
+        let cfg = MonitorConfig {
+            interval_ms: Some(10_000),
+            idle_interval_ms: Some(2_000),
+            ..MonitorConfig::default()
+        };
+        assert_eq!(cfg.idle_interval_ms(), 10_000);
     }
 
     #[test]

@@ -18,9 +18,31 @@ use anyhow::{Result, bail};
 use tracing::{info, warn};
 
 use crate::daemon::config::Config;
-use crate::daemon::i18n::{Msg, tf};
+use crate::daemon::i18n::{Msg, tf, tf2};
 
 pub use driver::{ResourceUsage, RuntimeState};
+
+/// Starting an app whose `required` setup questions (asc.settings.yaml
+/// `setup:`, DMN-138) are still unanswered. Typed so both transports report
+/// it as a precondition to fix, not an internal error.
+#[derive(Debug)]
+pub struct SetupIncomplete {
+    pub app: String,
+    /// Setting keys still waiting for an answer.
+    pub settings: Vec<String>,
+}
+
+impl std::fmt::Display for SetupIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&tf2(
+            Msg::PkgSetupIncomplete,
+            &self.app,
+            self.settings.join(", "),
+        ))
+    }
+}
+
+impl std::error::Error for SetupIncomplete {}
 pub use meta::{AppMeta, DesiredState, ImageSource};
 pub use store::AppStore;
 
@@ -359,10 +381,13 @@ impl AppManager {
                 (Some(a), Some(b)) => Some(cpu_percent(a, b, elapsed_micros)),
                 _ => None,
             };
+            // Cached (DMN-136): this runs on every live-stats tick, and a
+            // full tree walk per tick is what made the node's CPU jump
+            // while an app page was open.
             let disk_bytes = self
                 .store
                 .app_dir(&app.meta.id)
-                .map(|dir| disk::dir_size(&dir))
+                .map(|dir| disk::cached_dir_size(&dir))
                 .unwrap_or(0);
             let quota_disk_bytes = app.meta.quota.as_ref().and_then(|q| q.disk_bytes);
             let uptime_secs = uptime_from(second.as_ref().and_then(|u| u.started_at));
@@ -467,6 +492,7 @@ impl AppManager {
         let outcome = if self.state_of(&meta) == RuntimeState::Running {
             Outcome::AlreadyInState
         } else {
+            self.ensure_setup_complete(&meta, &dir)?;
             // Changed settings (DMN-017/030) land here: a stopped container
             // whose configuration drifted from the settings is recreated.
             refreshed = crate::daemon::pkg::refresh::apply_settings(&self.config, &mut meta, &dir)?;
@@ -479,6 +505,30 @@ impl AppManager {
             self.store.save(&meta)?;
         }
         Ok(outcome)
+    }
+
+    /// Refuse to start an app whose `required` setup questions have no
+    /// answer yet (DMN-138) — a game server with no admin password is worse
+    /// than one that does not start. Best effort about everything else: a
+    /// manifest or settings file that cannot be read is not this check's
+    /// business, the start itself reports those.
+    fn ensure_setup_complete(&self, meta: &AppMeta, dir: &std::path::Path) -> Result<()> {
+        use crate::daemon::pkg::{dockerfile, settings};
+        let Ok((manifest_dir, _)) = settings::locate_installed(&self.config, meta, dir) else {
+            return Ok(());
+        };
+        let Ok((_, Some(file))) = dockerfile::resolve_installed(meta, &manifest_dir) else {
+            return Ok(());
+        };
+        let values = settings::SettingValues::load(&dir.join("config")).unwrap_or_default();
+        let missing = file.unanswered_required(&values);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(SetupIncomplete {
+            app: meta.display_name().to_string(),
+            settings: missing,
+        }))
     }
 
     pub fn stop(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
@@ -522,6 +572,7 @@ impl AppManager {
         // Docker restart runs as stop + start so changed settings (DMN-017/
         // 030) apply through the recreate in `apply_settings` — restart is
         // the documented way to pick up new setting values.
+        self.ensure_setup_complete(&meta, &dir)?;
         let mut refreshed = false;
         if matches!(meta.runtime, meta::Runtime::Docker { .. }) {
             driver::for_runtime(&meta.runtime, &self.config.docker).stop(&meta, &dir)?;
@@ -554,6 +605,9 @@ impl AppManager {
         let meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
         driver::for_runtime(&meta.runtime, &self.config.docker).remove(&meta, &dir)?;
+        // A new app installed under the same id must not inherit the old
+        // size from the stats cache (DMN-136).
+        disk::forget_dir_size(&dir);
         self.store.remove(&meta.id)
     }
 

@@ -33,6 +33,47 @@ pub struct SettingsFile {
     /// through `/bin/sh -c`); native: replaces `runtime.start`.
     #[serde(default)]
     pub start_command: Option<String>,
+    /// First-time setup questionnaire (DMN-138): questions the package
+    /// author asks the operator while the app installs, each about one
+    /// environment setting from `settings`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupSpec>,
+}
+
+/// `setup:` section (DMN-138) — the first-time setup questionnaire. The
+/// platform's install dialog shows it while the install runs; a question
+/// marked `required` must have an answer before the app's first start
+/// ([`SettingsFile::unanswered_required`]), the others can be skipped and
+/// set later in the settings editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub questions: Vec<SetupQuestion>,
+}
+
+/// One setup question. It asks about a setting declared in `settings` —
+/// type, limits, allowed values, default and `env` all come from there, so
+/// an answer is simply that setting's value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupQuestion {
+    /// Key of the setting the question fills in.
+    pub setting: String,
+    /// The question as the author phrases it; the setting's `title` when
+    /// unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// A hint under the question; the setting's `description` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// Must be answered before the first start (`true`), or may be skipped
+    /// and configured later (`false`, the default).
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// `quota:` section — resource limits as the package author writes them.
@@ -384,7 +425,60 @@ impl SettingsFile {
         if let Some(quota) = &self.quota {
             quota.normalize()?;
         }
+        if let Some(setup) = &self.setup {
+            self.validate_setup(setup)?;
+        }
         Ok(())
+    }
+
+    /// `setup:` checks (DMN-138): every question points at a declared
+    /// environment setting (not ports/volumes — those are lists the
+    /// questionnaire does not edit), and at most once.
+    fn validate_setup(&self, setup: &SetupSpec) -> Result<()> {
+        if setup.questions.is_empty() {
+            bail!("setup: 'questions' must list at least one question");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for question in &setup.questions {
+            let Some(def) = self.settings.iter().find(|d| d.key == question.setting) else {
+                bail!(
+                    "setup: question refers to unknown setting '{}'",
+                    question.setting
+                );
+            };
+            if def.kind.category() != SettingCategory::Environments {
+                bail!(
+                    "setup: setting '{}' is of type {:?} — only string, number, boolean, enum and secret settings can be asked",
+                    def.key,
+                    def.kind
+                );
+            }
+            if !seen.insert(question.setting.as_str()) {
+                bail!("setup: setting '{}' is asked twice", question.setting);
+            }
+        }
+        Ok(())
+    }
+
+    /// Keys of the `required` setup questions that have no answer in
+    /// `values` yet (DMN-138): missing, `null`, or an empty/blank string. A
+    /// package default counts as an answer only if the author gave one — a
+    /// required question normally has none, which is the point of asking.
+    pub fn unanswered_required(&self, values: &SettingValues) -> Vec<String> {
+        let Some(setup) = &self.setup else {
+            return Vec::new();
+        };
+        setup
+            .questions
+            .iter()
+            .filter(|question| question.required)
+            .filter(|question| match values.get(&question.setting) {
+                None | Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+                Some(_) => false,
+            })
+            .map(|question| question.setting.clone())
+            .collect()
     }
 }
 
@@ -1136,6 +1230,84 @@ settings:
 
         let many = def("{ key: p, type: ports, default: [8080, 8443], container: [3000, 3443] }");
         assert_eq!(many.container_ports(), [3000, 3443]);
+    }
+
+    const SETUP_YAML: &str = r#"
+settings:
+  - { key: server_name, type: string, env: SERVER_NAME, default: "My Server" }
+  - { key: admin_password, type: secret, env: ADMIN_PASSWORD }
+  - { key: max_players, type: number, env: MAX_PLAYERS, default: 10 }
+  - { key: game_port, type: ports, default: [27015] }
+setup:
+  title: First-time setup
+  questions:
+    - setting: admin_password
+      question: Choose the admin password
+      required: true
+    - setting: server_name
+      hint: Shown in the server browser
+"#;
+
+    #[test]
+    fn setup_questions_parse_and_validate() {
+        let file: SettingsFile = serde_yaml::from_str(SETUP_YAML).unwrap();
+        file.validate().unwrap();
+        let setup = file.setup.as_ref().unwrap();
+        assert_eq!(setup.title.as_deref(), Some("First-time setup"));
+        assert_eq!(setup.questions.len(), 2);
+        assert!(setup.questions[0].required);
+        assert!(
+            !setup.questions[1].required,
+            "questions are skippable by default"
+        );
+        // Serialized for the platform with the questions intact.
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["setup"]["questions"][0]["setting"], "admin_password");
+    }
+
+    #[test]
+    fn setup_rejects_unknown_list_and_duplicate_settings() {
+        let with = |questions: &str| -> SettingsFile {
+            let yaml = SETUP_YAML.split("setup:").next().unwrap().to_string()
+                + "setup:\n  questions:\n"
+                + questions;
+            serde_yaml::from_str(&yaml).unwrap()
+        };
+        assert!(with("    - setting: nope\n").validate().is_err());
+        // Ports are a list: not something a questionnaire edits.
+        assert!(with("    - setting: game_port\n").validate().is_err());
+        assert!(
+            with("    - setting: server_name\n    - setting: server_name\n")
+                .validate()
+                .is_err()
+        );
+        let empty: SettingsFile =
+            serde_yaml::from_str("settings: []\nsetup:\n  questions: []\n").unwrap();
+        assert!(empty.validate().is_err());
+    }
+
+    #[test]
+    fn required_setup_questions_need_a_real_answer() {
+        let file: SettingsFile = serde_yaml::from_str(SETUP_YAML).unwrap();
+        let mut values = SettingValues::default();
+        values.merge_defaults(&file.settings);
+        // The password has no default: freshly installed, it is unanswered.
+        assert_eq!(file.unanswered_required(&values), ["admin_password"]);
+
+        let answered = |raw: serde_json::Value| {
+            let mut map = values.as_map().clone();
+            map.insert("admin_password".into(), raw);
+            SettingValues::from_map(map)
+        };
+        assert_eq!(
+            file.unanswered_required(&answered(serde_json::json!("   "))),
+            ["admin_password"],
+            "a blank string is not an answer"
+        );
+        assert!(
+            file.unanswered_required(&answered(serde_json::json!("s3cret")))
+                .is_empty()
+        );
     }
 
     #[test]

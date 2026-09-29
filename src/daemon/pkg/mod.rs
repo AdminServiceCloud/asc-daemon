@@ -19,7 +19,7 @@ pub mod sources;
 mod sparse;
 pub mod upgrade;
 
-pub use clone::clone_app;
+pub use clone::{clone_app, clone_app_cancellable};
 pub use detect::{DetectedMethod, InstallMethod};
 pub use gitref::short_commit;
 pub use inspect::{PackageInfo, PackageKind, StackAppInfo, inspect_git};

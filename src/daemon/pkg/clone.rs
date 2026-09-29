@@ -31,6 +31,7 @@ fn copy_tree(
     dst: &Path,
     copied: &mut u64,
     on_copied: &mut dyn FnMut(u64),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     fs::create_dir_all(dst)
         .with_context(|| format!("cannot create directory {}", dst.display()))?;
@@ -42,8 +43,13 @@ fn copy_tree(
         if file_type.is_symlink() {
             continue;
         } else if file_type.is_dir() {
-            copy_tree(&from, &to, copied, on_copied)?;
+            copy_tree(&from, &to, copied, on_copied, cancelled)?;
         } else {
+            // DMN-137: checked per file — copying a large data folder is
+            // exactly the kind of work a cancelled task must not finish.
+            if cancelled() {
+                return Err(anyhow::Error::new(crate::daemon::progress::Cancelled));
+            }
             fs::copy(&from, &to)
                 .with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))?;
             *copied += entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -66,7 +72,30 @@ pub fn clone_app(
     store: &AppStore,
     source: &AppMeta,
     custom_name: Option<&str>,
+    on_progress: impl FnMut(u64, u64),
+) -> Result<AppMeta> {
+    clone_app_cancellable(
+        config,
+        ctx,
+        store,
+        source,
+        custom_name,
+        on_progress,
+        &|| false,
+    )
+}
+
+/// [`clone_app`] that stops once `cancelled` says so (DMN-137): between
+/// copied files, and once more before the runtime is provisioned. The
+/// half-made copy is removed like after any other failure.
+pub fn clone_app_cancellable(
+    config: &Config,
+    ctx: &UserContext,
+    store: &AppStore,
+    source: &AppMeta,
+    custom_name: Option<&str>,
     mut on_progress: impl FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<AppMeta> {
     if let Some(name) = custom_name {
         validate_custom_name(config, ctx, name)?;
@@ -100,9 +129,13 @@ pub fn clone_app(
     for sub in ["repository", "config", "data"] {
         let from = source_dir.join(sub);
         if from.is_dir() {
-            copy_tree(&from, &dest_dir.join(sub), &mut copied, &mut |c| {
-                on_progress(c, total)
-            })?;
+            copy_tree(
+                &from,
+                &dest_dir.join(sub),
+                &mut copied,
+                &mut |c| on_progress(c, total),
+                cancelled,
+            )?;
         }
     }
     // install_one's own invariant (config/ and data/ always exist) holds for
@@ -118,6 +151,9 @@ pub fn clone_app(
     // all; only monorepo/stack packages fall back to re-resolving it, using
     // the source's own package/source fields (the new id plays no part in
     // that resolution).
+    if cancelled() {
+        return Err(anyhow::Error::new(crate::daemon::progress::Cancelled));
+    }
     let (manifest_dir, _) = locate_installed(config, source, &dest_dir)?;
     let (manifest, settings) = dockerfile::resolve_installed(source, &manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, &new_id)?;

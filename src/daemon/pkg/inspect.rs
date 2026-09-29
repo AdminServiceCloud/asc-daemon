@@ -68,6 +68,11 @@ pub struct PackageInfo {
     /// requirements or runtime quota the host cannot cover right now. `None`
     /// when everything fits or the metrics could not be read.
     pub shortfall: Option<RequirementsNotMet>,
+    /// The app's sc.settings.yaml (DMN-138) — apps only: what the install
+    /// dialog asks the operator up front (its `setup:` questions) before the
+    /// app even exists. `None` for stacks, unknown kinds, a package without
+    /// settings, or a settings file that does not parse.
+    pub settings: Option<SettingsFile>,
 }
 
 /// One app of a stack, merged from `asc.stack.yaml` and the app's own
@@ -264,10 +269,12 @@ fn read_package(dir: &Path, url: &str) -> Result<PackageInfo> {
             methods,
             license: None,
             shortfall: None,
+            settings: None,
         });
     }
     if dir.join(Manifest::FILE).exists() {
         let manifest = Manifest::load(dir)?;
+        let settings = SettingsFile::load_for(dir, &manifest).ok().flatten();
         return Ok(PackageInfo {
             kind: PackageKind::App,
             name: manifest.name,
@@ -279,6 +286,7 @@ fn read_package(dir: &Path, url: &str) -> Result<PackageInfo> {
             methods,
             license: None,
             shortfall: None,
+            settings,
         });
     }
     Ok(PackageInfo {
@@ -292,5 +300,6 @@ fn read_package(dir: &Path, url: &str) -> Result<PackageInfo> {
         methods,
         license: None,
         shortfall: None,
+        settings: None,
     })
 }

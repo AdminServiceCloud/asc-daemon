@@ -225,6 +225,7 @@ fn synthesize_settings(dockerfile: &Path) -> Result<Option<SettingsFile>> {
         quota: None,
         settings,
         start_command: None,
+        setup: None,
     }))
 }
 

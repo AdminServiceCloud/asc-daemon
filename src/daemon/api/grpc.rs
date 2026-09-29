@@ -96,6 +96,18 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
         return Status::failed_precondition(msg);
     }
     if err
+        .downcast_ref::<crate::daemon::apps::SetupIncomplete>()
+        .is_some()
+    {
+        return Status::failed_precondition(msg);
+    }
+    if err
+        .downcast_ref::<crate::daemon::progress::Cancelled>()
+        .is_some()
+    {
+        return Status::cancelled(msg);
+    }
+    if err
         .downcast_ref::<crate::daemon::pkg::image::NotRepullable>()
         .is_some()
     {
@@ -340,6 +352,34 @@ impl MonitorService for Grpc {
         }))
     }
 
+    async fn get_monitor_settings(
+        &self,
+        _request: Request<pb::GetMonitorSettingsRequest>,
+    ) -> Result<Response<pb::MonitorSettings>, Status> {
+        let settings = self.0.monitor.settings();
+        Ok(Response::new(pb::MonitorSettings {
+            interval_ms: settings.interval_ms,
+            idle_interval_ms: settings.idle_interval_ms,
+        }))
+    }
+
+    async fn set_monitor_settings(
+        &self,
+        request: Request<pb::SetMonitorSettingsRequest>,
+    ) -> Result<Response<pb::MonitorSettings>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let settings = self
+            .0
+            .set_monitor_settings(ctx, req.interval_ms, req.idle_interval_ms)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::MonitorSettings {
+            interval_ms: settings.interval_ms,
+            idle_interval_ms: settings.idle_interval_ms,
+        }))
+    }
+
     async fn get_metrics_history(
         &self,
         request: Request<pb::GetMetricsHistoryRequest>,
@@ -572,6 +612,12 @@ fn package_info_to_pb(
         license,
     });
     let requirements_not_met = info.shortfall.map(requirements_not_met_detail);
+    // Same shape GetAppSettingsResponse.settings_json carries (DMN-138); a
+    // SettingsFile always serializes, so a failure here is not worth an error.
+    let settings_json = info
+        .settings
+        .as_ref()
+        .and_then(|settings| serde_json::to_string(settings).ok());
     pb::InspectPackageResponse {
         kind: match info.kind {
             pkg::PackageKind::Unknown => pb::PackageKind::Unspecified as i32,
@@ -605,6 +651,7 @@ fn package_info_to_pb(
         auth_required: None,
         license,
         requirements_not_met,
+        settings_json,
     }
 }
 
@@ -1333,8 +1380,11 @@ impl AppService for Grpc {
         let ctx = ctx_of(&request);
         let req = request.into_inner();
         // A sampling window already costs ~500ms; anything faster than 1s
-        // is not a live stream, it is a busy loop (DMN-081).
-        let min_interval = Duration::from_secs(req.min_interval_secs.max(1) as u64);
+        // is not a live stream, it is a busy loop (DMN-081). Nor faster than
+        // the node's own sampler (DMN-135): an operator who slowed the
+        // cadence down to spare the CPU meant the app page too.
+        let sampler = Duration::from_millis(self.0.monitor.settings().interval_ms);
+        let min_interval = Duration::from_secs(req.min_interval_secs.max(1) as u64).max(sampler);
         let state = Arc::clone(&self.0);
 
         struct StreamState {

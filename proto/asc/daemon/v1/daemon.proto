@@ -495,6 +495,12 @@ message InspectPackageResponse {
   // right now (DMN-131) — the check InstallApp runs without `force`, run
   // ahead of it. Absent: everything fits, or metrics were unavailable.
   optional RequirementsNotMetDetail requirements_not_met = 11;
+  // The app's asc.settings.yaml as a JSON-encoded SettingsFile (DMN-138) —
+  // the same shape GetAppSettingsResponse.settings_json carries, known
+  // before the app exists: the install dialog renders its `setup` questions
+  // while the install runs. Absent for stacks and for packages without
+  // settings.
+  optional string settings_json = 12;
 }
 
 enum PackageKind {
@@ -995,6 +1001,29 @@ service MonitorService {
   // cannot read most other processes' fd tables, and the affected rows come
   // back with pid/process/command absent rather than the call failing.
   rpc ListListeningPorts(ListListeningPortsRequest) returns (ListListeningPortsResponse);
+  // Sampling cadences (DMN-135): `interval_ms` while StreamSystemMetrics has
+  // subscribers, `idle_interval_ms` otherwise. Read by anyone; changing them
+  // needs a root context. Applied to the running sampler at once and saved
+  // to `[monitor]` in config.toml. REST mirror: GET/PUT /v1/monitor/settings.
+  rpc GetMonitorSettings(GetMonitorSettingsRequest) returns (MonitorSettings);
+  rpc SetMonitorSettings(SetMonitorSettingsRequest) returns (MonitorSettings);
+}
+
+message GetMonitorSettingsRequest {}
+
+message MonitorSettings {
+  // Milliseconds between samples while someone watches the live stream,
+  // 100..=60000.
+  uint64 interval_ms = 1;
+  // Milliseconds between samples while nobody does, 1000..=300000 and not
+  // below interval_ms.
+  uint64 idle_interval_ms = 2;
+}
+
+message SetMonitorSettingsRequest {
+  // Unset fields keep their current value.
+  optional uint64 interval_ms = 1;
+  optional uint64 idle_interval_ms = 2;
 }
 
 message ListListeningPortsRequest {}

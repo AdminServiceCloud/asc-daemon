@@ -29,6 +29,11 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/system/reboot", post(reboot_system))
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
+        // Sampling cadences (DMN-135).
+        .route(
+            "/v1/monitor/settings",
+            get(monitor_settings).put(set_monitor_settings),
+        )
         .route("/v1/network/interfaces", get(network_interfaces))
         // Real host listening-port inventory (DMN-103), see
         // docs/monitoring.md — distinct from /v1/ports above, which reports
@@ -280,6 +285,19 @@ impl IntoResponse for ApiError {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+        if let Some(pending) = self
+            .0
+            .downcast_ref::<crate::daemon::apps::SetupIncomplete>()
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "setup_incomplete": { "app": pending.app, "settings": pending.settings },
+                })),
             )
                 .into_response();
         }
@@ -655,6 +673,44 @@ async fn metrics_history(
         .map(metrics_json)
         .collect();
     Json(serde_json::json!({ "samples": samples })).into_response()
+}
+
+#[derive(Serialize)]
+struct MonitorSettingsJson {
+    interval_ms: u64,
+    idle_interval_ms: u64,
+}
+
+impl From<crate::daemon::monitor::MonitorSettings> for MonitorSettingsJson {
+    fn from(settings: crate::daemon::monitor::MonitorSettings) -> Self {
+        Self {
+            interval_ms: settings.interval_ms,
+            idle_interval_ms: settings.idle_interval_ms,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MonitorSettingsBody {
+    #[serde(default)]
+    interval_ms: Option<u64>,
+    #[serde(default)]
+    idle_interval_ms: Option<u64>,
+}
+
+async fn monitor_settings(State(state): State<Arc<ApiState>>) -> Response {
+    Json(MonitorSettingsJson::from(state.monitor.settings())).into_response()
+}
+
+async fn set_monitor_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<MonitorSettingsBody>,
+) -> Result<Response, ApiError> {
+    let settings = state
+        .set_monitor_settings(ctx, body.interval_ms, body.idle_interval_ms)
+        .await?;
+    Ok(Json(MonitorSettingsJson::from(settings)).into_response())
 }
 
 async fn list_apps(

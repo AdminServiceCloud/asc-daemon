@@ -26,6 +26,38 @@ pub fn interactive() -> bool {
 /// pull/build bridge into async code via `block_on`).
 pub trait InstallReporter: Send + Sync {
     fn line(&self, text: &str);
+
+    /// Whether whoever watches has given up on the operation (DMN-137): the
+    /// platform cancelling a task closes its stream, and the work stops at
+    /// the next checkpoint — a killed `git clone`, an abandoned image pull or
+    /// build, or before the container is created — instead of running to the
+    /// end for nobody. A reporter that cannot tell (the terminal) never is.
+    fn cancelled(&self) -> bool {
+        false
+    }
+}
+
+/// The operation stopped because its caller cancelled it (DMN-137) — see
+/// [`InstallReporter::cancelled`]. Typed so a cancelled install is told apart
+/// from a failed one.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled by the caller")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// A checkpoint: fail with [`Cancelled`] once the reporter says the caller
+/// has gone.
+pub fn ensure_not_cancelled(report: Option<&dyn InstallReporter>) -> anyhow::Result<()> {
+    if report.is_some_and(|report| report.cancelled()) {
+        return Err(anyhow::Error::new(Cancelled));
+    }
+    Ok(())
 }
 
 fn bytes_style() -> ProgressStyle {
@@ -404,6 +436,28 @@ pub fn parse_git_progress(line: &str) -> Option<(&str, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Watched(std::sync::atomic::AtomicBool);
+
+    impl InstallReporter for Watched {
+        fn line(&self, _text: &str) {}
+        fn cancelled(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn checkpoints_fail_only_once_the_caller_cancelled() {
+        assert!(
+            ensure_not_cancelled(None).is_ok(),
+            "no reporter, nobody to cancel"
+        );
+        let watched = Watched(std::sync::atomic::AtomicBool::new(false));
+        assert!(ensure_not_cancelled(Some(&watched)).is_ok());
+        watched.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = ensure_not_cancelled(Some(&watched)).unwrap_err();
+        assert!(err.downcast_ref::<Cancelled>().is_some());
+    }
 
     #[test]
     fn parses_percent_lines() {

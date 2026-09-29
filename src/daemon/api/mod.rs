@@ -74,6 +74,13 @@ pub const CAPABILITIES: &[&str] = &[
     "webserver.logs",
     "api.certificate",
     "api.proxy",
+    // DMN-135: GetMonitorSettings/SetMonitorSettings.
+    "monitor.settings",
+    // DMN-137: closing an install/upgrade/repull stream cancels the work.
+    "app.install.cancel",
+    // DMN-138: asc.settings.yaml `setup:`, InstallAppRequest.defer_start,
+    // InspectPackageResponse.settings_json.
+    "app.setup",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -978,7 +985,7 @@ impl ApiState {
 
     /// Streamed sibling of [`Self::repull_app`] (DMN-132), built exactly like
     /// [`Self::upgrade_stream`]: the pull's progress lines, then the result.
-    /// A disconnect does not cancel the pull — the worker runs to the end.
+    /// A disconnect cancels the pull (DMN-137), like an install's.
     pub fn repull_stream(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -989,6 +996,12 @@ impl ApiState {
         impl progress::InstallReporter for ChannelReporter {
             fn line(&self, text: &str) {
                 send_progress_line(&self.0, RepullStreamEvent::Line(text.to_string()));
+            }
+
+            // DMN-137: the gRPC stream holding the receiver was dropped —
+            // the caller cancelled (or went away); stop at the next checkpoint.
+            fn cancelled(&self) -> bool {
+                self.0.is_closed()
             }
         }
 
@@ -1021,7 +1034,7 @@ impl ApiState {
                         .manager
                         .store()
                         .app_dir(&app.meta.id)
-                        .map(|dir| disk::dir_size(&dir))
+                        .map(|dir| disk::cached_dir_size(&dir))
                         .unwrap_or(0),
                     id: app.meta.id,
                     name: app.meta.custom_name.unwrap_or(app.meta.name),
@@ -1111,9 +1124,8 @@ impl ApiState {
     /// Streamed sibling of [`Self::upgrade`]: progress lines arrive as
     /// [`UpgradeStreamEvent::Line`] as they happen, ending in one
     /// [`UpgradeStreamEvent::Done`] with the same result `upgrade` would
-    /// have returned. Mirrors [`Self::install_stream`] exactly — the upgrade
-    /// keeps running in the background regardless of whether the receiver is
-    /// still being read.
+    /// have returned. Mirrors [`Self::install_stream`] exactly — dropping
+    /// the receiver cancels the upgrade at its next checkpoint (DMN-137).
     pub fn upgrade_stream(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -1124,6 +1136,12 @@ impl ApiState {
         impl progress::InstallReporter for ChannelReporter {
             fn line(&self, text: &str) {
                 send_progress_line(&self.0, UpgradeStreamEvent::Line(text.to_string()));
+            }
+
+            // DMN-137: the gRPC stream holding the receiver was dropped —
+            // the caller cancelled (or went away); stop at the next checkpoint.
+            fn cancelled(&self) -> bool {
+                self.0.is_closed()
             }
         }
 
@@ -1153,10 +1171,11 @@ impl ApiState {
         reference: &str,
         name: Option<&str>,
         mut on_progress: impl FnMut(u64, u64),
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(AppMeta, u64)> {
         let source = self.manager.get_authorized(ctx, reference)?;
         let mut copied_bytes = 0u64;
-        let meta = pkg::clone_app(
+        let meta = pkg::clone_app_cancellable(
             &self.config,
             ctx,
             self.manager.store(),
@@ -1166,6 +1185,7 @@ impl ApiState {
                 copied_bytes = copied;
                 on_progress(copied, total);
             },
+            cancelled,
         )?;
         Ok((meta, copied_bytes))
     }
@@ -1179,7 +1199,7 @@ impl ApiState {
         reference: String,
         name: Option<String>,
     ) -> Result<(AppMeta, u64)> {
-        self.blocking(move |s| s.clone_one(&ctx, &reference, name.as_deref(), |_, _| {}))
+        self.blocking(move |s| s.clone_one(&ctx, &reference, name.as_deref(), |_, _| {}, &|| false))
             .await
     }
 
@@ -1188,9 +1208,8 @@ impl ApiState {
     /// directory copy, so a source with many small files does not flood the
     /// stream), ending in one [`CloneStreamEvent::Done`] with the same
     /// result `clone_app` would have returned. Mirrors
-    /// [`Self::install_stream`]/[`Self::upgrade_stream`] exactly — the clone
-    /// keeps running in the background regardless of whether the receiver is
-    /// still being read.
+    /// [`Self::install_stream`]/[`Self::upgrade_stream`] exactly — dropping
+    /// the receiver cancels the clone between copied files (DMN-137).
     pub fn clone_app_stream(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -1203,24 +1222,30 @@ impl ApiState {
         tokio::task::spawn_blocking(move || {
             let mut last_percent: i64 = -1;
             let outcome = catching_panics("clone", || {
-                state.clone_one(&ctx, &reference, name.as_deref(), |copied, total| {
-                    let percent: i64 = if total == 0 {
-                        100
-                    } else {
-                        ((copied as u128 * 100 / total as u128) as i64).min(100)
-                    };
-                    if percent != last_percent {
-                        last_percent = percent;
-                        send_progress_line(
-                            &tx,
-                            CloneStreamEvent::Line(format!(
-                                "Copying {} / {}",
-                                indicatif::HumanBytes(copied),
-                                indicatif::HumanBytes(total)
-                            )),
-                        );
-                    }
-                })
+                state.clone_one(
+                    &ctx,
+                    &reference,
+                    name.as_deref(),
+                    |copied, total| {
+                        let percent: i64 = if total == 0 {
+                            100
+                        } else {
+                            ((copied as u128 * 100 / total as u128) as i64).min(100)
+                        };
+                        if percent != last_percent {
+                            last_percent = percent;
+                            send_progress_line(
+                                &tx,
+                                CloneStreamEvent::Line(format!(
+                                    "Copying {} / {}",
+                                    indicatif::HumanBytes(copied),
+                                    indicatif::HumanBytes(total)
+                                )),
+                            );
+                        }
+                    },
+                    &|| result_tx.is_closed(),
+                )
             });
             // The terminal event, unlike a progress line, is never sent from
             // inside a runtime and must never be dropped: a full channel
@@ -1359,11 +1384,11 @@ impl ApiState {
     /// Streamed sibling of [`Self::install`] (DMN-090): the same install,
     /// but progress lines arrive as [`InstallStreamEvent::Line`] as they
     /// happen, ending in one [`InstallStreamEvent::Done`] with the same
-    /// result `install` would have returned. The install runs in the
-    /// background regardless of whether the receiver is still being read —
-    /// dropping it does not cancel the install, the same "finish what was
-    /// started" stance `install` already takes for a caller that goes away
-    /// mid-request.
+    /// result `install` would have returned. Dropping the receiver cancels
+    /// the install (DMN-137): the platform's "cancel task" closes this
+    /// stream, and the work stops at its next checkpoint — the clone is
+    /// killed, a pull or build abandoned, and the half-made app directory
+    /// removed. Once the container exists the install finishes regardless.
     #[allow(clippy::too_many_arguments)]
     pub fn install_stream(
         self: &Arc<Self>,
@@ -1391,6 +1416,12 @@ impl ApiState {
                 // stopped reading) must not slow down or panic the install
                 // that is still running.
                 send_progress_line(&self.0, InstallStreamEvent::Line(text.to_string()));
+            }
+
+            // DMN-137: the gRPC stream holding the receiver was dropped —
+            // the caller cancelled (or went away); stop at the next checkpoint.
+            fn cancelled(&self) -> bool {
+                self.0.is_closed()
             }
         }
 
@@ -2270,6 +2301,35 @@ impl ApiState {
                     labels: network.labels,
                 })
                 .collect())
+        })
+        .await
+    }
+
+    /// Change the metrics sampler's cadences (DMN-135): validated, applied
+    /// to the running sampler, then saved to `[monitor]` in config.toml.
+    /// `None` keeps a value as it is. Root context only — the cadence is a
+    /// host-wide setting, not a per-user one.
+    pub async fn set_monitor_settings(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        interval_ms: Option<u64>,
+        idle_interval_ms: Option<u64>,
+    ) -> Result<crate::daemon::monitor::MonitorSettings> {
+        use crate::daemon::monitor::{self, MonitorSettings};
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let current = s.monitor.settings();
+            let next = MonitorSettings {
+                interval_ms: interval_ms.unwrap_or(current.interval_ms),
+                idle_interval_ms: idle_interval_ms.unwrap_or(current.idle_interval_ms),
+            };
+            // UserError::InvalidInput is the one invalid-argument error both
+            // transports already map (INVALID_ARGUMENT / 400).
+            next.validate()
+                .map_err(|err| users::UserError::InvalidInput(format!("{err:#}")))?;
+            monitor::save_settings(next)?;
+            s.monitor.apply(next);
+            Ok(next)
         })
         .await
     }

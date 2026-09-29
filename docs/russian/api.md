@@ -114,6 +114,8 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `POST /v1/webserver/sites/{id}/renew` | `WebServerService.RenewCertificate` (DMN-124) | Выпустить сертификат Let's Encrypt сейчас, игнорируя backoff |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
+| `GET /v1/monitor/settings` | `MonitorService.GetMonitorSettings` | Частота сэмплера (DMN-135): `interval_ms` — пока кто-то смотрит поток, `idle_interval_ms` — в простое |
+| `PUT /v1/monitor/settings` | `MonitorService.SetMonitorSettings` | Сменить частоту на лету и сохранить в `config.toml` (root; `interval_ms` 100–60000, `idle_interval_ms` 1000–300000 и не меньше `interval_ms`) |
 | `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |
 | `GET /v1/processes` | `ProcessService.ListProcesses` (DMN-119) | Процессы хоста (`ps`/`top`): CPU, RSS, пользователь, состояние, время старта, контейнер Docker и приложение-владелец; `?kernelThreads=true` — вместе с потоками ядра |
 | `POST /v1/processes/{pid}/signal` | `ProcessService.SignalProcess` (DMN-119) | Тело `{"signal": "term"\|"kill"\|"hup"\|"int"\|"stop"\|"cont"\|"usr1"\|"usr2", "expectedStartTicks"?: n}`; только root; 403 для pid 1/демона/потоков ядра, 404 — процесса уже нет, 409 — pid переиспользован |

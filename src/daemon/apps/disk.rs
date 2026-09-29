@@ -2,8 +2,11 @@
 //! image, repository checkout, private data and custom volumes — against
 //! its quota (`asc.settings.yaml` `quota.max_disk`) when one is set.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -230,17 +233,65 @@ pub fn private_volume_roots(
     roots
 }
 
+/// How long [`cached_dir_size`] trusts a measured directory size (DMN-136).
+pub const DIR_SIZE_TTL: Duration = Duration::from_secs(60);
+
+/// Directory sizes measured recently, keyed by path.
+static DIR_SIZES: OnceLock<Mutex<HashMap<PathBuf, (Instant, u64)>>> = OnceLock::new();
+
+/// [`dir_size`] behind a [`DIR_SIZE_TTL`] cache (DMN-136), for figures that
+/// are refreshed on a timer — `asc stats`/`StreamAppStats` and the `asc disk`
+/// summary. A game server with tens of thousands of files costs hundreds of
+/// milliseconds per walk, and the live stats on the app page used to repeat
+/// it every second. The explicit report ([`usage`]) still measures fresh.
+///
+/// Two callers missing the cache at once both walk — the lock is never held
+/// across the walk itself, so one slow directory cannot stall every other
+/// app's stats behind it.
+pub fn cached_dir_size(dir: &Path) -> u64 {
+    let cache = DIR_SIZES.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    if let Some(&(measured, bytes)) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(dir)
+        && now.duration_since(measured) < DIR_SIZE_TTL
+    {
+        return bytes;
+    }
+    let bytes = dir_size(dir);
+    let mut sizes = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Removed apps must not linger forever: drop whatever nobody asked about
+    // for a couple of TTLs whenever a fresh figure is stored.
+    sizes.retain(|_, (measured, _)| now.duration_since(*measured) < DIR_SIZE_TTL * 2);
+    sizes.insert(dir.to_path_buf(), (now, bytes));
+    bytes
+}
+
+/// Forget a cached size — after something that is known to change it a lot
+/// (an app removed, reinstalled or restored), so the next figure is fresh.
+pub fn forget_dir_size(dir: &Path) {
+    if let Some(cache) = DIR_SIZES.get() {
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(dir);
+    }
+}
+
 /// Recursive size of everything under `dir`, in bytes. Symlinks are never
 /// followed (their own directory-entry size is not counted either) — a
 /// crafted loop or a link outside the measured directory cannot inflate the
 /// result or escape it. A missing directory reports zero.
 ///
-/// `pub`: reused for the quick per-app disk figure in `asc stats`
-/// (`AppManager::stats`, same module), the clone progress bar's total
-/// (`pkg::clone`, a sibling module under `daemon`) and the `asc disk`
-/// summary (`cli::disk_summary_cmd`, the `asc` binary) — unlike [`usage`],
-/// it skips the Docker image query and settings/volume resolution, cheap
-/// enough to recompute on every stats refresh tick or across every app.
+/// `pub`: reused for the clone progress bar's total (`pkg::clone`, a
+/// sibling module under `daemon`) and the in-process `asc disk` summary
+/// (`cli::disk_summary_cmd`, the `asc` binary) — unlike [`usage`], it skips
+/// the Docker image query and settings/volume resolution. Still a full tree
+/// walk, though: anything refreshed on a timer goes through
+/// [`cached_dir_size`] instead (DMN-136).
 pub fn dir_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let mut stack = vec![dir.to_path_buf()];
@@ -283,6 +334,19 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         assert_eq!(dir_size(dir.path()), 350);
+    }
+
+    #[test]
+    fn cached_dir_size_reuses_a_recent_measurement() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), [0u8; 100]).unwrap();
+        assert_eq!(cached_dir_size(dir.path()), 100);
+        // Grows on disk, but the cached figure stands until the TTL ends…
+        fs::write(dir.path().join("b.txt"), [0u8; 50]).unwrap();
+        assert_eq!(cached_dir_size(dir.path()), 100);
+        // …or until the entry is forgotten explicitly.
+        forget_dir_size(dir.path());
+        assert_eq!(cached_dir_size(dir.path()), 150);
     }
 
     #[test]

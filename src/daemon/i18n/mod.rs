@@ -113,6 +113,7 @@ pub enum Msg {
     PkgNotInSource,
     PkgPickSource,
     PkgNotAStack,
+    PkgSetupIncomplete,
     PkgStackNoApp,
     PkgStackInstalled,
     PkgStackAppSkipped,
@@ -429,6 +430,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::PkgPickSource => (
             "Package '{}' is available from several sources — pick one:",
             "Пакет '{}' доступен из нескольких источников — выберите один:",
+        ),
+        Msg::PkgSetupIncomplete => (
+            "app '{}' needs its first-time setup before it can start — answer: {} (asc app settings)",
+            "приложению '{}' нужна первичная настройка перед запуском — ответьте на: {} (asc app settings)",
         ),
         Msg::PkgNotAStack => (
             "package '{}' is not a stack — install it as a whole: asc install {}",

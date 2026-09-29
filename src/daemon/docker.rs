@@ -966,9 +966,12 @@ pub fn ensure_pulled(
         let docker = connect(cfg)?;
         match docker.inspect_image(image).await {
             Ok(_) => Ok(()),
-            Err(e) if status_of(&e) == Some(404) => pull(&docker, image, auth, report)
-                .await
-                .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image))),
+            Err(e) if status_of(&e) == Some(404) => {
+                pull(&docker, image, auth, report)
+                    .await
+                    .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image)))?;
+                progress::ensure_not_cancelled(report)
+            }
             Err(e) => Err(friendly(cfg, e)),
         }
     })
@@ -1052,7 +1055,8 @@ pub fn pull_image(
         let docker = connect(cfg)?;
         pull(&docker, image, auth, report)
             .await
-            .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image)))
+            .map_err(|e| anyhow!("{}: {e}", tf(Msg::ErrImagePull, image)))?;
+        progress::ensure_not_cancelled(report)
     })
 }
 
@@ -1241,6 +1245,12 @@ async fn pull(
     }
     let mut stream = docker.create_image(Some(opts), None, auth.map(RegistryAuth::to_credentials));
     while let Some(step) = stream.next().await {
+        // DMN-137: the caller gave up — drop the stream (the Engine aborts a
+        // pull whose client went away); the caller's own checkpoint right
+        // after turns this into a `Cancelled` error.
+        if report.is_some_and(|report| report.cancelled()) {
+            break;
+        }
         let step = step?;
         let bytes = step
             .progress_detail
@@ -1375,6 +1385,9 @@ pub fn build_image(
         let mut frames = 0usize;
         let mut traced = 0usize;
         while let Some(step) = stream.next().await {
+            // DMN-137: dropping the stream closes the build session; the
+            // Engine cancels a BuildKit solve whose client went away.
+            progress::ensure_not_cancelled(report)?;
             let info = match step {
                 Ok(info) => info,
                 // The Engine reporting a failure inside the build stream:

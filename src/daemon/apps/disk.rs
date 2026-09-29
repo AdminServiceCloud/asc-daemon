@@ -131,7 +131,10 @@ fn volume_usages(
     settings_file: Option<&settings::SettingsFile>,
     app_dir: &Path,
 ) -> Vec<VolumeUsage> {
-    let inputs = match pkg::runtime_inputs(settings_file, &app_dir.join("config")) {
+    let inputs = match pkg::runtime_inputs(
+        settings_file,
+        &crate::daemon::apps::layout::settings_dir(app_dir),
+    ) {
         Ok(inputs) => inputs,
         Err(err) => {
             warn!(app = %meta.id, error = %format!("{err:#}"), "cannot resolve app settings for disk usage");
@@ -217,7 +220,10 @@ pub fn private_volume_roots(
     let Ok((_, settings_file)) = dockerfile::resolve_installed(meta, manifest_dir) else {
         return Vec::new();
     };
-    let Ok(inputs) = pkg::runtime_inputs(settings_file.as_ref(), &app_dir.join("config")) else {
+    let Ok(inputs) = pkg::runtime_inputs(
+        settings_file.as_ref(),
+        &crate::daemon::apps::layout::settings_dir(app_dir),
+    ) else {
         return Vec::new();
     };
     let mut roots = Vec::new();

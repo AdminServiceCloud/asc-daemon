@@ -764,7 +764,7 @@ fn run_backup(
     filter: &backup::BackupFilter,
 ) -> Result<Outcome> {
     let meta = manager.get_authorized(ctx, app)?;
-    let config_dir = manager.store().app_dir(&meta.id)?.join("config");
+    let config_dir = crate::daemon::apps::layout::settings_dir(&manager.store().app_dir(&meta.id)?);
     let policy = crate::daemon::pkg::settings::SettingValues::load(&config_dir)?
         .backup_policy()?
         .unwrap_or_default();

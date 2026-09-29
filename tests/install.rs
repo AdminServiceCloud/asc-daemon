@@ -223,7 +223,9 @@ fn install_from_file_registry() {
     assert!(meta.source.as_deref().unwrap().starts_with("local:"));
     let app_dir = store.app_dir("demo").unwrap();
     assert!(app_dir.join("repository/asc.yaml").exists());
-    assert!(app_dir.join("config").is_dir());
+    assert!(app_dir.join(".asc/meta.json").is_file());
+    assert!(!app_dir.join("meta.json").exists());
+    assert!(!app_dir.join("config").exists());
     assert!(app_dir.join("data").is_dir());
 
     // A second install of the same package becomes a new instance (DMN-033):

@@ -701,7 +701,10 @@ fn install_one(
     // guard removes the cloned repository on this failure path too.
     enforce_install_policy(config, ctx, &manifest, name)?;
 
-    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
+    let quota = load_quota(
+        settings.as_ref(),
+        &crate::daemon::apps::layout::settings_dir(&app_dir),
+    )?;
 
     // Resource shortfall check (DMN-099), before anything is pulled or
     // built. A metrics read failure must not block the install — same
@@ -734,10 +737,8 @@ fn install_one(
         }
     };
 
-    for sub in ["config", "data"] {
-        fs::create_dir_all(app_dir.join(sub))
-            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
-    }
+    fs::create_dir_all(app_dir.join("data")).context("cannot create data/ in app directory")?;
+    crate::daemon::apps::layout::ensure_state_dir(&app_dir)?;
     // Seed the setting values with the package defaults, so the settings
     // editor (`asc app settings`) and the runtime see a consistent state.
     if let Some(settings) = &settings
@@ -745,7 +746,7 @@ fn install_one(
     {
         let mut values = SettingValues::default();
         values.merge_defaults(&settings.settings);
-        values.save(&app_dir.join("config"))?;
+        values.save(&crate::daemon::apps::layout::settings_dir(&app_dir))?;
     }
 
     // DMN-137 checkpoint: last stop before the image pull/build and the
@@ -890,12 +891,10 @@ fn install_compose_one(
     // before a single container is ever created from it.
     compose::check_bind_mounts(&compose_path, manifest_dir)?;
 
-    // install_one's own invariant (config/ and data/ always exist) holds
+    // install_one's own invariant (.asc/ and data/ always exist) holds
     // here too, even though a compose app has no settings to seed into them.
-    for sub in ["config", "data"] {
-        fs::create_dir_all(app_dir.join(sub))
-            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
-    }
+    fs::create_dir_all(app_dir.join("data")).context("cannot create data/ in app directory")?;
+    crate::daemon::apps::layout::ensure_state_dir(app_dir)?;
 
     let working_dir = manifest_dir
         .strip_prefix(app_dir)
@@ -1683,7 +1682,10 @@ pub(super) fn provision(
     image_choice: Option<ImageSource>,
     report: Option<&dyn InstallReporter>,
 ) -> Result<Runtime> {
-    let inputs = runtime_inputs(settings, &app_dir.join("config"))?;
+    let inputs = runtime_inputs(
+        settings,
+        &crate::daemon::apps::layout::settings_dir(app_dir),
+    )?;
     let start_command = inputs
         .start_command
         .as_deref()
@@ -1768,7 +1770,7 @@ fn process_runtime(start: &str) -> Runtime {
 
 /// Everything the runtime takes from the settings (DMN-017, DMN-030): env
 /// pairs, published ports, volume entries and the effective start command.
-/// Values come from `<config_dir>/settings.json` with the package defaults
+/// Values come from `<config_dir>/settings.json` (`.asc/`, DMN-139) with the package defaults
 /// filled in for keys the user has not set — so the inputs are complete even
 /// before the first settings edit. The settings are the **only** source:
 /// asc.yaml has no `env:`, `ports:` or `volumes:` sections.
@@ -2013,7 +2015,7 @@ fn docker_create(
 
 /// Host folder names an app volume may not take: they are the daemon's own
 /// files inside the app directory.
-const RESERVED_VOLUME_DIRS: [&str; 3] = ["repository", "config", "meta.json"];
+const RESERVED_VOLUME_DIRS: [&str; 2] = ["repository", crate::daemon::apps::layout::STATE_DIR];
 
 /// One parsed volume entry. Three forms are supported:
 ///
@@ -2213,7 +2215,10 @@ pub fn docker_footprint(config: &Config, meta: &AppMeta, app_dir: &Path) -> AppD
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
         let (manifest, settings) = dockerfile::resolve_installed(meta, &manifest_dir)?;
         let image = effective_image_ref(&manifest, *image_source, &meta.id);
-        let inputs = runtime_inputs(settings.as_ref(), &app_dir.join("config"))?;
+        let inputs = runtime_inputs(
+            settings.as_ref(),
+            &crate::daemon::apps::layout::settings_dir(app_dir),
+        )?;
         let mut named_volumes = Vec::new();
         for volume in &inputs.volumes {
             if let VolumeKind::Named(name) = classify_volume(volume, app_dir)? {
@@ -2411,8 +2416,7 @@ mod tests {
         // escape the app directory — are rejected; so is host-path traversal.
         for bad in [
             "/data:repository",
-            "/data:config",
-            "/data:meta.json",
+            "/data:.asc",
             "/data:..",
             "/data:a/b",
             "/data:",

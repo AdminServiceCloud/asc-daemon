@@ -292,7 +292,8 @@ impl ApiState {
     ) -> Result<Vec<BackupResultRow>> {
         self.blocking(move |s| {
             let meta = s.manager.get_authorized(&ctx, &app)?;
-            let config_dir = s.manager.store().app_dir(&meta.id)?.join("config");
+            let config_dir =
+                crate::daemon::apps::layout::settings_dir(&s.manager.store().app_dir(&meta.id)?);
             let policy = crate::daemon::pkg::settings::SettingValues::load(&config_dir)?
                 .backup_policy()?
                 .unwrap_or_default();

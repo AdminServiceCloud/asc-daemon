@@ -1683,7 +1683,7 @@ impl ApiState {
         use pkg::settings::{SettingValues, locate_installed};
         let meta = self.manager.get_authorized(ctx, id)?;
         let app_dir = self.manager.store().app_dir(&meta.id)?;
-        let config_dir = app_dir.join("config");
+        let config_dir = crate::daemon::apps::layout::settings_dir(&app_dir);
         let values = SettingValues::load(&config_dir)?;
         // A compose app declares no settings at all (DMN-108) — an empty
         // schema, not an error, same as a manifest with no `settings:`.

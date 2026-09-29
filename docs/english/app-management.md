@@ -38,14 +38,22 @@ Every application lives in a directory named after its ID:
 
 ```
 /asc/apps/<id>/
-├── config/        # ⚙️ application settings (see asc.settings.yaml in package-manager.md)
-├── repository/    # 📦 the application's cloned repository (versions = git tags)
-├── data/          # 💾 volumes — if the application runs in Docker
-└── meta.json      # 📇 application info: id, uuid, name, custom name, owner, version (tag), source, tracked branch, state
+├── .asc/              # 🔒 the daemon's own files — hidden from a plain `ls`
+│   ├── meta.json      # 📇 application info: id, uuid, name, custom name, owner, version (tag), source, tracked branch, state
+│   └── settings.json  # ⚙️ chosen setting values (see asc.settings.yaml in package-manager.md)
+├── repository/        # 📦 the application's cloned repository (versions = git tags)
+└── data/              # 💾 volumes — if the application runs in Docker
 ```
 
 - **Installation = cloning the repository** of the package into `repository/`; switching versions = checking out the desired git tag (details — [📦 package-manager](package-manager.md)).
-- `meta.json` is the source of truth for rebuilding the index after a crash/reboot.
+- `.asc/meta.json` is the source of truth for rebuilding the index after a crash/reboot.
+
+#### 🔒 Service directory `.asc/` (DMN-139)
+
+The daemon keeps its own per-app files in the hidden `.asc/` directory, so the app directory shows only what belongs to the application itself (`repository/`, `data/`, volume folders). Change these files through `asc` (`asc app settings`, `asc app rename`, …) — editing them by hand can break the CLI and the platform's control of the app; the platform's file manager warns about that and asks you to take the risk before any change inside `.asc/`.
+
+- **Migration**: apps installed before DMN-139 kept `meta.json` at the directory root and the setting values in `config/settings.json`. The first time the daemon or CLI reads such an app, both files are moved into `.asc/` (settings first, meta last — an interrupted move is simply redone next time) and the now-empty `config/` is removed; anything else the user put into `config/` stays. When the move cannot be done (e.g. a regular user reading a tree they cannot write), the files are read from their old locations and the app keeps working.
+- `.asc` is a reserved volume folder name; `config` and `meta.json` no longer are.
 - **Path scoping by user**: `/asc/apps/` (with `/etc/asc/config.toml` and `/var/lib/asc`) is the tree of the **root** installation — the system daemon and `sudo asc`. Running `asc` as a regular user **without a running system daemon** works against a private tree under `~/.asc/` instead: `~/.asc/apps`, `~/.asc/data`, `~/.asc/config.toml` — so the user edits their apps' settings and config without sudo. With the daemon present, the lifecycle commands operate on the shared system tree through the daemon socket instead (DMN-042, see above). The root-managed `[policy]` section is still read from the system config and cannot be overridden per user.
 
 #### 🆔 Instance UUID (DMN-044)
@@ -141,7 +149,7 @@ never anything an installed application still needs.
 
 - **Drivers**: the `AppDriver { start, stop, kill, restart, state, logs, remove }` trait (`kill` is SIGKILL: `docker kill`, `docker compose kill`, `systemctl kill --signal=SIGKILL`, killing the process; safe alongside a `stop` still in flight, DMN-134) with implementations `DockerDriver` (via the **Docker Engine API over the unix socket** — not the `docker` CLI; the socket path is configurable — `[docker] socket`, default `/var/run/docker.sock`), `SystemdDriver` (units `asc-app-<id>.service`), `ProcessDriver` (supervised PID: a pid file and a log file in the application directory). Application installation (creating a container/unit from the manifest) is the package manager's job (DMN-003).
 - **Docker Engine API**: the daemon talks to Docker through the Engine API (the `bollard` client, unix socket), not the CLI — this works for rootless installations and non-standard socket locations (just set the path in the config). Control operations (start/stop/inspect/create/remove) are synchronous; log streaming and attach for the console are asynchronous over the same socket. Container creation pulls the image by itself when it is not on the host (a pull through the same Engine API); an Engine response with any HTTP status is not treated as Docker being unreachable — the user sees the Engine's own message.
-- **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
+- **Application index**: `meta.json` is the source of truth; in the MVP the index is built by scanning `/asc/apps/*/.asc/meta.json` on demand; at startup the daemon compares the desired state (`desired_state`) with reality (containers, units, processes) and restarts anything that has fallen over. A local database (SQLite) will appear once there is state beyond meta.json (metrics, operation history).
 - **Logs**: a single interface — docker logs / journald / file; streaming out via [🖥️ console](console.md).
 - **Cluster mode (post-MVP)**: multiple *nodes* running the platform together. Multiple instances of one application on a single node already work (DMN-033/034, above).
 - **MVP CLI commands**: `asc status`, `asc stats`, `asc ports`, `asc stacks`, `asc app list|install|remove|start|stop|restart|logs|info|disk|ports|clone|settings` (+ the `asc ls`/`asc ps` aliases for the list, and `asc ls ports|disk|stats` for the ports/disk/stats views), `asc service` (managing the daemon itself), `asc docker ps|stats|images|volumes|networks|df|prune` (host containers, images, volumes, networks and cleanup).

@@ -1,5 +1,5 @@
 //! Application backups (DMN-009): create, restore and rotate archives of an
-//! app's repository/config/data directories, pushed to a named storage
+//! app's repository/data directories and setting values, pushed to a named storage
 //! (`local` always exists; more via `asc backup storage add`, see
 //! [`storage`]). `asc.backup.yaml` at the package repository root excludes
 //! paths from the archive; the storages and retention count an app backs up
@@ -23,15 +23,21 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::apps::AppStore;
 use crate::daemon::apps::meta::AppMeta;
+use crate::daemon::apps::{AppStore, layout};
 use crate::daemon::config::Config;
+use crate::daemon::pkg::settings::SettingValues;
 use storage::{BackupObject, BackupStorage, StorageList};
 
-/// The three directories a backup covers (`meta.json`, the fourth thing
-/// under an app directory, is never included — it is regenerated, not
-/// restored, same reasoning as a clone).
-const BACKED_UP_DIRS: [&str; 3] = ["repository", "config", "data"];
+/// The directories a backup covers, plus the app's `.asc/settings.json`
+/// ([`SETTINGS_ENTRY`]). `.asc/meta.json` is never included — it is
+/// regenerated, not restored, same reasoning as a clone.
+const BACKED_UP_DIRS: [&str; 2] = ["repository", "data"];
+
+/// Archive path of the setting values (DMN-139). Archives made before that
+/// carry them as `config/settings.json` instead ([`LEGACY_SETTINGS_ENTRY`]).
+const SETTINGS_ENTRY: &str = ".asc/settings.json";
+const LEGACY_SETTINGS_ENTRY: &str = "config/settings.json";
 
 /// `asc.backup.yaml`, optional, at the repository root: paths to leave out
 /// of the archive, relative to the app directory (e.g. `data/cache/**`,
@@ -158,7 +164,7 @@ pub fn validate_backup_name(app_id: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Archive `meta`'s repository/config/data directories and push them to
+/// Archive `meta`'s repository/data directories and settings and push them to
 /// `storage_name`. `keep` (from the app's backup policy) rotates that
 /// storage down to the N most recent backups of this app right after — a
 /// failed rotation does not fail the backup itself, it already succeeded.
@@ -244,6 +250,10 @@ pub fn create_backup_multi(
                     append_tree(&mut builder, &dir, sub, include, &exclude)?;
                 }
             }
+            let settings = layout::settings_dir(&app_dir).join(SettingValues::FILE);
+            if settings.is_file() {
+                append_file(&mut builder, &settings, SETTINGS_ENTRY, include, &exclude)?;
+            }
             builder
                 .into_inner()
                 .context("cannot finalize backup archive")?
@@ -285,8 +295,8 @@ pub fn create_backup_multi(
 }
 
 /// Download `backup_name` from `storage_name` and extract it over `meta`'s
-/// app directory — `repository/`, `config/` and `data/` are replaced
-/// wholesale (removed, then re-extracted) so the result is exactly the
+/// app directory — `repository/`, `data/` and `.asc/settings.json` are
+/// replaced wholesale (removed, then re-extracted) so the result is exactly the
 /// backed-up snapshot, not a merge with whatever was there before. The app
 /// should be stopped first; the CLI enforces that.
 pub fn restore_backup(
@@ -320,12 +330,30 @@ pub fn restore_backup(
                     .with_context(|| format!("cannot clear {}", dir.display()))?;
             }
         }
+        let settings = layout::ensure_state_dir(&app_dir)?.join(SettingValues::FILE);
+        match fs::remove_file(&settings) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot clear {}", settings.display()));
+            }
+        }
         let file = fs::File::open(&tmp_archive)
             .with_context(|| format!("cannot open downloaded backup {}", tmp_archive.display()))?;
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
         archive
             .unpack(&app_dir)
             .with_context(|| format!("cannot extract backup into {}", app_dir.display()))?;
+        // A pre-DMN-139 archive brings its settings back as config/; move
+        // them to where the app now reads them from.
+        let legacy = app_dir.join(LEGACY_SETTINGS_ENTRY);
+        if legacy.is_file() {
+            fs::rename(&legacy, &settings)
+                .with_context(|| format!("cannot move {}", legacy.display()))?;
+            if let Some(config) = legacy.parent() {
+                let _ = fs::remove_dir(config);
+            }
+        }
         Ok(())
     })();
     let _ = fs::remove_file(&tmp_archive);
@@ -396,15 +424,30 @@ fn append_tree(
         let path = entry.path();
         if file_type.is_dir() {
             append_tree(builder, &path, &rel, include, exclude)?;
-        } else if include.is_empty() || glob::matches_any(include, &rel) {
-            let mut file =
-                fs::File::open(&path).with_context(|| format!("cannot read {}", path.display()))?;
-            builder
-                .append_file(&rel, &mut file)
-                .with_context(|| format!("cannot archive {}", path.display()))?;
+        } else {
+            append_file(builder, &path, &rel, include, &[])?;
         }
     }
     Ok(())
+}
+
+/// Add one regular file as `rel`, unless the include/exclude patterns
+/// filter it out.
+fn append_file(
+    builder: &mut tar::Builder<impl io::Write>,
+    path: &Path,
+    rel: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<()> {
+    if glob::matches_any(exclude, rel) || !(include.is_empty() || glob::matches_any(include, rel)) {
+        return Ok(());
+    }
+    let mut file =
+        fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    builder
+        .append_file(rel, &mut file)
+        .with_context(|| format!("cannot archive {}", path.display()))
 }
 
 #[cfg(test)]
@@ -427,7 +470,8 @@ mod tests {
             );
             fs::write(app_dir.join("repository/asc.backup.yaml"), yaml).unwrap();
         }
-        fs::create_dir_all(app_dir.join("config")).unwrap();
+        fs::create_dir_all(app_dir.join(".asc")).unwrap();
+        fs::write(app_dir.join(".asc/settings.json"), b"{\"MODE\":\"prod\"}").unwrap();
         fs::create_dir_all(app_dir.join("data/cache")).unwrap();
         fs::write(app_dir.join("data/save.txt"), b"progress=1").unwrap();
         fs::write(app_dir.join("data/cache/tmp.bin"), b"throwaway").unwrap();
@@ -492,6 +536,61 @@ mod tests {
         );
         assert!(!app_dir.join("data/cache/tmp.bin").exists());
         assert!(app_dir.join("repository/asc.yaml").exists());
+        assert_eq!(
+            fs::read_to_string(app_dir.join(".asc/settings.json")).unwrap(),
+            "{\"MODE\":\"prod\"}"
+        );
+        // meta.json is never part of the archive and survives the restore.
+        assert!(AppMeta::path(&app_dir).exists());
+    }
+
+    #[test]
+    fn restores_pre_dmn139_archive_settings_into_state_dir() {
+        let ws = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.daemon.data_dir = ws.path().join("data");
+        config.daemon.apps_dir = ws.path().join("apps");
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        let meta = seed_app(&store, "demo", &[]);
+        let storages = StorageList::load_with(crate::daemon::pkg::sources::Scope::User).unwrap();
+        let info =
+            create_backup(&config, &store, &meta, &storages, storage::LOCAL_NAME, None).unwrap();
+
+        // Replace the archive with one laid out the old way: settings under
+        // config/, no .asc/ at all.
+        let archive = config.daemon.data_dir.join("backups").join(&info.name);
+        {
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                fs::File::create(&archive).unwrap(),
+                flate2::Compression::default(),
+            ));
+            let body = b"{\"MODE\":\"old\"}";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "config/settings.json", &body[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        restore_backup(
+            &config,
+            &store,
+            &meta,
+            &storages,
+            storage::LOCAL_NAME,
+            &info.name,
+        )
+        .unwrap();
+        let app_dir = store.app_dir("demo").unwrap();
+        assert_eq!(
+            fs::read_to_string(app_dir.join(".asc/settings.json")).unwrap(),
+            "{\"MODE\":\"old\"}"
+        );
+        assert!(!app_dir.join("config").exists());
+        assert!(AppMeta::path(&app_dir).exists());
     }
 
     /// Archive paths of the one backup `filter` produces for a seeded app.
@@ -527,7 +626,12 @@ mod tests {
         let everything = archived_paths(&BackupFilter::default());
         assert_eq!(
             everything,
-            vec!["data/cache/tmp.bin", "data/save.txt", "repository/asc.yaml"]
+            vec![
+                ".asc/settings.json",
+                "data/cache/tmp.bin",
+                "data/save.txt",
+                "repository/asc.yaml"
+            ]
         );
 
         let only_data = BackupFilter::new(vec!["data".into()], vec![]).unwrap();

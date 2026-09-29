@@ -225,7 +225,10 @@ pub fn upgrade(
         }
     };
     enforce_install_policy(config, ctx, &manifest, &id)?;
-    let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
+    let quota = load_quota(
+        settings.as_ref(),
+        &crate::daemon::apps::layout::settings_dir(&app_dir),
+    )?;
 
     // Point of no return: swap the repository, keeping the old one around
     // until the new runtime is provisioned.
@@ -281,7 +284,7 @@ pub fn upgrade(
     if let Some(settings) = &settings
         && !settings.settings.is_empty()
     {
-        let config_dir = app_dir.join("config");
+        let config_dir = crate::daemon::apps::layout::settings_dir(&app_dir);
         let mut values = SettingValues::load(&config_dir).unwrap_or_default();
         values.merge_defaults(&settings.settings);
         if let Err(err) = values.save(&config_dir) {
@@ -366,7 +369,10 @@ fn rollback(
     // `Manifest::load`, which would fail outright for a Dockerfile install.
     let restore = locate_manifest(repo_dir, entry_path, stack_app).and_then(|(dir, _)| {
         let (manifest, settings) = dockerfile::resolve_installed(meta, &dir)?;
-        let quota = load_quota(settings.as_ref(), &app_dir.join("config"))?;
+        let quota = load_quota(
+            settings.as_ref(),
+            &crate::daemon::apps::layout::settings_dir(app_dir),
+        )?;
         provision(
             &manifest,
             id,

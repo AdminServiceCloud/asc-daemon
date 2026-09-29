@@ -102,7 +102,7 @@ fn install_direct_from_git_url() {
     assert_eq!(meta.package, None, "no registry entry for a direct install");
     let app_dir = store.app_dir("demo").unwrap();
     assert!(app_dir.join("repository/asc.yaml").exists());
-    assert!(app_dir.join("config").is_dir());
+    assert!(app_dir.join(".asc").is_dir());
     assert!(app_dir.join("data").is_dir());
 
     // --branch: a second instance tracking `dev` — content from that branch,

@@ -130,7 +130,7 @@ impl Desired {
     ) -> Result<Self> {
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
         let (manifest, settings) = dockerfile::resolve_installed(meta, &manifest_dir)?;
-        let config_dir = app_dir.join("config");
+        let config_dir = crate::daemon::apps::layout::settings_dir(app_dir);
         // Capped to the host's cores exactly as at install (DMN-099): the
         // Engine rejects NanoCpus above nproc, so an unclamped quota here
         // both read as drift against the capped container and recreated it

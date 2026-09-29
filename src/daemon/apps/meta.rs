@@ -1,10 +1,11 @@
 //! `meta.json` — per-app metadata, the source of truth for recovery.
 //!
-//! Lives at `/asc/apps/<id>/meta.json`. The index of installed apps is
+//! Lives at `/asc/apps/<id>/.asc/meta.json` (DMN-139; `/asc/apps/<id>/meta.json`
+//! before that, still read as a fallback). The index of installed apps is
 //! rebuilt by scanning these files, so they must always be written atomically.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -194,9 +195,26 @@ impl AppMeta {
         self.custom_name.as_deref().unwrap_or(&self.name)
     }
 
-    /// Load metadata from an app directory.
+    /// `<app_dir>/.asc/meta.json`.
+    pub fn path(dir: &Path) -> PathBuf {
+        super::layout::state_dir(dir).join(Self::FILE)
+    }
+
+    /// Whether `dir` holds an app: meta at its current or legacy path.
+    pub fn exists(dir: &Path) -> bool {
+        Self::path(dir).exists() || super::layout::legacy_meta_path(dir).exists()
+    }
+
+    /// Load metadata from an app directory: `.asc/meta.json`, or the legacy
+    /// root `meta.json` of an app not migrated yet (DMN-139).
     pub fn load(dir: &Path) -> Result<Self> {
-        let path = dir.join(Self::FILE);
+        let mut path = Self::path(dir);
+        if !path.exists() {
+            let legacy = super::layout::legacy_meta_path(dir);
+            if legacy.exists() {
+                path = legacy;
+            }
+        }
         let raw =
             fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
         serde_json::from_str(&raw).with_context(|| format!("invalid {}", path.display()))
@@ -205,8 +223,15 @@ impl AppMeta {
     /// Persist metadata atomically (tmp file + rename), so a crash mid-write
     /// never leaves a truncated meta.json behind.
     pub fn save(&self, dir: &Path) -> Result<()> {
-        let path = dir.join(Self::FILE);
-        let tmp = dir.join("meta.json.tmp");
+        // An app still on the legacy layout (migration refused, e.g. no
+        // write access to the app dir) keeps its meta where it is.
+        let legacy = super::layout::legacy_meta_path(dir);
+        let (path, tmp) = if !Self::path(dir).exists() && legacy.exists() {
+            (legacy, dir.join("meta.json.tmp"))
+        } else {
+            let state = super::layout::ensure_state_dir(dir)?;
+            (state.join(Self::FILE), state.join("meta.json.tmp"))
+        };
         let raw = serde_json::to_string_pretty(self).context("cannot serialize app metadata")?;
         fs::write(&tmp, raw).with_context(|| format!("cannot write {}", tmp.display()))?;
         fs::rename(&tmp, &path).with_context(|| format!("cannot replace {}", path.display()))?;
@@ -338,7 +363,8 @@ mod tests {
         assert_eq!(loaded.runtime.kind(), "docker");
         assert_eq!(loaded.quota.unwrap().ram_bytes, Some(512 << 20));
         // No leftover tmp file after an atomic save.
-        assert!(!dir.path().join("meta.json.tmp").exists());
+        assert!(dir.path().join(".asc/meta.json").exists());
+        assert!(!dir.path().join(".asc/meta.json.tmp").exists());
     }
 
     #[test]

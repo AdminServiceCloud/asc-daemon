@@ -47,7 +47,7 @@ fn seed_app(store: &AppStore, id: &str) -> AppMeta {
         "name: demo\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
     )
     .unwrap();
-    fs::create_dir_all(app_dir.join("config")).unwrap();
+    fs::create_dir_all(app_dir.join(".asc")).unwrap();
     fs::create_dir_all(app_dir.join("data")).unwrap();
     fs::write(app_dir.join("data/save.txt"), b"progress=42").unwrap();
 

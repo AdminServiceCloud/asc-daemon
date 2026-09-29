@@ -16,7 +16,7 @@ The backup execution module on the node: creating, restoring and rotating backup
 
 ### What's backed up
 
-An archive (`tar.gz`) of the app directory's `repository/`, `config/` and `data/` subdirectories — everything except `meta.json` (regenerated on restore, like a [🧬 clone](app-management.md)). `asc.backup.yaml` at the package repository root excludes paths from the archive:
+An archive (`tar.gz`) of the app directory's `repository/` and `data/` subdirectories plus the setting values in `.asc/settings.json` — everything except `.asc/meta.json` (regenerated on restore, like a [🧬 clone](app-management.md)). `asc.backup.yaml` at the package repository root excludes paths from the archive:
 
 ```yaml
 exclude:
@@ -38,7 +38,7 @@ Patterns are relative to the app directory and support `*` (any run of character
 
 ### Backup policy (`asc app settings` → `backups`)
 
-Stored under the `$backup` reserved key in `config/settings.json`, alongside `$quota`/`$start_command` (same convention, DMN-017/030): `storages` (multi-select, toggled by number in the editor), `keep` (copies to retain per storage — pruned automatically right after each `create`), `schedule` (`daily@HH:MM`, bare `HH:MM`, or a five-field cron expression `min hour day month weekday`; validated by the editor). **`schedule` is enforced by the daemon's scheduler** ([⏰ scheduler](scheduler.md), DMN-012): once a minute it evaluates every app's policy against the node's local time and runs the due backups to the policy's storages with the policy's `keep` rotation — the daemon must be running (`asc service install` or `asc serve`). `asc backup create <app>` without `--storage` uses the policy's storages, falling back to `local` alone when the policy is empty.
+Stored under the `$backup` reserved key in `.asc/settings.json`, alongside `$quota`/`$start_command` (same convention, DMN-017/030): `storages` (multi-select, toggled by number in the editor), `keep` (copies to retain per storage — pruned automatically right after each `create`), `schedule` (`daily@HH:MM`, bare `HH:MM`, or a five-field cron expression `min hour day month weekday`; validated by the editor). **`schedule` is enforced by the daemon's scheduler** ([⏰ scheduler](scheduler.md), DMN-012): once a minute it evaluates every app's policy against the node's local time and runs the due backups to the policy's storages with the policy's `keep` rotation — the daemon must be running (`asc service install` or `asc serve`). `asc backup create <app>` without `--storage` uses the policy's storages, falling back to `local` alone when the policy is empty.
 
 ### Listing and API (`BackupService`, capability `backups`)
 
@@ -48,7 +48,7 @@ API: `ListBackupStorages`, `UpsertBackupStorage` (S3 or a local directory, with 
 
 ### Restore
 
-Downloads the archive to a local temp file, then **replaces** the app directory's `repository/`, `config/` and `data/` wholesale (removed, then extracted) — the result is exactly the backed-up snapshot, not a merge with whatever was there. The CLI refuses to restore over a running app.
+Downloads the archive to a local temp file, then **replaces** the app directory's `repository/`, `data/` and `.asc/settings.json` wholesale (removed, then extracted) — the result is exactly the backed-up snapshot, not a merge with whatever was there. Archives made before DMN-139 carry the settings as `config/settings.json`; a restore moves them to `.asc/settings.json`. The CLI refuses to restore over a running app.
 
 ## 🔗 Related tasks
 

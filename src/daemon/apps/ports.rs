@@ -46,7 +46,10 @@ pub fn published(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<Ve
             return Ok(Vec::new());
         }
     };
-    let inputs = match pkg::runtime_inputs(settings_file.as_ref(), &app_dir.join("config")) {
+    let inputs = match pkg::runtime_inputs(
+        settings_file.as_ref(),
+        &crate::daemon::apps::layout::settings_dir(&app_dir),
+    ) {
         Ok(inputs) => inputs,
         Err(err) => {
             warn!(app = %meta.id, error = %format!("{err:#}"), "cannot resolve app settings for ports");

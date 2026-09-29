@@ -475,7 +475,7 @@ fn load_policy(
     store: &AppStore,
     app_id: &str,
 ) -> Result<Option<crate::daemon::pkg::settings::BackupPolicy>> {
-    let config_dir = store.app_dir(app_id)?.join("config");
+    let config_dir = crate::daemon::apps::layout::settings_dir(&store.app_dir(app_id)?);
     SettingValues::load(&config_dir)?.backup_policy()
 }
 

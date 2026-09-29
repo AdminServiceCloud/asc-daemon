@@ -181,7 +181,7 @@ fn settings_round_trip_over_the_socket() {
         store
             .app_dir("mine")
             .unwrap()
-            .join("config")
+            .join(".asc")
             .join(SettingValues::FILE),
     )
     .unwrap();

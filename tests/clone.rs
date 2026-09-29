@@ -20,7 +20,8 @@ fn seed_app(store: &AppStore, id: &str, quota: Option<Quota>) -> AppMeta {
         "name: demo\nversion: 1.0.0\ntype: native\nruntime:\n  start: ./run.sh\n",
     )
     .unwrap();
-    fs::create_dir_all(app_dir.join("config")).unwrap();
+    fs::create_dir_all(app_dir.join(".asc")).unwrap();
+    fs::write(app_dir.join(".asc/settings.json"), b"{}").unwrap();
     fs::create_dir_all(app_dir.join("data")).unwrap();
     fs::write(app_dir.join("data/save.txt"), b"progress=42").unwrap();
 
@@ -97,7 +98,10 @@ fn clone_copies_data_and_reprovisions_under_a_new_id() {
         "progress=42"
     );
     assert!(clone_dir.join("repository/asc.yaml").exists());
-    assert!(clone_dir.join("config").is_dir());
+    // Setting values are copied, the source's meta is not (DMN-139 layout).
+    assert!(clone_dir.join(".asc/settings.json").is_file());
+    assert!(AppMeta::path(&clone_dir).is_file());
+    assert!(!clone_dir.join("config").exists());
 
     // The source is untouched.
     let source_dir = store.app_dir("demo").unwrap();

@@ -1807,7 +1807,8 @@ fn backup_cmd(action: BackupAction, config: &Config) -> anyhow::Result<()> {
             let manager = AppManager::new(config);
             let ctx = UserContext::current();
             let meta = manager.get_authorized(&ctx, &app)?;
-            let config_dir = manager.store().app_dir(&meta.id)?.join("config");
+            let config_dir =
+                asc_daemon::daemon::apps::layout::settings_dir(&manager.store().app_dir(&meta.id)?);
             let policy = SettingValues::load(&config_dir)?
                 .backup_policy()?
                 .unwrap_or_default();
@@ -3974,7 +3975,7 @@ fn clone_cmd(reference: &str, name: Option<String>, config: &Config) -> anyhow::
 /// quota, start_command — then edits its settings. Package-defined settings
 /// are validated against asc.settings.yaml; quota and start_command take
 /// app-level overrides on top of the package values. Everything lands in
-/// `config/settings.json`; the runtime picks it up on the next restart.
+/// `.asc/settings.json`; the runtime picks it up on the next restart.
 fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::pkg::dockerfile;
     use asc_daemon::daemon::pkg::settings::{SettingValues, locate_installed};
@@ -3998,7 +3999,7 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
         dockerfile::resolve_installed(&meta, &manifest_dir)?.1
     };
 
-    let config_dir = app_dir.join("config");
+    let config_dir = asc_daemon::daemon::apps::layout::settings_dir(&app_dir);
     let mut values = SettingValues::load(&config_dir)?;
     if let Some(file) = &file {
         values.merge_defaults(&file.settings);

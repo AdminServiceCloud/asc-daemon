@@ -15,10 +15,10 @@ use super::dockerfile;
 use super::install::{
     RemoveOnDrop, enforce_install_policy, load_quota, provision, validate_custom_name,
 };
-use super::settings::locate_installed;
-use crate::daemon::apps::disk;
+use super::settings::{SettingValues, locate_installed};
 use crate::daemon::apps::meta::{AppMeta, DesiredState, Owner, Runtime, new_uuid};
 use crate::daemon::apps::{AppStore, UserContext};
+use crate::daemon::apps::{disk, layout};
 use crate::daemon::config::Config;
 
 /// Copy `src` into `dst` file by file (directories created as needed),
@@ -117,16 +117,19 @@ pub fn clone_app_cancellable(
         armed: true,
     };
 
-    // Only the three subdirectories below are actually copied — meta.json
-    // (also under the app dir) is regenerated, not copied — so the total
-    // must match that, not `disk::dir_size(&source_dir)` as a whole, or the
-    // progress would stall short of 100%.
-    let total: u64 = ["repository", "config", "data"]
+    // Only repository/, data/ and the setting values are actually copied —
+    // .asc/meta.json is regenerated, not copied — so the total must match
+    // that, not `disk::dir_size(&source_dir)` as a whole, or the progress
+    // would stall short of 100%.
+    let source_settings = layout::settings_dir(&source_dir).join(SettingValues::FILE);
+    let settings_size = fs::metadata(&source_settings).map_or(0, |m| m.len());
+    let total: u64 = ["repository", "data"]
         .iter()
         .map(|sub| disk::dir_size(&source_dir.join(sub)))
-        .sum();
+        .sum::<u64>()
+        + settings_size;
     let mut copied = 0u64;
-    for sub in ["repository", "config", "data"] {
+    for sub in ["repository", "data"] {
         let from = source_dir.join(sub);
         if from.is_dir() {
             copy_tree(
@@ -138,11 +141,15 @@ pub fn clone_app_cancellable(
             )?;
         }
     }
-    // install_one's own invariant (config/ and data/ always exist) holds for
+    // install_one's own invariant (.asc/ and data/ always exist) holds for
     // the clone too, even if the source never started and data/ is empty.
-    for sub in ["config", "data"] {
-        fs::create_dir_all(dest_dir.join(sub))
-            .with_context(|| format!("cannot create {sub}/ in app directory"))?;
+    fs::create_dir_all(dest_dir.join("data")).context("cannot create data/ in app directory")?;
+    let dest_state = layout::ensure_state_dir(&dest_dir)?;
+    if source_settings.is_file() {
+        fs::copy(&source_settings, dest_state.join(SettingValues::FILE))
+            .with_context(|| format!("cannot copy {}", source_settings.display()))?;
+        copied += settings_size;
+        on_progress(copied, total);
     }
 
     // The repository is a byte-identical copy, so the manifest sits at the
@@ -157,7 +164,7 @@ pub fn clone_app_cancellable(
     let (manifest_dir, _) = locate_installed(config, source, &dest_dir)?;
     let (manifest, settings) = dockerfile::resolve_installed(source, &manifest_dir)?;
     enforce_install_policy(config, ctx, &manifest, &new_id)?;
-    // Recomputed from the copied config/settings.json rather than trusting
+    // Recomputed from the copied .asc/settings.json rather than trusting
     // `source.quota`: a `$quota` override edited via `asc app settings`
     // only lands in meta.json on the app's next start (DMN-017/030), so
     // meta and settings.json can disagree until then — settings.json (just
@@ -165,7 +172,7 @@ pub fn clone_app_cancellable(
     // Capped to the host like at install — the Engine rejects NanoCpus
     // above nproc (DMN-099).
     let quota = super::resources::clamp_cpu(
-        load_quota(settings.as_ref(), &dest_dir.join("config"))?,
+        load_quota(settings.as_ref(), &layout::settings_dir(&dest_dir))?,
         super::resources::host_cores(),
         &new_id,
         None,

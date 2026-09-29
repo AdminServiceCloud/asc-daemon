@@ -1,7 +1,8 @@
-//! App storage: `/asc/apps/<id>/` directories with `meta.json` inside.
+//! App storage: `/asc/apps/<id>/` directories with `.asc/meta.json` inside.
 //!
 //! The store is the on-disk index: listing scans the apps root and reads each
-//! meta.json. Broken entries are skipped with a warning instead of failing
+//! meta.json, first moving a pre-DMN-139 app into `.asc/` ([`layout::migrate`]).
+//! Broken entries are skipped with a warning instead of failing
 //! the whole listing — one corrupted app must not hide the others.
 
 use std::fs;
@@ -9,8 +10,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::warn;
+use tracing::{info, warn};
 
+use super::layout;
 use super::meta::{AppMeta, validate_id};
 
 pub struct AppStore {
@@ -35,9 +37,10 @@ impl AppStore {
     /// Load one app's metadata; `None` when it is not installed.
     pub fn get(&self, id: &str) -> Result<Option<AppMeta>> {
         let dir = self.app_dir(id)?;
-        if !dir.join(AppMeta::FILE).exists() {
+        if !AppMeta::exists(&dir) {
             return Ok(None);
         }
+        migrate(&dir);
         AppMeta::load(&dir).map(Some)
     }
 
@@ -76,9 +79,10 @@ impl AppStore {
         for entry in entries {
             let entry = entry?;
             let dir = entry.path();
-            if !dir.is_dir() || !dir.join(AppMeta::FILE).exists() {
+            if !dir.is_dir() || !AppMeta::exists(&dir) {
                 continue;
             }
+            migrate(&dir);
             match AppMeta::load(&dir) {
                 Ok(meta) => {
                     if meta.id != entry.file_name().to_string_lossy() {
@@ -94,6 +98,18 @@ impl AppStore {
         }
         apps.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(apps)
+    }
+}
+
+/// Move a pre-DMN-139 app into `.asc/`. A failure is not fatal: the readers
+/// fall back to the legacy paths, so the app stays listed and usable.
+fn migrate(dir: &Path) {
+    match layout::migrate(dir) {
+        Ok(true) => info!(dir = %dir.display(), "moved app metadata and settings into .asc/"),
+        Ok(false) => {}
+        Err(err) => {
+            warn!(dir = %dir.display(), error = %format!("{err:#}"), "cannot move app metadata into .asc/, using the legacy layout")
+        }
     }
 }
 
@@ -160,12 +176,34 @@ mod tests {
         let store = AppStore::new(dir.path());
         store.save(&meta("good", 1000)).unwrap();
         let bad = dir.path().join("bad");
-        fs::create_dir_all(&bad).unwrap();
-        fs::write(bad.join(AppMeta::FILE), "{ not json").unwrap();
+        fs::create_dir_all(bad.join(".asc")).unwrap();
+        fs::write(AppMeta::path(&bad), "{ not json").unwrap();
 
         let listed = store.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "good");
+    }
+
+    #[test]
+    fn legacy_layout_is_migrated_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::new(dir.path());
+        let app = dir.path().join("old");
+        fs::create_dir_all(app.join("config")).unwrap();
+        fs::write(
+            app.join("meta.json"),
+            serde_json::to_string(&meta("old", 1000)).unwrap(),
+        )
+        .unwrap();
+        fs::write(app.join("config/settings.json"), "{}").unwrap();
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(AppMeta::path(&app).exists());
+        assert!(app.join(".asc/settings.json").exists());
+        assert!(!app.join("meta.json").exists());
+        assert!(!app.join("config").exists());
+        assert!(store.get("old").unwrap().is_some());
     }
 
     #[test]

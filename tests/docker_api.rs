@@ -523,7 +523,7 @@ fn settings_drift_recreates_the_container() {
     store.save(&meta).unwrap();
     let app_dir = store.app_dir("web").unwrap();
     std::fs::create_dir_all(app_dir.join("repository")).unwrap();
-    std::fs::create_dir_all(app_dir.join("config")).unwrap();
+    std::fs::create_dir_all(app_dir.join(".asc")).unwrap();
     std::fs::write(
         app_dir.join("repository/asc.yaml"),
         "name: web\nversion: '1'\ntype: docker\nsettings: ./asc.settings.yaml\n\
@@ -548,7 +548,7 @@ fn settings_drift_recreates_the_container() {
     // Everything matches what the mock inspect reports (CS2_STARTMAP=
     // de_dust2, port 27015/tcp published, no quota): nothing to do.
     std::fs::write(
-        app_dir.join("config/settings.json"),
+        app_dir.join(".asc/settings.json"),
         r#"{"map":"de_dust2","game_port":[27015]}"#,
     )
     .unwrap();
@@ -557,7 +557,7 @@ fn settings_drift_recreates_the_container() {
 
     // A changed map drifts from the container env: remove + create.
     std::fs::write(
-        app_dir.join("config/settings.json"),
+        app_dir.join(".asc/settings.json"),
         r#"{"map":"de_mirage","game_port":[27015]}"#,
     )
     .unwrap();
@@ -571,7 +571,7 @@ fn settings_drift_recreates_the_container() {
 
     // Changed published ports drift too (DMN-030).
     std::fs::write(
-        app_dir.join("config/settings.json"),
+        app_dir.join(".asc/settings.json"),
         r#"{"map":"de_dust2","game_port":[27016]}"#,
     )
     .unwrap();
@@ -580,7 +580,7 @@ fn settings_drift_recreates_the_container() {
 
     // A quota override drifts as well: the mock reports no limits.
     std::fs::write(
-        app_dir.join("config/settings.json"),
+        app_dir.join(".asc/settings.json"),
         r#"{"map":"de_dust2","game_port":[27015],"$quota":{"max_ram":"1G"}}"#,
     )
     .unwrap();
@@ -604,7 +604,7 @@ fn settings_drift_recreates_the_container() {
     )
     .unwrap();
     std::fs::write(
-        app_dir.join("config/settings.json"),
+        app_dir.join(".asc/settings.json"),
         r#"{"map":"de_dust2","game_port":[27016]}"#,
     )
     .unwrap();
@@ -618,7 +618,7 @@ fn settings_drift_recreates_the_container() {
     // The same mapping as the mock reports (host 27015 → container 27015) is
     // not drift.
     std::fs::write(
-        app_dir.join("config/settings.json"),
+        app_dir.join(".asc/settings.json"),
         r#"{"map":"de_dust2","game_port":[27015]}"#,
     )
     .unwrap();
@@ -789,7 +789,7 @@ fn install_docker_app(config: &asc_daemon::daemon::config::Config, id: &str, ima
         .unwrap();
     let app_dir = store.app_dir(id).unwrap();
     std::fs::create_dir_all(app_dir.join("repository")).unwrap();
-    std::fs::create_dir_all(app_dir.join("config")).unwrap();
+    std::fs::create_dir_all(app_dir.join(".asc")).unwrap();
     std::fs::write(
         app_dir.join("repository/asc.yaml"),
         format!("name: {id}\nversion: '1'\ntype: docker\nruntime:\n  image: {image}\n"),
@@ -940,7 +940,7 @@ async fn prune_volumes_protects_a_declared_named_volume() {
         .unwrap();
     let app_dir = store.app_dir("web").unwrap();
     std::fs::create_dir_all(app_dir.join("repository")).unwrap();
-    std::fs::create_dir_all(app_dir.join("config")).unwrap();
+    std::fs::create_dir_all(app_dir.join(".asc")).unwrap();
     std::fs::write(
         app_dir.join("repository/asc.yaml"),
         "name: web\nversion: '1'\ntype: docker\nsettings: ./asc.settings.yaml\n\

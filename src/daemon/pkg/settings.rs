@@ -3,7 +3,7 @@
 //!
 //! Mirrors `registry/schema/asc.settings.schema.json` (the source of truth
 //! for the format). The manifest references the file via `settings:`; values
-//! chosen by the user live in `<app_dir>/config/settings.json` and are
+//! chosen by the user live in `<app_dir>/.asc/settings.json` and are
 //! applied to the runtime on the next (re)start.
 
 use std::fs;
@@ -739,7 +739,7 @@ fn json_scalar(value: &serde_json::Value) -> String {
     }
 }
 
-/// Chosen setting values of one app: `<app_dir>/config/settings.json`.
+/// Chosen setting values of one app: `<app_dir>/.asc/settings.json`.
 #[derive(Debug, Default)]
 pub struct SettingValues {
     map: serde_json::Map<String, serde_json::Value>,

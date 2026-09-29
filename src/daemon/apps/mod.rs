@@ -8,6 +8,7 @@ pub mod compose;
 pub mod disk;
 pub mod docker;
 pub mod driver;
+pub mod layout;
 pub mod meta;
 pub mod ports;
 pub mod process;
@@ -520,7 +521,8 @@ impl AppManager {
         let Ok((_, Some(file))) = dockerfile::resolve_installed(meta, &manifest_dir) else {
             return Ok(());
         };
-        let values = settings::SettingValues::load(&dir.join("config")).unwrap_or_default();
+        let values = settings::SettingValues::load(&crate::daemon::apps::layout::settings_dir(dir))
+            .unwrap_or_default();
         let missing = file.unanswered_required(&values);
         if missing.is_empty() {
             return Ok(());

@@ -100,10 +100,10 @@ fn install_from_a_bare_dockerfile_synthesizes_ports_and_volumes() {
     ));
 
     // EXPOSE 8080 / VOLUME /data were synthesized into settings and merged
-    // into config/settings.json's defaults at install time.
+    // into .asc/settings.json's defaults at install time.
     let app_dir = store.app_dir("demo").unwrap();
     let values =
-        fs::read_to_string(app_dir.join("config/settings.json")).expect("settings.json exists");
+        fs::read_to_string(app_dir.join(".asc/settings.json")).expect("settings.json exists");
     assert!(values.contains("8080"), "got: {values}");
     assert!(values.contains("/data"), "got: {values}");
 

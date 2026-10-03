@@ -449,6 +449,10 @@ message ListAppVersionsResponse {
   // The tag InstallApp/UpgradeApp would pick with no version given; absent
   // when the repository has no tags.
   optional string latest = 2;
+  // Branch names, in the order the remote listed them (DMN-140) — what
+  // UpgradeAppRequest.branch accepts. Empty from a daemon without the
+  // "app.upgrade.ref" capability.
+  repeated string branches = 3;
 }
 
 message InspectPackageRequest {
@@ -588,6 +592,13 @@ message UpgradeAppRequest {
   // App id or custom name, optionally with "@version" (a git tag); no
   // version = the repository's newest tag.
   string spec = 1;
+  // Switch to following this branch (DMN-140): it is checked out now and
+  // remembered (App.branch), so later upgrades keep pulling it.
+  optional string branch = 2;
+  // Pin to this tag (DMN-140): unlike "@version" in `spec`, this also stops
+  // following a branch. Exclusive with `branch`, and with an "@version" in
+  // `spec`.
+  optional string tag = 3;
 }
 
 message UpgradeAppResponse {

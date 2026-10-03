@@ -1130,6 +1130,14 @@ struct UpgradeBody {
     /// newest tag, or the tracked branch for a direct repository install.
     #[serde(default)]
     version: Option<String>,
+    /// Switch to following this branch (DMN-140); it is remembered, so later
+    /// upgrades keep pulling it. Exclusive with `tag` and `version`.
+    #[serde(default)]
+    branch: Option<String>,
+    /// Pin to this tag and stop following a branch (DMN-140). Exclusive with
+    /// `branch` and `version`.
+    #[serde(default)]
+    tag: Option<String>,
 }
 
 /// Upgrade one app (DMN-053). The app must be stopped; the caller must own
@@ -1140,11 +1148,20 @@ async fn upgrade_app(
     Path(id): Path<String>,
     body: Option<Json<UpgradeBody>>,
 ) -> Result<Response, ApiError> {
-    let spec = match body.and_then(|Json(body)| body.version) {
+    let body = body.map(|Json(body)| body);
+    let target = match body.as_ref().map(|b| (b.branch.clone(), b.tag.clone())) {
+        Some((Some(_), Some(_))) => {
+            return Err(anyhow::anyhow!("give either a branch or a tag, not both").into());
+        }
+        Some((Some(branch), None)) => crate::daemon::pkg::UpgradeRef::Branch(branch),
+        Some((None, Some(tag))) => crate::daemon::pkg::UpgradeRef::Tag(tag),
+        _ => crate::daemon::pkg::UpgradeRef::Spec,
+    };
+    let spec = match body.and_then(|body| body.version) {
         Some(version) => format!("{id}@{version}"),
         None => id,
     };
-    let json = match state.upgrade(ctx, spec).await? {
+    let json = match state.upgrade(ctx, spec, target).await? {
         // The commits are full shas (DMN-056); abbreviating them is the
         // caller's choice.
         crate::daemon::pkg::UpgradeOutcome::Upgraded {

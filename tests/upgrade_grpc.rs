@@ -145,6 +145,7 @@ async fn grpc_upgrade_app_moves_to_a_newer_tag_and_reports_up_to_date_otherwise(
     let response = apps
         .upgrade_app(with_auth(tonic::Request::new(pb::UpgradeAppRequest {
             spec: "demo".into(),
+            ..Default::default()
         })))
         .await
         .unwrap()
@@ -164,6 +165,7 @@ async fn grpc_upgrade_app_moves_to_a_newer_tag_and_reports_up_to_date_otherwise(
     let response = apps
         .upgrade_app(with_auth(tonic::Request::new(pb::UpgradeAppRequest {
             spec: "demo".into(),
+            ..Default::default()
         })))
         .await
         .unwrap()
@@ -191,6 +193,7 @@ async fn grpc_upgrade_app_moves_to_a_newer_tag_and_reports_up_to_date_otherwise(
     let mut stream = apps
         .upgrade_app_stream(with_auth(tonic::Request::new(pb::UpgradeAppRequest {
             spec: "demo".into(),
+            ..Default::default()
         })))
         .await
         .unwrap()

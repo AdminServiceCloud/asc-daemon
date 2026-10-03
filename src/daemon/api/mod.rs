@@ -81,6 +81,8 @@ pub const CAPABILITIES: &[&str] = &[
     // DMN-138: asc.settings.yaml `setup:`, InstallAppRequest.defer_start,
     // InspectPackageResponse.settings_json.
     "app.setup",
+    // DMN-140: ListAppVersionsResponse.branches, UpgradeAppRequest.branch/tag.
+    "app.upgrade.ref",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -1116,8 +1118,9 @@ impl ApiState {
         self: &Arc<Self>,
         ctx: UserContext,
         spec: String,
+        target: pkg::UpgradeRef,
     ) -> Result<pkg::UpgradeOutcome> {
-        self.blocking(move |s| pkg::upgrade(&s.config, &ctx, &spec, None))
+        self.blocking(move |s| pkg::upgrade_to(&s.config, &ctx, &spec, &target, None))
             .await
     }
 
@@ -1130,6 +1133,7 @@ impl ApiState {
         self: &Arc<Self>,
         ctx: UserContext,
         spec: String,
+        target: pkg::UpgradeRef,
     ) -> tokio::sync::mpsc::Receiver<UpgradeStreamEvent> {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         struct ChannelReporter(tokio::sync::mpsc::Sender<UpgradeStreamEvent>);
@@ -1150,7 +1154,7 @@ impl ApiState {
         tokio::task::spawn_blocking(move || {
             let reporter = ChannelReporter(tx);
             let outcome = catching_panics("upgrade", || {
-                pkg::upgrade(&state.config, &ctx, &spec, Some(&reporter))
+                pkg::upgrade_to(&state.config, &ctx, &spec, &target, Some(&reporter))
             });
             // The terminal event, unlike a progress line, is never sent
             // from inside a runtime and must never be dropped: a full

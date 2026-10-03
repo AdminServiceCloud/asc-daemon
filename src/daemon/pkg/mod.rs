@@ -32,4 +32,4 @@ pub(crate) use install::{VolumeKind, classify_volume, effective_image_ref, runti
 pub use registry::RegistryClient;
 pub use resources::{RequirementsNotMet, Shortage};
 pub use sources::SourceList;
-pub use upgrade::{UpgradeOutcome, upgrade};
+pub use upgrade::{UpgradeOutcome, UpgradeRef, upgrade, upgrade_to};

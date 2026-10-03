@@ -43,6 +43,7 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "monitor.settings",
         "app.install.cancel",
         "app.setup",
+        "app.upgrade.ref",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()

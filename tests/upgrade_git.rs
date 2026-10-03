@@ -9,7 +9,7 @@ use std::process::Command;
 
 use asc_daemon::daemon::apps::{AppStore, UserContext};
 use asc_daemon::daemon::config::Config;
-use asc_daemon::daemon::pkg::{self, GitRef, UpgradeOutcome};
+use asc_daemon::daemon::pkg::{self, GitRef, UpgradeOutcome, UpgradeRef};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -362,4 +362,88 @@ fn upgrade_of_a_monorepo_direct_install_keeps_the_manifest_path() {
     );
     let app_dir = store.app_dir("helloworld").unwrap();
     assert!(app_dir.join("repository/web/helloworld/asc.yaml").exists());
+}
+
+/// DMN-140: the platform's GitOps picker moves an app onto a branch (which it
+/// then follows) or pins it to a tag (which stops it following one) — and a
+/// switch onto the ref the app already sits on still records the choice.
+#[test]
+fn upgrade_switches_to_a_branch_and_pins_a_tag() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not available");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let repo = ws.path().join("demo");
+    seed_repo(&repo);
+    git(&repo, &["checkout", "-q", "-b", "dev"]);
+    fs::write(repo.join("asc.yaml"), manifest("1.1.0-dev")).unwrap();
+    git(&repo, &["commit", "-q", "-am", "dev"]);
+    let url = repo.display().to_string().replace('\\', "/");
+    let (config, ctx, store) = workspace(ws.path());
+
+    pkg::install_from_git(
+        &config,
+        &ctx,
+        &url,
+        Some(GitRef::Tag("v1.0.0")),
+        None,
+        None,
+        None,
+        true,
+        None,
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(store.get("demo").unwrap().unwrap().branch, None);
+
+    // Onto the branch: checked out now, and followed from here on.
+    let target = UpgradeRef::Branch("dev".into());
+    match pkg::upgrade_to(&config, &ctx, "demo", &target, None).unwrap() {
+        UpgradeOutcome::Upgraded { to, .. } => assert_eq!(to, "dev"),
+        other => panic!("expected an upgrade, got: {other:?}"),
+    }
+    let meta = store.get("demo").unwrap().unwrap();
+    assert_eq!(meta.branch.as_deref(), Some("dev"));
+    let installed =
+        fs::read_to_string(store.app_dir("demo").unwrap().join("repository/asc.yaml")).unwrap();
+    assert!(installed.contains("1.1.0-dev"), "got: {installed}");
+
+    // Pinning the tag drops the branch, so a plain upgrade no longer moves it.
+    let target = UpgradeRef::Tag("v1.0.0".into());
+    match pkg::upgrade_to(&config, &ctx, "demo", &target, None).unwrap() {
+        UpgradeOutcome::Upgraded { to, .. } => assert_eq!(to, "v1.0.0"),
+        other => panic!("expected an upgrade, got: {other:?}"),
+    }
+    let meta = store.get("demo").unwrap().unwrap();
+    assert_eq!(
+        meta.branch, None,
+        "pinning a tag stops following the branch"
+    );
+    assert_eq!(meta.version.as_deref(), Some("v1.0.0"));
+    match pkg::upgrade(&config, &ctx, "demo", None).unwrap() {
+        UpgradeOutcome::UpToDate { version, .. } => assert_eq!(version, "v1.0.0"),
+        other => panic!("expected up-to-date, got: {other:?}"),
+    }
+
+    // Following a branch that sits on the installed commit moves nothing, but
+    // the app now follows it.
+    git(&repo, &["checkout", "-q", "-b", "same", "v1.0.0"]);
+    let target = UpgradeRef::Branch("same".into());
+    match pkg::upgrade_to(&config, &ctx, "demo", &target, None).unwrap() {
+        UpgradeOutcome::UpToDate { .. } => {}
+        other => panic!("expected up-to-date, got: {other:?}"),
+    }
+    assert_eq!(
+        store.get("demo").unwrap().unwrap().branch.as_deref(),
+        Some("same")
+    );
+
+    // Not a ref at all, and a ref together with an @version.
+    let bad = UpgradeRef::Branch("--upload-pack=x".into());
+    assert!(pkg::upgrade_to(&config, &ctx, "demo", &bad, None).is_err());
+    let both = UpgradeRef::Tag("v1.0.0".into());
+    assert!(pkg::upgrade_to(&config, &ctx, "demo@v1.0.0", &both, None).is_err());
 }

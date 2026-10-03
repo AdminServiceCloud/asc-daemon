@@ -62,6 +62,38 @@ pub enum UpgradeOutcome {
     },
 }
 
+/// What an upgrade moves the app to (DMN-140).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpgradeRef {
+    /// Whatever the spec says: `@version` pins a tag for this one upgrade,
+    /// otherwise the tracked branch, otherwise the newest tag.
+    #[default]
+    Spec,
+    /// Switch to following `branch`: it is checked out now and recorded in
+    /// `meta.branch`, so later upgrades keep pulling it.
+    Branch(String),
+    /// Pin to `tag`: unlike `@version`, this also drops the tracked branch,
+    /// so later upgrades do not jump back onto it.
+    Tag(String),
+}
+
+impl UpgradeRef {
+    /// The explicit ref, rejected when it could not name a git ref at all.
+    fn name(&self) -> Result<Option<&str>> {
+        let name = match self {
+            Self::Spec => return Ok(None),
+            Self::Branch(name) | Self::Tag(name) => name.as_str(),
+        };
+        if name.is_empty()
+            || name.starts_with('-')
+            || name.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            bail!("invalid git ref '{name}'");
+        }
+        Ok(Some(name))
+    }
+}
+
 /// Upgrade `name` (to the registry's latest tag) or `name@version`; the app
 /// is referenced by id or custom name. The app must be stopped.
 pub fn upgrade(
@@ -70,7 +102,22 @@ pub fn upgrade(
     spec: &str,
     report: Option<&dyn InstallReporter>,
 ) -> Result<UpgradeOutcome> {
+    upgrade_to(config, ctx, spec, &UpgradeRef::Spec, report)
+}
+
+/// [`upgrade`] with an explicit branch or tag to move to (DMN-140).
+pub fn upgrade_to(
+    config: &Config,
+    ctx: &UserContext,
+    spec: &str,
+    target: &UpgradeRef,
+    report: Option<&dyn InstallReporter>,
+) -> Result<UpgradeOutcome> {
     let (reference, requested_version) = parse_spec(spec);
+    let explicit_ref = target.name()?;
+    if explicit_ref.is_some() && matches!(requested_version, VersionSpec::Exact(_)) {
+        bail!("give either a branch/tag or an @version, not both");
+    }
     let manager = AppManager::new(config);
     // Ownership check plus live state: only stopped apps are upgraded.
     let status = manager.status(ctx, reference)?;
@@ -134,9 +181,10 @@ pub fn upgrade(
     // to move to and the app follows a moving ref instead — its own branch,
     // or the default branch of an untagged repository. Only a direct install
     // can end up there; a registry package without tags is a broken package.
-    let checkout: Option<String> = match requested_version {
-        VersionSpec::Exact(v) => Some(v.to_string()),
-        VersionSpec::Latest | VersionSpec::Pick => match &meta.branch {
+    let checkout: Option<String> = match (explicit_ref, requested_version) {
+        (Some(name), _) => Some(name.to_string()),
+        (None, VersionSpec::Exact(v)) => Some(v.to_string()),
+        (None, VersionSpec::Latest | VersionSpec::Pick) => match &meta.branch {
             Some(branch) => Some(branch.clone()),
             None => match ls_remote(&git_url, ctx)?.latest_tag() {
                 Some(tag) => Some(tag.to_string()),
@@ -151,8 +199,13 @@ pub fn upgrade(
     // compare — their commit is compared after the clone instead. An explicit
     // `@version` always means a tag, even for a branch-tracking app: that is
     // the user pinning it.
-    let tracks_branch =
-        meta.branch.is_some() && !matches!(requested_version, VersionSpec::Exact(_));
+    let tracks_branch = match target {
+        UpgradeRef::Branch(_) => true,
+        UpgradeRef::Tag(_) => false,
+        UpgradeRef::Spec => {
+            meta.branch.is_some() && !matches!(requested_version, VersionSpec::Exact(_))
+        }
+    };
     let moving_ref = checkout.is_none() || tracks_branch;
     // The installed version is the tag that was actually checked out
     // (`1.2.0` or `v1.2.0`), so compare against both spellings.
@@ -160,6 +213,7 @@ pub fn upgrade(
         && !moving_ref
         && (current == version || *current == format!("v{version}"))
     {
+        record_tracking(&manager, &meta, target)?;
         return Ok(UpgradeOutcome::UpToDate {
             id,
             version: current.clone(),
@@ -192,6 +246,7 @@ pub fn upgrade(
         && let (Some(installed), Some(fetched)) = (&from_commit, &to_commit)
         && installed == fetched
     {
+        record_tracking(&manager, &meta, target)?;
         return Ok(UpgradeOutcome::UpToDate {
             id,
             version: meta
@@ -312,6 +367,9 @@ pub fn upgrade(
         Some(to.clone())
     };
     meta.install_method = new_install_method;
+    // Switching to a branch starts following it; pinning a tag stops
+    // following one (DMN-140). A plain upgrade leaves the choice as it was.
+    meta.branch = tracked_branch(&meta, target);
     meta.quota = quota;
     meta.runtime = runtime;
     store.save(&meta)?;
@@ -330,6 +388,30 @@ pub fn upgrade(
         from_commit,
         to_commit,
     })
+}
+
+/// The branch the app follows after an upgrade to `target` (DMN-140):
+/// switching to a branch starts following it, pinning a tag stops following
+/// one, and a plain upgrade leaves the choice as it was.
+fn tracked_branch(meta: &AppMeta, target: &UpgradeRef) -> Option<String> {
+    match target {
+        UpgradeRef::Branch(branch) => Some(branch.clone()),
+        UpgradeRef::Tag(_) => None,
+        UpgradeRef::Spec => meta.branch.clone(),
+    }
+}
+
+/// An upgrade that finds nothing to move still has to honour the choice of
+/// ref: switching to a branch that sits on the installed commit, or pinning
+/// the tag the app is already on, only changes what the app follows.
+fn record_tracking(manager: &AppManager, meta: &AppMeta, target: &UpgradeRef) -> Result<()> {
+    let branch = tracked_branch(meta, target);
+    if branch != meta.branch {
+        let mut meta = meta.clone();
+        meta.branch = branch;
+        manager.store().save(&meta)?;
+    }
+    Ok(())
 }
 
 /// Remove the runtime objects the previous version created. Process apps

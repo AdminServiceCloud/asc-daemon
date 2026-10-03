@@ -814,6 +814,24 @@ fn install_error_to_pb(err: anyhow::Error) -> Result<pb::InstallAppResponse, Sta
 
 /// Shared by `upgrade_app` and `upgrade_app_stream`: both end in the same
 /// result shape, one returned directly, the other as the last stream event.
+/// `UpgradeAppRequest.branch`/`.tag` -> the upgrade target (DMN-140). They
+/// are mutually exclusive: naming both would leave it unclear whether the app
+/// should follow a branch afterwards.
+fn upgrade_target(
+    branch: Option<String>,
+    tag: Option<String>,
+) -> Result<crate::daemon::pkg::UpgradeRef, Status> {
+    use crate::daemon::pkg::UpgradeRef;
+    match (branch, tag) {
+        (Some(_), Some(_)) => Err(Status::invalid_argument(
+            "give either a branch or a tag, not both",
+        )),
+        (Some(branch), None) => Ok(UpgradeRef::Branch(branch)),
+        (None, Some(tag)) => Ok(UpgradeRef::Tag(tag)),
+        (None, None) => Ok(UpgradeRef::Spec),
+    }
+}
+
 fn upgrade_outcome_to_pb(outcome: pkg::UpgradeOutcome) -> pb::UpgradeAppResponse {
     match outcome {
         pkg::UpgradeOutcome::Upgraded {
@@ -1090,6 +1108,7 @@ impl AppService for Grpc {
         Ok(Response::new(pb::ListAppVersionsResponse {
             tags: refs.tags,
             latest,
+            branches: refs.branches,
         }))
     }
 
@@ -1135,9 +1154,14 @@ impl AppService for Grpc {
         request: Request<pb::UpgradeAppRequest>,
     ) -> Result<Response<pb::UpgradeAppResponse>, Status> {
         let ctx = ctx_of(&request);
+        let request = request.into_inner();
         let outcome = self
             .0
-            .upgrade(ctx, request.into_inner().spec)
+            .upgrade(
+                ctx,
+                request.spec,
+                upgrade_target(request.branch, request.tag)?,
+            )
             .await
             .map_err(to_status)?;
         Ok(Response::new(upgrade_outcome_to_pb(outcome)))
@@ -1152,7 +1176,9 @@ impl AppService for Grpc {
         request: Request<pb::UpgradeAppRequest>,
     ) -> Result<Response<Self::UpgradeAppStreamStream>, Status> {
         let ctx = ctx_of(&request);
-        let rx = self.0.upgrade_stream(ctx, request.into_inner().spec);
+        let request = request.into_inner();
+        let target = upgrade_target(request.branch, request.tag)?;
+        let rx = self.0.upgrade_stream(ctx, request.spec, target);
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
             match rx.recv().await {
                 Some(super::UpgradeStreamEvent::Line(line)) => Some((

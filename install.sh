@@ -68,6 +68,30 @@ if [ -r /etc/os-release ]; then
     esac
 fi
 
+# cloud-init runs the installer without a login shell: HOME may be unset, and
+# `set -u` plus the tools below (docker's installer, curl config) expect it.
+export HOME="${HOME:-/root}"
+
+# A freshly created cloud VM is still busy with its first boot: cloud-init
+# itself or unattended-upgrades holds the dpkg/apt lock for the first minutes,
+# and the Docker installer would fail on it (DMN-141). Wait for the lock
+# instead of failing the whole install.
+wait_for_package_manager() {
+    command -v apt-get >/dev/null 2>&1 || return 0
+    waited=0
+    while [ "$waited" -lt 600 ]; do
+        if command -v fuser >/dev/null 2>&1; then
+            fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || return 0
+        else
+            pgrep -x 'apt|apt-get|dpkg|unattended-upgr' >/dev/null 2>&1 || return 0
+        fi
+        [ "$waited" -eq 0 ] && echo "Waiting for another package manager process to finish..."
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "warning: the package manager is still busy after 10 minutes; continuing" >&2
+}
+
 # ── Docker: container apps need it ─────────────────────────
 # The script usually arrives via `curl | bash`, so stdin is the script itself —
 # interactive answers are read from /dev/tty when there is one.
@@ -76,6 +100,7 @@ fi
 # is what the platform uses to provision a node, and a node that cannot run
 # container apps is not a working node. --no-docker opts out.
 install_docker() {
+    wait_for_package_manager
     echo "Installing Docker (get.docker.com)..."
     if curl -fsSL --proto '=https' --tlsv1.2 https://get.docker.com | sh; then
         systemctl enable --now docker >/dev/null 2>&1 || true

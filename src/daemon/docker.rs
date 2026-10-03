@@ -18,8 +18,8 @@ use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::moby::buildkit::v1::{StatusResponse, Vertex};
 use bollard::models::{
-    BuildInfoAux, ContainerCreateBody, ContainerSummary, HostConfig, PortBinding, ResourcesUlimits,
-    RestartPolicy, RestartPolicyNameEnum,
+    BuildInfoAux, ContainerCreateBody, ContainerSummary, DeviceMapping, DeviceRequest, HostConfig,
+    PortBinding, ResourcesUlimits, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     AttachContainerOptions, BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptions,
@@ -324,6 +324,10 @@ pub struct AppliedConfig {
     /// created from. A re-pulled tag (DMN-120) moves the tag to a new id
     /// while the container keeps the old one: that difference is drift.
     pub image: Option<String>,
+    /// NVIDIA card ids from `HostConfig.DeviceRequests` (DMN-143), sorted.
+    pub gpu_ids: Vec<String>,
+    /// `HostConfig.Devices` host paths (AMD/Intel GPU nodes), sorted.
+    pub gpu_devices: Vec<String>,
 }
 
 /// Inspect the daemon-managed configuration of a container. `None` when the
@@ -346,6 +350,20 @@ pub fn container_applied(cfg: &DockerConfig, container: &str) -> Result<Option<A
                 ports.sort();
                 let mut binds = host.binds.unwrap_or_default();
                 binds.sort();
+                let mut gpu_ids: Vec<String> = host
+                    .device_requests
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(|request| request.device_ids.unwrap_or_default())
+                    .collect();
+                gpu_ids.sort();
+                let mut gpu_devices: Vec<String> = host
+                    .devices
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|device| device.path_on_host)
+                    .collect();
+                gpu_devices.sort();
                 Ok(Some(AppliedConfig {
                     env: config.env.unwrap_or_default(),
                     binds,
@@ -354,6 +372,8 @@ pub fn container_applied(cfg: &DockerConfig, container: &str) -> Result<Option<A
                     memory: host.memory.unwrap_or(0),
                     cmd: config.cmd,
                     image: info.image,
+                    gpu_ids,
+                    gpu_devices,
                 }))
             }
             Err(e) if status_of(&e) == Some(404) => Ok(None),
@@ -1174,6 +1194,11 @@ pub struct CreateSpec<'a> {
     /// deliberately does not read labels back, so adding or changing one here
     /// never trips the settings-drift recreate.
     pub labels: HashMap<String, String>,
+    /// NVIDIA card UUIDs to attach (DMN-143): one `DeviceRequest` with the
+    /// `gpu` capability, which the NVIDIA Container Toolkit fulfils.
+    pub gpu_ids: Vec<String>,
+    /// Device nodes mapped into the container one-to-one (AMD/Intel GPUs).
+    pub gpu_devices: Vec<String>,
 }
 
 /// Set to `"true"` on every container ASC creates (DMN-105): lets a future
@@ -1587,6 +1612,36 @@ fn tar_context(dir: &std::path::Path) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("cannot finalize build context tar: {e}"))
 }
 
+/// `docker run --gpus device=<uuid>,…`: a single request for the listed NVIDIA
+/// cards. The `nvidia` driver name is what the toolkit registers; the `gpu`
+/// capability makes it mount the compute and graphics libraries.
+fn gpu_device_requests(ids: &[String]) -> Option<Vec<DeviceRequest>> {
+    (!ids.is_empty()).then(|| {
+        vec![DeviceRequest {
+            driver: Some("nvidia".to_string()),
+            count: None,
+            device_ids: Some(ids.to_vec()),
+            capabilities: Some(vec![vec!["gpu".to_string()]]),
+            options: None,
+        }]
+    })
+}
+
+/// `docker run --device <path>` for each node, at the same path inside and
+/// with read, write and mknod rights (what a GPU's render node needs).
+fn gpu_device_mappings(paths: &[String]) -> Option<Vec<DeviceMapping>> {
+    (!paths.is_empty()).then(|| {
+        paths
+            .iter()
+            .map(|path| DeviceMapping {
+                path_on_host: Some(path.clone()),
+                path_in_container: Some(path.clone()),
+                cgroup_permissions: Some("rwm".to_string()),
+            })
+            .collect()
+    })
+}
+
 /// Create (but do not start) a container from a spec. Used by the installer.
 /// An image missing on the host is pulled from its registry automatically.
 pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
@@ -1621,6 +1676,8 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
             }),
             nano_cpus: spec.nano_cpus,
             memory: spec.memory_bytes,
+            device_requests: gpu_device_requests(&spec.gpu_ids),
+            devices: gpu_device_mappings(&spec.gpu_devices),
             ulimits: Some(vec![ResourcesUlimits {
                 name: Some("nofile".to_string()),
                 soft: Some(CONTAINER_NOFILE_LIMIT),

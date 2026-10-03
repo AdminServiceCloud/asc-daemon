@@ -55,6 +55,14 @@ enum Command {
     },
     /// Show daemon version, service state and apps summary
     Status,
+    /// Show the machine's hardware: bare metal or virtual, CPU, board,
+    /// memory modules, disks, GPUs (with the PCI address an app's `gpus`
+    /// setting takes) and the current temperature of every sensor
+    Hardware {
+        /// Print machine-readable JSON instead of the table
+        #[arg(long)]
+        json: bool,
+    },
     /// Connect this node to an AdminService.Cloud platform using a one-time
     /// registration token issued in the panel
     Connect {
@@ -917,6 +925,7 @@ fn run() -> anyhow::Result<()> {
         Command::Service { action } => service_cmd(action),
         Command::Api { action } => api_cmd(action, config.clone()),
         Command::Status => status_cmd(&config),
+        Command::Hardware { json } => hardware_cmd(json),
         Command::Connect { token, url } => connect_cmd(config.clone(), &token, url.as_deref()),
         Command::Stats { sort, live } => stats_cmd(sort, live, &config),
         Command::App { action } => app_cmd(action, &config),
@@ -4066,7 +4075,8 @@ fn settings_editor(
             let suffix = match category {
                 SettingCategory::Quota
                 | SettingCategory::StartCommand
-                | SettingCategory::Backups => String::new(),
+                | SettingCategory::Backups
+                | SettingCategory::Gpus => String::new(),
                 _ => format!(" ({count})"),
             };
             println!("  {}) {}{suffix}", i + 1, category.label());
@@ -4091,6 +4101,7 @@ fn settings_editor(
                 edit_start_command(&file, &mut values, sink, &mut changed)?
             }
             SettingCategory::Backups => edit_backup_policy(&mut values, sink, &mut changed)?,
+            SettingCategory::Gpus => edit_gpus(&mut values, sink, &mut changed)?,
             _ => {
                 let defs: Vec<_> = file
                     .settings
@@ -5228,6 +5239,289 @@ fn print_system_metrics() {
     }
 }
 
+/// `asc hardware` (DMN-142, DMN-144): the machine's inventory plus the live
+/// readings of every temperature and fan sensor. Read in-process, like the
+/// metrics block of `asc status` — it needs no running daemon.
+fn hardware_cmd(json: bool) -> anyhow::Result<()> {
+    use monitor::hardware;
+
+    let info = hardware::hardware_info(true);
+    let sensors = monitor::sensors::collect();
+    if json {
+        let mut value = serde_json::to_value(&info)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "temperatures".into(),
+                serde_json::to_value(&sensors.temperatures)?,
+            );
+            object.insert("fans".into(), serde_json::to_value(&sensors.fans)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
+    let machine_type = match info.machine.machine_type.as_str() {
+        "bare_metal" => t(Msg::HwMachineBareMetal),
+        "virtual_machine" => t(Msg::HwMachineVirtual),
+        "container" => t(Msg::HwMachineContainer),
+        _ => t(Msg::HwMachineUnknown),
+    };
+    let mut machine = machine_type.to_string();
+    if !matches!(info.machine.virtualization.as_str(), "" | "none") {
+        machine.push_str(&format!(" ({})", info.machine.virtualization));
+    }
+    let provider = info.machine.hypervisor_vendor.clone().or_else(|| {
+        let parts: Vec<&str> = [
+            info.machine.system_vendor.as_deref(),
+            info.machine.product_name.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    });
+    if let Some(provider) = provider {
+        machine.push_str(&format!(" — {provider}"));
+    }
+    println!("{}: {machine}", t(Msg::HwMachine));
+
+    let cpu = &info.cpu;
+    let mut cpu_line = cpu
+        .model
+        .clone()
+        .or_else(|| cpu.vendor.clone())
+        .unwrap_or_else(|| t(Msg::HwHidden).to_string());
+    cpu_line.push_str(&format!(
+        " · {}",
+        tf3(
+            Msg::HwCpuTopology,
+            cpu.sockets,
+            cpu.physical_cores,
+            cpu.threads
+        )
+    ));
+    if let Some(mhz) = cpu.max_mhz {
+        cpu_line.push_str(&format!(" · {:.1} GHz", mhz / 1000.0));
+    }
+    println!("{}: {cpu_line}", t(Msg::HwCpu));
+
+    let board = &info.board;
+    let board_name = [board.vendor.as_deref(), board.name.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bios = [board.bios_vendor.as_deref(), board.bios_version.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let board_line = match (board_name.is_empty(), bios.is_empty()) {
+        (true, true) => t(Msg::HwHidden).to_string(),
+        (false, true) => board_name,
+        (true, false) => format!("BIOS {bios}"),
+        (false, false) => format!("{board_name} · BIOS {bios}"),
+    };
+    println!("{}: {board_line}", t(Msg::HwBoard));
+
+    println!(
+        "{}: {}",
+        t(Msg::HwMemory),
+        monitor::human_bytes(info.memory.total_bytes)
+    );
+    if info.memory.modules.is_empty() {
+        println!("  {}", t(Msg::HwMemoryHidden));
+    }
+    for module in &info.memory.modules {
+        let mut parts = vec![monitor::human_bytes(module.size_bytes)];
+        parts.extend(module.kind.clone());
+        if let Some(speed) = module.configured_speed_mts.or(module.speed_mts) {
+            parts.push(format!("{speed} MT/s"));
+        }
+        parts.extend(module.manufacturer.clone());
+        parts.extend(module.part_number.clone());
+        println!(
+            "  {:<10} {}",
+            module.slot.as_deref().unwrap_or("-"),
+            parts.join(" · ")
+        );
+    }
+
+    println!("{}:", t(Msg::HwDisks));
+    if info.disks.is_empty() {
+        println!("  {}", t(Msg::HwNone));
+    }
+    for disk in &info.disks {
+        println!(
+            "  {:<10} {:>10}  {:<7} {}",
+            disk.name,
+            monitor::human_bytes(disk.size_bytes),
+            disk.kind,
+            disk.model.as_deref().unwrap_or("")
+        );
+    }
+
+    println!("{}:", t(Msg::HwGpus));
+    if info.gpus.is_empty() {
+        println!("  {}", t(Msg::HwNone));
+    }
+    for gpu in &info.gpus {
+        let vram = gpu
+            .vram_bytes
+            .map(monitor::human_bytes)
+            .unwrap_or_else(|| "-".into());
+        println!("  {}  {}  {vram}", gpu.id, gpu.model);
+        let status = if gpu.attachable {
+            t(Msg::HwAttachable).to_string()
+        } else {
+            tf(
+                Msg::HwNotAttachable,
+                gpu_hint_text(gpu.attach_hint.as_deref()),
+            )
+        };
+        println!("    {status}");
+    }
+
+    println!("{}:", t(Msg::HwSensors));
+    if sensors.temperatures.is_empty() {
+        println!("  {}", t(Msg::HwNoSensors));
+    }
+    for sensor in &sensors.temperatures {
+        println!(
+            "  {:<8} {:<14} {:<20} {:>6.1} °C",
+            sensor.kind, sensor.device_id, sensor.label, sensor.temperature_c
+        );
+    }
+    if !sensors.fans.is_empty() {
+        println!("{}:", t(Msg::HwFans));
+        for fan in &sensors.fans {
+            println!("  {:<14} {:<20} {:>6} RPM", fan.chip, fan.label, fan.rpm);
+        }
+    }
+    Ok(())
+}
+
+/// The reason code of a GPU that cannot be attached, in the CLI's language.
+fn gpu_hint_text(code: Option<&str>) -> &'static str {
+    match code {
+        Some("driver_not_loaded") => t(Msg::HwHintDriver),
+        Some("toolkit_missing") => t(Msg::HwHintToolkit),
+        Some("no_render_node") => t(Msg::HwHintRender),
+        _ => t(Msg::HwHintVendor),
+    }
+}
+
+/// The gpus category of `asc app settings` (DMN-143): which of the host's
+/// video cards the app's container is given. Multi-select by toggling
+/// numbers, like the backup storages; stored as PCI addresses under the
+/// `$gpus` reserved key. A card that cannot be attached cannot be added, but
+/// one already selected and since removed from the host can still be dropped.
+fn edit_gpus(
+    values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
+    sink: &SettingsSink<'_>,
+    changed: &mut bool,
+) -> anyhow::Result<()> {
+    use asc_daemon::daemon::pkg::settings::SettingValues;
+
+    let inventory = monitor::hardware::hardware_info(false);
+    loop {
+        let mut selected = values.gpus()?;
+        let mut rows: Vec<(String, String, bool)> = inventory
+            .gpus
+            .iter()
+            .map(|gpu| {
+                let vram = gpu
+                    .vram_bytes
+                    .map(monitor::human_bytes)
+                    .unwrap_or_else(|| "-".into());
+                let note = if gpu.attachable {
+                    String::new()
+                } else {
+                    format!(
+                        "  ({})",
+                        tf(
+                            Msg::HwNotAttachable,
+                            gpu_hint_text(gpu.attach_hint.as_deref())
+                        )
+                    )
+                };
+                (
+                    gpu.id.clone(),
+                    format!("{}  {vram}{note}", gpu.model),
+                    gpu.attachable,
+                )
+            })
+            .collect();
+        for address in &selected {
+            if !rows.iter().any(|(id, _, _)| id == address) {
+                rows.push((address.clone(), "?".to_string(), true));
+            }
+        }
+        if rows.is_empty() {
+            println!("{}", t(Msg::SettingsGpuNone));
+            return Ok(());
+        }
+        println!();
+        for (i, (id, label, _)) in rows.iter().enumerate() {
+            let mark = if selected.contains(id) { "x" } else { " " };
+            println!("  {}) [{mark}] {id}  {label}", i + 1);
+        }
+        let raw = read_line(t(Msg::SettingsGpuToggle))?;
+        if raw.is_empty() {
+            break;
+        }
+        let previous = selected.clone();
+        for token in raw.split([',', ' ']).filter(|t| !t.is_empty()) {
+            let Some(n) = token
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=rows.len()).contains(n))
+            else {
+                eprintln!("asc: {}", t(Msg::AuthInvalidChoice));
+                continue;
+            };
+            let (id, _, attachable) = &rows[n - 1];
+            match selected.iter().position(|s| s == id) {
+                Some(pos) => {
+                    selected.remove(pos);
+                }
+                None if *attachable => selected.push(id.clone()),
+                None => eprintln!(
+                    "asc: {id}: {}",
+                    tf(
+                        Msg::HwNotAttachable,
+                        gpu_hint_text(
+                            inventory
+                                .gpus
+                                .iter()
+                                .find(|gpu| &gpu.id == id)
+                                .and_then(|gpu| gpu.attach_hint.as_deref())
+                        )
+                    )
+                ),
+            }
+        }
+        selected.sort();
+        selected.dedup();
+        let store = |values: &mut asc_daemon::daemon::pkg::settings::SettingValues,
+                     list: &[String]| {
+            if list.is_empty() {
+                values.remove(SettingValues::GPUS_KEY);
+            } else {
+                values.set(SettingValues::GPUS_KEY, serde_json::json!(list));
+            }
+        };
+        store(values, &selected);
+        if let Err(err) = sink.save(values) {
+            eprintln!("asc: {err:#}");
+            store(values, &previous);
+            continue;
+        }
+        *changed = true;
+    }
+    Ok(())
+}
+
 /// "1.2 GiB / 15.6 GiB (7%)" — language-neutral usage figure.
 fn usage_string(used: u64, total: u64) -> String {
     let percent = (used * 100).checked_div(total).unwrap_or(0);
@@ -5389,6 +5683,8 @@ mod tests {
             network: vec![],
             disk_io: vec![],
             gpus: vec![],
+            temperatures: vec![],
+            fans: vec![],
             uptime_secs: 0,
         };
         // RAM 4G > 1G free and CPU 4 > 2 cores are short; the disk check

@@ -21,6 +21,7 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | 🗂️ Создание своего registry | [custom-registry](custom-registry.md) |
 | 🤖 MCP-сервер для AI | [mcp-server](mcp-server.md) |
 | 📊 Мониторинг системы и приложений | [monitoring](monitoring.md) |
+| 🖥️ Инвентарь железа и датчики | [hardware](hardware.md) |
 | 💾 Бекапы приложений | [backups](backups.md) |
 | 📁 SFTP-сервер по приложению | [sftp](sftp.md) |
 | 📁 Файловый API: обход ФС, потоковая передача | [files](files.md) |

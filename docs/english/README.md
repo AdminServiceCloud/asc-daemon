@@ -21,6 +21,7 @@ Open source CLI utility and daemon written in Rust, installed on the user's serv
 | 🗂️ Create a custom registry | [custom-registry](custom-registry.md) |
 | 🤖 MCP server for AI | [mcp-server](mcp-server.md) |
 | 📊 System and application monitoring | [monitoring](monitoring.md) |
+| 🖥️ Hardware inventory and sensors | [hardware](hardware.md) |
 | 💾 Application backups | [backups](backups.md) |
 | 📁 Per-application SFTP server | [sftp](sftp.md) |
 | 📁 File API: filesystem traversal, streaming transfer | [files](files.md) |

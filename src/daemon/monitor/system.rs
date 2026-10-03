@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::gpu::{Detector as GpuDetector, GpuMetrics};
+use super::sensors::{self, FanReading, SensorReading};
 
 /// One snapshot of system-wide metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +27,12 @@ pub struct SystemMetrics {
     pub disk_io: Vec<DiskIoMetrics>,
     /// Every GPU the machine exposes; empty on the usual headless server.
     pub gpus: Vec<GpuMetrics>,
+    /// Temperatures from every device that has a sensor (DMN-144); empty on
+    /// a virtual machine. `default` keeps older serialized samples readable.
+    #[serde(default)]
+    pub temperatures: Vec<SensorReading>,
+    #[serde(default)]
+    pub fans: Vec<FanReading>,
     pub uptime_secs: u64,
 }
 
@@ -131,6 +138,11 @@ pub struct Collector {
     /// neither belongs in a 100ms loop when sizes barely move.
     last_disks_poll_ms: Option<i64>,
     cached_disks: Vec<DiskMetrics>,
+    /// Millisecond clock and last reading of the hwmon sensors (DMN-144):
+    /// a few dozen small sysfs files, cheap, but a temperature does not move
+    /// in 100ms either.
+    last_sensors_poll_ms: Option<i64>,
+    cached_sensors: sensors::Sensors,
 }
 
 /// Minimum gap between two GPU polls. Fast enough that a graph feels live,
@@ -139,6 +151,9 @@ const GPU_POLL_MIN_INTERVAL_MS: i64 = 1000;
 
 /// Minimum gap between two filesystem usage reads (DMN-135).
 const DISKS_POLL_MIN_INTERVAL_MS: i64 = 2000;
+
+/// Minimum gap between two sensor reads (DMN-144).
+const SENSORS_POLL_MIN_INTERVAL_MS: i64 = 1000;
 
 impl Collector {
     pub fn new() -> Self {
@@ -227,6 +242,14 @@ impl Collector {
             self.last_disks_poll_ms = Some(timestamp_ms);
         }
 
+        let sensors_due = self
+            .last_sensors_poll_ms
+            .is_none_or(|last| timestamp_ms - last >= SENSORS_POLL_MIN_INTERVAL_MS);
+        if sensors_due {
+            self.cached_sensors = sensors::collect();
+            self.last_sensors_poll_ms = Some(timestamp_ms);
+        }
+
         let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
         let uptime_secs = parse_uptime(&uptime).unwrap_or(0);
 
@@ -244,6 +267,8 @@ impl Collector {
             network,
             disk_io,
             gpus: self.cached_gpus.clone(),
+            temperatures: self.cached_sensors.temperatures.clone(),
+            fans: self.cached_sensors.fans.clone(),
             uptime_secs,
         })
     }

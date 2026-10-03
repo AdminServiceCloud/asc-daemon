@@ -192,6 +192,22 @@ quota:
 - `max_disk` записывается для всех рантаймов; дисковое ограничение per-runtime (Docker storage-opt / квоты ФС) — инкрементально.
 - **Пользовательские переопределения** (DMN-030): категория `quota` в `asc app settings` переопределяет отдельные поля поверх значений пакета (`'-'` сбрасывает поле обратно); переопределение хранится в `settings.json` и применяется через пересоздание контейнера при следующем перезапуске.
 
+### 🎮 Проброс видеокарт (DMN-143)
+
+Приложению можно отдать одну или несколько видеокарт хоста. Выбор хранится в зарезервированном ключе **`$gpus`** файла `settings.json` — список PCI-адресов в том виде, как их печатает `asc hardware` (адрес, а не индекс: он продолжает указывать на ту же карту после добавления другой):
+
+```json
+{ "$gpus": ["0000:01:00.0", "0000:03:00.0"] }
+```
+
+- **Только Docker-приложения.** Нативное приложение и так видит устройства хоста; у compose-проектов нет настроек (это отдельная задача). Сохранение `$gpus` для любого другого рантайма отклоняется.
+- **NVIDIA** — один Engine `DeviceRequest` (`Driver: nvidia`, `DeviceIDs` — UUID карт, `Capabilities: [[gpu]]`), то же самое отправляет `docker run --gpus device=<uuid>`. Дальше NVIDIA Container Toolkit монтирует библиотеки драйвера и узлы устройств; демону остаётся только назвать карты.
+- **AMD и Intel** — обычный маппинг устройств, одинаковый путь снаружи и внутри, `rwm`: узлы карты `/dev/dri/renderD*` и `/dev/dri/card*`, а у AMD ещё `/dev/kfd` (вычислительный интерфейс ROCm), если он есть.
+- **Проверка** при сохранении значений (`SetAppSettings`, `asc app settings`): каждый адрес должен быть картой этого хоста, которую можно подключить (см. `attachable` в [🖥️ hardware](hardware.md)); в ошибке — адрес и причина («не установлен NVIDIA Container Toolkit»). Если карта исчезла позже, то же самое произойдёт при следующем создании контейнера: приложение никогда не стартует молча без своей видеокарты.
+- **Дрейф**: `DeviceRequests` и `Devices` контейнера читаются обратно из inspect и сравниваются с выбором, поэтому смена выбора даёт `restart_required` и пересоздаёт контейнер при следующем рестарте — как смена порта или квоты.
+- Категория `gpus` в `asc app settings` переключает карты по номерам, как хранилища бэкапов. Capability `app-gpus` сообщает клиенту, что демон поддерживает этот ключ.
+
+
 ### ⚠️ Проверка нехватки ресурсов и `--force` (DMN-099)
 
 Перед тем как что-либо скачивать или собирать, демон сравнивает `requirements:` манифеста и эффективную `quota:` с тем, что реально есть на хосте. Нехватка вызывает типизированную ошибку `pkg::resources::RequirementsNotMet` вместо продолжения — установка `cs2` (`requirements: { ram: 4G, disk: 80G, cpu: 2 }`) на ноду с 1 ядром/1 ГиБ раньше падала где-то внутри `docker create` сырой ошибкой движка (`Docker responded with status code 400: range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs available`); теперь она падает сразу с `installing 'cs2' needs more than the host has right now: RAM 4.0 GiB > 0.9 GiB, disk 80.0 GiB > 14.0 GiB, CPU 2 > 1`.
@@ -373,4 +389,4 @@ apps:
 
 ## 🔗 Связанные задачи
 
-DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, DMN-053, DMN-059, DMN-084, DMN-087, DMN-096, DMN-097, DMN-098, DMN-099, DMN-106, DMN-107, DMN-108, DMN-109, DMN-131, DMN-133, DMN-137, DMN-138, REG-001, REG-010, NODE-063, FE-223, REG-002, REG-005, REG-006, BE-002, BE-003, BE-028, BE-029, BE-030, NODE-031, NODE-032, NODE-033, NODE-040, NODE-041, NODE-042, NODE-043, BE-041, BE-043, BE-044, FE-090, FE-091, FE-111, FE-113, FE-114, FE-115 в [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 в [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).
+DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, DMN-053, DMN-059, DMN-084, DMN-087, DMN-096, DMN-097, DMN-098, DMN-099, DMN-106, DMN-107, DMN-108, DMN-109, DMN-131, DMN-133, DMN-137, DMN-138, DMN-143, REG-001, REG-010, NODE-063, FE-223, REG-002, REG-005, REG-006, BE-002, BE-003, BE-028, BE-029, BE-030, NODE-031, NODE-032, NODE-033, NODE-040, NODE-041, NODE-042, NODE-043, BE-041, BE-043, BE-044, FE-090, FE-091, FE-111, FE-113, FE-114, FE-115 в [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 в [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).

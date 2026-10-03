@@ -407,6 +407,8 @@ fn create_sends_container_spec() {
             tty: true,
             registry_auth: None,
             labels: std::collections::HashMap::new(),
+            gpu_ids: Vec::new(),
+            gpu_devices: Vec::new(),
         },
     )
     .unwrap();
@@ -415,6 +417,14 @@ fn create_sends_container_spec() {
     assert!(
         seen.iter().any(|h| h.contains("/containers/create")),
         "create must hit the Engine create endpoint, saw: {seen:?}"
+    );
+    let plain_body = seen
+        .iter()
+        .find(|h| h.starts_with("BODY ") && h.contains("PortBindings"))
+        .unwrap();
+    assert!(
+        !plain_body.contains("DeviceRequests") && !plain_body.contains(r#""Devices""#),
+        "an app without GPUs must not carry device entries, got: {plain_body}"
     );
     assert!(
         seen.iter()
@@ -445,6 +455,53 @@ fn create_sends_container_spec() {
     );
 }
 
+/// DMN-143: selected GPUs reach the Engine as a `DeviceRequest` (NVIDIA) and
+/// one-to-one device mappings (AMD/Intel).
+#[test]
+fn create_attaches_the_selected_gpus() {
+    let (cfg, _dir, hits) = test_cfg();
+
+    docker::create(
+        &cfg,
+        CreateSpec {
+            name: "asc-llm",
+            image: "ollama/ollama:latest",
+            env: Vec::new(),
+            ports: Vec::new(),
+            binds: Vec::new(),
+            nano_cpus: None,
+            memory_bytes: None,
+            command: None,
+            open_stdin: false,
+            tty: false,
+            registry_auth: None,
+            labels: std::collections::HashMap::new(),
+            gpu_ids: vec!["GPU-aaaa".into(), "GPU-bbbb".into()],
+            gpu_devices: vec!["/dev/dri/renderD128".into(), "/dev/kfd".into()],
+        },
+    )
+    .unwrap();
+
+    let seen = hits.lock().unwrap().clone();
+    let body = seen
+        .iter()
+        .find(|h| h.starts_with("BODY ") && h.contains("DeviceRequests"))
+        .unwrap_or_else(|| panic!("create must send the GPU request, saw: {seen:?}"));
+    assert!(body.contains(r#""Driver":"nvidia""#), "got: {body}");
+    assert!(
+        body.contains(r#""DeviceIDs":["GPU-aaaa","GPU-bbbb"]"#),
+        "got: {body}"
+    );
+    assert!(body.contains(r#""Capabilities":[["gpu"]]"#), "got: {body}");
+    assert!(
+        body.contains(r#""PathOnHost":"/dev/dri/renderD128""#)
+            && body.contains(r#""PathInContainer":"/dev/dri/renderD128""#)
+            && body.contains(r#""PathOnHost":"/dev/kfd""#)
+            && body.contains(r#""CgroupPermissions":"rwm""#),
+        "got: {body}"
+    );
+}
+
 #[test]
 fn container_applied_reads_inspect_and_tolerates_missing() {
     let (cfg, _dir, _hits) = test_cfg();
@@ -458,6 +515,7 @@ fn container_applied_reads_inspect_and_tolerates_missing() {
     assert_eq!(applied.ports, ["27015:27015/tcp"]);
     assert!(applied.binds.is_empty());
     assert_eq!((applied.nano_cpus, applied.memory), (0, 0));
+    assert!(applied.gpu_ids.is_empty() && applied.gpu_devices.is_empty());
     // A missing container (404) reads as None — the caller recreates it.
     assert!(
         docker::container_applied(&cfg, "missing")

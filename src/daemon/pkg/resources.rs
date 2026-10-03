@@ -199,6 +199,8 @@ mod tests {
             network: Vec::new(),
             disk_io: Vec::new(),
             gpus: Vec::new(),
+            temperatures: Vec::new(),
+            fans: Vec::new(),
             uptime_secs: 0,
         }
     }

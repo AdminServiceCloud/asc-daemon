@@ -4,8 +4,10 @@
 //! platform push stream are follow-up increments (see docs/monitoring.md).
 
 pub mod gpu;
+pub mod hardware;
 pub mod network;
 pub mod processes;
+pub mod sensors;
 pub mod sockets;
 pub mod system;
 
@@ -289,6 +291,8 @@ mod tests {
             network: Vec::new(),
             disk_io: Vec::new(),
             gpus: Vec::new(),
+            temperatures: Vec::new(),
+            fans: Vec::new(),
             uptime_secs: ts as u64,
         }
     }

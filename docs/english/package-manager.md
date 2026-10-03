@@ -165,7 +165,7 @@ setup:
 
 #### 🔌 Environment group delivery (`$env`)
 
-Alongside the reserved `$quota`/`$start_command`/`$backup` keys, `settings.json` accepts a fourth one: **`$env`** — an object of arbitrary `NAME: value` string pairs. It exists for the platform's Environment groups (org/project-scoped variable sets — [🌱 environments](../../../asc-platform/docs/features/environments.md)): a group connected to an app is resolved and merged by the platform, then written under this key the same way any other setting is, so it rides the same `settings.json` → apply-on-(re)start pipeline as everything above — no separate delivery channel.
+Alongside the reserved `$quota`/`$start_command`/`$backup` keys, `settings.json` accepts another one: **`$env`** — an object of arbitrary `NAME: value` string pairs. It exists for the platform's Environment groups (org/project-scoped variable sets — [🌱 environments](../../../asc-platform/docs/features/environments.md)): a group connected to an app is resolved and merged by the platform, then written under this key the same way any other setting is, so it rides the same `settings.json` → apply-on-(re)start pipeline as everything above — no separate delivery channel.
 
 ```json
 { "$env": { "BOT_TOKEN": "…", "TZ": "Europe/Moscow" } }
@@ -191,6 +191,22 @@ quota:
 - **native/process apps**: recorded in `meta.json`; cgroup enforcement is a next increment.
 - `max_disk` is recorded for every runtime; per-runtime disk enforcement (Docker storage-opt / fs quotas) arrives incrementally.
 - **User overrides** (DMN-030): the `quota` category of `asc app settings` overrides individual fields on top of the package values (`'-'` resets a field back); the override lands in `settings.json` and applies through the container recreate on the next restart.
+
+### 🎮 GPU passthrough (DMN-143)
+
+An app can be given one or more of the host's video cards. The choice is the reserved **`$gpus`** key of `settings.json` — a list of PCI addresses exactly as `asc hardware` prints them (an address, not an index: it keeps meaning the same card after another one is added):
+
+```json
+{ "$gpus": ["0000:01:00.0", "0000:03:00.0"] }
+```
+
+- **Docker apps only.** A native app already sees the host's devices; compose projects have no settings (a follow-up). Saving `$gpus` for any other runtime is refused.
+- **NVIDIA** — one Engine `DeviceRequest` (`Driver: nvidia`, `DeviceIDs`: the cards' UUIDs, `Capabilities: [[gpu]]`), the same thing `docker run --gpus device=<uuid>` sends. The NVIDIA Container Toolkit then mounts the driver libraries and device nodes; the daemon only has to name the cards.
+- **AMD and Intel** — plain device mappings, same path inside and outside, `rwm`: the card's `/dev/dri/renderD*` and `/dev/dri/card*` nodes, plus `/dev/kfd` (the ROCm compute interface) for AMD when it exists.
+- **Validation** when the values are saved (`SetAppSettings`, `asc app settings`): every address must be a card of this host that can be attached (see `attachable` in [🖥️ hardware](hardware.md)); the error names the address and the reason ("the NVIDIA Container Toolkit is not installed"). A card that has gone since is the same error at the next container create — the app is never silently started without its GPU.
+- **Drift**: the container's `DeviceRequests` and `Devices` are read back from inspect and compared with the selection, so a changed selection reports `restart_required` and recreates the container on the next restart, like a changed port or quota.
+- The `gpus` category of `asc app settings` toggles cards by number, like the backup storages. The capability `app-gpus` tells a client the daemon supports the key.
+
 
 ### ⚠️ Resource shortfall check and `--force` (DMN-099)
 
@@ -373,4 +389,4 @@ apps:
 
 ## 🔗 Related tasks
 
-DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, DMN-053, DMN-059, DMN-084, DMN-087, DMN-096, DMN-097, DMN-098, DMN-099, DMN-106, DMN-107, DMN-108, DMN-109, DMN-131, DMN-133, DMN-137, DMN-138, REG-001, REG-010, NODE-063, FE-223, REG-002, REG-005, REG-006, BE-002, BE-003, BE-028, BE-029, BE-030, NODE-031, NODE-032, NODE-033, NODE-040, NODE-041, NODE-042, NODE-043, BE-041, BE-043, BE-044, FE-090, FE-091, FE-111, FE-113, FE-114, FE-115 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).
+DMN-003, DMN-018, DMN-038, DMN-040, DMN-045, DMN-046, DMN-047, DMN-048, DMN-052, DMN-053, DMN-059, DMN-084, DMN-087, DMN-096, DMN-097, DMN-098, DMN-099, DMN-106, DMN-107, DMN-108, DMN-109, DMN-131, DMN-133, DMN-137, DMN-138, DMN-143, REG-001, REG-010, NODE-063, FE-223, REG-002, REG-005, REG-006, BE-002, BE-003, BE-028, BE-029, BE-030, NODE-031, NODE-032, NODE-033, NODE-040, NODE-041, NODE-042, NODE-043, BE-041, BE-043, BE-044, FE-090, FE-091, FE-111, FE-113, FE-114, FE-115 in [ROADMAP.md](../../../asc-platform/ROADMAP.md); GRW-011 in [ROADMAP-GROWTH.md](../../../asc-platform/ROADMAP-GROWTH.md).

@@ -1785,6 +1785,9 @@ pub(crate) struct RuntimeInputs {
     pub volumes: Vec<String>,
     /// The user's `$start_command` override, else the package's.
     pub start_command: Option<String>,
+    /// PCI addresses of the GPUs chosen in the `$gpus` setting (DMN-143),
+    /// resolved against the live hardware when the container is created.
+    pub gpus: Vec<String>,
 }
 
 pub(crate) fn runtime_inputs(
@@ -1798,6 +1801,7 @@ pub(crate) fn runtime_inputs(
             ports: Vec::new(),
             volumes: Vec::new(),
             start_command: values.start_command_override().map(str::to_string),
+            gpus: values.gpus()?,
         });
     };
     values.merge_defaults(&settings.settings);
@@ -1889,6 +1893,7 @@ pub(crate) fn runtime_inputs(
         ports,
         volumes,
         start_command,
+        gpus: values.gpus()?,
     })
 }
 
@@ -1990,6 +1995,10 @@ fn docker_create(
         labels.insert(docker::LABEL_APP_UUID.to_string(), uuid.to_string());
     }
 
+    // An unavailable card fails the create with its address (DMN-143): an app
+    // started without the GPU it was configured for just looks slow.
+    let gpus = super::gpus::grant_for(&inputs.gpus)?;
+
     docker::create(
         docker_cfg,
         docker::CreateSpec {
@@ -2008,6 +2017,8 @@ fn docker_create(
             tty: manifest.runtime.tty,
             registry_auth,
             labels,
+            gpu_ids: gpus.nvidia_ids,
+            gpu_devices: gpus.devices,
         },
     )
     .context("cannot create docker container")

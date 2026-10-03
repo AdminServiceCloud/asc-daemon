@@ -35,6 +35,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(monitor_settings).put(set_monitor_settings),
         )
         .route("/v1/network/interfaces", get(network_interfaces))
+        .route("/v1/hardware", get(hardware))
         // Real host listening-port inventory (DMN-103), see
         // docs/monitoring.md — distinct from /v1/ports above, which reports
         // what apps *declare*, not what is actually bound.
@@ -509,6 +510,20 @@ fn metrics_json(m: &crate::daemon::monitor::SystemMetrics) -> serde_json::Value 
             "write_bytes_per_sec": d.write_bytes_per_sec,
             "io_ms": d.io_ms,
         })).collect::<Vec<_>>(),
+        "temperatures": m.temperatures.iter().map(|t| serde_json::json!({
+            "kind": t.kind,
+            "device_id": t.device_id,
+            "chip": t.chip,
+            "label": t.label,
+            "temperature_c": t.temperature_c,
+            "max_c": t.max_c,
+            "crit_c": t.crit_c,
+        })).collect::<Vec<_>>(),
+        "fans": m.fans.iter().map(|f| serde_json::json!({
+            "chip": f.chip,
+            "label": f.label,
+            "rpm": f.rpm,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -537,6 +552,31 @@ async fn network_interfaces() -> Response {
         "interfaces": interfaces.iter().map(interface_json).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct HardwareQuery {
+    /// `?refresh=1` (or `true`) skips the ten-minute cache.
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+/// Hardware inventory (DMN-142), serialized straight from the monitor
+/// module's structs: their field names are the proto's.
+async fn hardware(Query(query): Query<HardwareQuery>) -> Response {
+    let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
+    let info = tokio::task::spawn_blocking(move || {
+        crate::daemon::monitor::hardware::hardware_info(refresh)
+    })
+    .await;
+    match info {
+        Ok(info) => Json(info).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// Real host listening ports (DMN-103), merged with Docker/app attribution —

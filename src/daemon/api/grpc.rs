@@ -310,6 +310,104 @@ fn metrics_to_pb(m: &crate::daemon::monitor::SystemMetrics) -> pb::SystemMetrics
                 io_ms: d.io_ms,
             })
             .collect(),
+        temperatures: m
+            .temperatures
+            .iter()
+            .map(|t| pb::SensorReading {
+                kind: t.kind.clone(),
+                device_id: t.device_id.clone(),
+                chip: t.chip.clone(),
+                label: t.label.clone(),
+                temperature_c: t.temperature_c,
+                max_c: t.max_c,
+                crit_c: t.crit_c,
+            })
+            .collect(),
+        fans: m
+            .fans
+            .iter()
+            .map(|f| pb::FanReading {
+                chip: f.chip.clone(),
+                label: f.label.clone(),
+                rpm: f.rpm,
+            })
+            .collect(),
+    }
+}
+
+/// Hardware inventory (DMN-142) → proto. Kept next to `metrics_to_pb`: the
+/// two mirror the monitor module's structs one to one.
+fn hardware_to_pb(h: &crate::daemon::monitor::hardware::HardwareInfo) -> pb::HardwareInfo {
+    pb::HardwareInfo {
+        machine: Some(pb::MachineInfo {
+            machine_type: h.machine.machine_type.clone(),
+            virtualization: h.machine.virtualization.clone(),
+            hypervisor_vendor: h.machine.hypervisor_vendor.clone(),
+            system_vendor: h.machine.system_vendor.clone(),
+            product_name: h.machine.product_name.clone(),
+        }),
+        cpu: Some(pb::CpuInfo {
+            vendor: h.cpu.vendor.clone(),
+            model: h.cpu.model.clone(),
+            sockets: h.cpu.sockets,
+            physical_cores: h.cpu.physical_cores,
+            threads: h.cpu.threads,
+            max_mhz: h.cpu.max_mhz,
+        }),
+        board: Some(pb::BoardInfo {
+            vendor: h.board.vendor.clone(),
+            name: h.board.name.clone(),
+            version: h.board.version.clone(),
+            bios_vendor: h.board.bios_vendor.clone(),
+            bios_version: h.board.bios_version.clone(),
+            bios_date: h.board.bios_date.clone(),
+        }),
+        memory: Some(pb::MemoryInfo {
+            total_bytes: h.memory.total_bytes,
+            modules: h
+                .memory
+                .modules
+                .iter()
+                .map(|m| pb::MemoryModule {
+                    slot: m.slot.clone(),
+                    size_bytes: m.size_bytes,
+                    kind: m.kind.clone(),
+                    speed_mts: m.speed_mts,
+                    configured_speed_mts: m.configured_speed_mts,
+                    manufacturer: m.manufacturer.clone(),
+                    part_number: m.part_number.clone(),
+                })
+                .collect(),
+        }),
+        disks: h
+            .disks
+            .iter()
+            .map(|d| pb::DiskInfo {
+                name: d.name.clone(),
+                model: d.model.clone(),
+                vendor: d.vendor.clone(),
+                size_bytes: d.size_bytes,
+                kind: d.kind.clone(),
+                transport: d.transport.clone(),
+            })
+            .collect(),
+        gpus: h
+            .gpus
+            .iter()
+            .map(|g| pb::GpuInfo {
+                id: g.id.clone(),
+                vendor: g.vendor.clone(),
+                pci_id: g.pci_id.clone(),
+                model: g.model.clone(),
+                vram_bytes: g.vram_bytes,
+                driver: g.driver.clone(),
+                uuid: g.uuid.clone(),
+                render_node: g.render_node.clone(),
+                card_node: g.card_node.clone(),
+                attachable: g.attachable,
+                attach_hint: g.attach_hint.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -432,6 +530,19 @@ impl MonitorService for Grpc {
         Ok(Response::new(pb::ListNetworkInterfacesResponse {
             interfaces: interfaces.iter().map(interface_to_pb).collect(),
         }))
+    }
+
+    async fn get_hardware_info(
+        &self,
+        request: Request<pb::GetHardwareInfoRequest>,
+    ) -> Result<Response<pb::HardwareInfo>, Status> {
+        let refresh = request.into_inner().refresh;
+        let info = tokio::task::spawn_blocking(move || {
+            crate::daemon::monitor::hardware::hardware_info(refresh)
+        })
+        .await
+        .map_err(|err| Status::internal(err.to_string()))?;
+        Ok(Response::new(hardware_to_pb(&info)))
     }
 
     async fn list_listening_ports(

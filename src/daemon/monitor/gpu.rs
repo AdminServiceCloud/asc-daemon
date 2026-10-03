@@ -251,7 +251,7 @@ fn read_number(path: &Path) -> Option<f64> {
 /// Output is read after the process exits, which is safe for the few hundred
 /// bytes `nvidia-smi` prints but would deadlock on a command that fills the
 /// 64 KiB pipe buffer — keep this for small, bounded output only.
-fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+pub(crate) fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())

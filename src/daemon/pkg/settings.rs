@@ -255,16 +255,19 @@ pub enum SettingCategory {
     Quota,
     StartCommand,
     Backups,
+    /// GPU passthrough (DMN-143): the `$gpus` reserved key.
+    Gpus,
 }
 
 impl SettingCategory {
-    pub const ALL: [SettingCategory; 6] = [
+    pub const ALL: [SettingCategory; 7] = [
         SettingCategory::Environments,
         SettingCategory::Ports,
         SettingCategory::Volumes,
         SettingCategory::Quota,
         SettingCategory::StartCommand,
         SettingCategory::Backups,
+        SettingCategory::Gpus,
     ];
 
     pub fn label(self) -> &'static str {
@@ -275,6 +278,7 @@ impl SettingCategory {
             SettingCategory::Quota => "quota",
             SettingCategory::StartCommand => "start_command",
             SettingCategory::Backups => "backups",
+            SettingCategory::Gpus => "gpus",
         }
     }
 }
@@ -759,6 +763,29 @@ impl SettingValues {
     /// the same settings.json → apply_settings/reconcile pipeline as every
     /// other setting; see [`SettingValues::extra_env`].
     pub const ENV_KEY: &'static str = "$env";
+    /// PCI addresses of the GPUs attached to the app's container (DMN-143),
+    /// e.g. `["0000:01:00.0"]` — see [`SettingValues::gpus`].
+    pub const GPUS_KEY: &'static str = "$gpus";
+
+    /// The GPUs chosen for this app (DMN-143, the `$gpus` key): PCI addresses
+    /// as listed by `asc hardware`, sorted and de-duplicated. An address, not
+    /// an index — it keeps meaning the same card after a card is added.
+    pub fn gpus(&self) -> Result<Vec<String>> {
+        let Some(value) = self.get(Self::GPUS_KEY) else {
+            return Ok(Vec::new());
+        };
+        let list: Vec<String> = serde_json::from_value(value.clone())
+            .context("$gpus must be a list of PCI addresses")?;
+        for address in &list {
+            if !crate::daemon::monitor::sensors::is_pci_address(address) {
+                bail!("invalid $gpus entry '{address}': expected a PCI address like 0000:01:00.0");
+            }
+        }
+        let mut list: Vec<String> = list.iter().map(|a| a.to_ascii_lowercase()).collect();
+        list.sort();
+        list.dedup();
+        Ok(list)
+    }
 
     /// The user's start-command override (the `start_command` editor
     /// category); wins over the package's `start_command`.
@@ -823,7 +850,11 @@ impl SettingValues {
     pub fn validate_against(&self, defs: &[SettingDef]) -> Result<()> {
         for key in self.map.keys() {
             match key.as_str() {
-                Self::QUOTA_KEY | Self::START_COMMAND_KEY | Self::BACKUP_KEY | Self::ENV_KEY => {}
+                Self::QUOTA_KEY
+                | Self::START_COMMAND_KEY
+                | Self::BACKUP_KEY
+                | Self::ENV_KEY
+                | Self::GPUS_KEY => {}
                 key if defs.iter().any(|d| d.key == key) => {}
                 other => bail!("unknown setting '{other}' for this app"),
             }
@@ -854,6 +885,7 @@ impl SettingValues {
         self.quota_override()?;
         self.backup_policy()?;
         self.extra_env()?;
+        self.gpus()?;
         Ok(())
     }
 
@@ -1435,6 +1467,27 @@ setup:
         assert!(!valid_key(SettingValues::START_COMMAND_KEY));
         assert!(!valid_key(SettingValues::BACKUP_KEY));
         assert!(!valid_key(SettingValues::ENV_KEY));
+        assert!(!valid_key(SettingValues::GPUS_KEY));
+    }
+
+    #[test]
+    fn gpus_are_pci_addresses_sorted_and_deduplicated() {
+        let mut values = SettingValues::default();
+        assert!(values.gpus().unwrap().is_empty());
+        values.set(
+            SettingValues::GPUS_KEY,
+            serde_json::json!(["0000:0B:00.0", "0000:01:00.0", "0000:0b:00.0"]),
+        );
+        assert_eq!(values.gpus().unwrap(), vec!["0000:01:00.0", "0000:0b:00.0"]);
+        // It is a reserved key: accepted even for an app with no schema.
+        assert!(values.validate_against(&[]).is_ok());
+
+        // An index is not an address; neither is a bare string.
+        values.set(SettingValues::GPUS_KEY, serde_json::json!(["0"]));
+        assert!(values.gpus().is_err());
+        assert!(values.validate_against(&[]).is_err());
+        values.set(SettingValues::GPUS_KEY, serde_json::json!("0000:01:00.0"));
+        assert!(values.gpus().is_err());
     }
 
     #[test]

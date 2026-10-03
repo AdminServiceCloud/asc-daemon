@@ -1005,6 +1005,12 @@ service MonitorService {
   // inventory, not a metric: MAC, MTU, state and every IPv4/IPv6 address
   // (DMN-074).
   rpc ListNetworkInterfaces(ListNetworkInterfacesRequest) returns (ListNetworkInterfacesResponse);
+  // What the machine is made of (DMN-142): machine type and virtualization,
+  // CPU, board and firmware, memory modules, disks and GPUs — an inventory,
+  // not a metric. Hardware barely changes, so the answer is cached for ten
+  // minutes unless `refresh` is set. Capability: "hardware". REST mirror:
+  // GET /v1/hardware[?refresh=1].
+  rpc GetHardwareInfo(GetHardwareInfoRequest) returns (HardwareInfo);
   // Real host listening-port inventory (DMN-103) — what is actually bound,
   // parsed from /proc/net/{tcp,tcp6,udp,udp6}, not what an app's settings
   // merely declare (see AppService.ListAppPorts for that). Attribution to a
@@ -1194,6 +1200,36 @@ message SystemMetrics {
   // Per-device disk read/write throughput (DMN-073); empty when
   // /proc/diskstats cannot be read.
   repeated DiskIoMetrics disk_io = 16;
+  // Temperatures from every device that has a sensor (DMN-144): CPU, GPU,
+  // disks, board, DIMMs, network cards. Empty on a virtual machine.
+  repeated SensorReading temperatures = 17;
+  // Fan tachometers from the same hwmon chips.
+  repeated FanReading fans = 18;
+}
+
+// One temperature sensor, attached to the device it sits on (DMN-144).
+// NVIDIA GPUs have no hwmon node; their temperature stays in GpuMetrics.
+message SensorReading {
+  // "cpu", "gpu", "disk", "board", "memory", "network" or "other".
+  string kind = 1;
+  // Identifies the device within its kind: "cpu"; a GPU's PCI address (the
+  // same id as HardwareInfo.gpus); a block device or NVMe controller name;
+  // a network interface name.
+  string device_id = 2;
+  // Kernel driver of the sensor chip, e.g. "coretemp", "nvme".
+  string chip = 3;
+  // Sensor label ("Package id 0", "Composite") or "tempN" when unnamed.
+  string label = 4;
+  double temperature_c = 5;
+  // Driver-reported warning and critical thresholds, when it has them.
+  optional double max_c = 6;
+  optional double crit_c = 7;
+}
+
+message FanReading {
+  string chip = 1;
+  string label = 2;
+  uint32 rpm = 3;
 }
 
 // One mounted real filesystem; sizes in bytes.
@@ -1249,6 +1285,109 @@ message GpuMetrics {
   uint64 memory_used = 6;
   optional double temperature_c = 7;
   optional double power_watts = 8;
+}
+
+message GetHardwareInfoRequest {
+  // Skip the ten-minute cache and read the hardware again.
+  bool refresh = 1;
+}
+
+// Hardware inventory (DMN-142). Fields a machine hides stay absent (typical
+// on a VPS: no DMI, no SMBIOS memory table) rather than being faked.
+message HardwareInfo {
+  MachineInfo machine = 1;
+  CpuInfo cpu = 2;
+  BoardInfo board = 3;
+  MemoryInfo memory = 4;
+  repeated DiskInfo disks = 5;
+  repeated GpuInfo gpus = 6;
+}
+
+message MachineInfo {
+  // "bare_metal", "virtual_machine", "container" or "unknown".
+  string machine_type = 1;
+  // "none", "kvm", "qemu", "vmware", "hyperv", "xen", "virtualbox", "openvz",
+  // "lxc", "docker", "wsl"... — what systemd-detect-virt would print, with
+  // DMI as the fallback.
+  string virtualization = 2;
+  // Hypervisor or cloud recognised from DMI ("DigitalOcean", "VMware").
+  optional string hypervisor_vendor = 3;
+  optional string system_vendor = 4;
+  optional string product_name = 5;
+}
+
+message CpuInfo {
+  optional string vendor = 1;
+  optional string model = 2;
+  uint32 sockets = 3;
+  uint32 physical_cores = 4;
+  // Logical CPUs.
+  uint32 threads = 5;
+  optional double max_mhz = 6;
+}
+
+// The motherboard and its firmware, from DMI.
+message BoardInfo {
+  optional string vendor = 1;
+  optional string name = 2;
+  optional string version = 3;
+  optional string bios_vendor = 4;
+  optional string bios_version = 5;
+  optional string bios_date = 6;
+}
+
+message MemoryInfo {
+  uint64 total_bytes = 1;
+  // Populated DIMM slots from SMBIOS; empty when the table is hidden.
+  repeated MemoryModule modules = 2;
+}
+
+message MemoryModule {
+  optional string slot = 1;
+  uint64 size_bytes = 2;
+  // "DDR4", "DDR5", "LPDDR5"...
+  optional string kind = 3;
+  // Rated speed, MT/s.
+  optional uint32 speed_mts = 4;
+  // Speed the module actually runs at, MT/s.
+  optional uint32 configured_speed_mts = 5;
+  optional string manufacturer = 6;
+  optional string part_number = 7;
+}
+
+message DiskInfo {
+  // Kernel block device name ("nvme0n1", "sda").
+  string name = 1;
+  optional string model = 2;
+  optional string vendor = 3;
+  uint64 size_bytes = 4;
+  // "nvme", "ssd", "hdd", "virtual" or "unknown".
+  string kind = 5;
+  // "nvme", "sata", "scsi", "usb", "virtio", "mmc" or "unknown".
+  string transport = 6;
+}
+
+message GpuInfo {
+  // PCI address ("0000:01:00.0"): stable across reboots and shared with
+  // SensorReading.device_id and the app's `$gpus` setting.
+  string id = 1;
+  // "nvidia", "amd", "intel" or "other".
+  string vendor = 2;
+  // "10de:2204".
+  string pci_id = 3;
+  string model = 4;
+  optional uint64 vram_bytes = 5;
+  optional string driver = 6;
+  // NVIDIA only: what `--gpus device=<uuid>` addresses.
+  optional string uuid = 7;
+  // "/dev/dri/renderD128" and "/dev/dri/card0", when the node exists.
+  optional string render_node = 8;
+  optional string card_node = 9;
+  // Whether an app container can be given this card on this host.
+  bool attachable = 10;
+  // Why not, as a code: "driver_not_loaded", "toolkit_missing",
+  // "no_render_node", "unsupported_vendor".
+  optional string attach_hint = 11;
 }
 
 message GetSystemMetricsRequest {}

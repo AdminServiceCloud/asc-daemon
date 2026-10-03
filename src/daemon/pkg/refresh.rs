@@ -119,6 +119,11 @@ struct Desired {
     /// id — the container is recreated onto it, like `docker compose up`.
     /// `None` when the image is not on the host: nothing to compare.
     image_id: Option<String>,
+    /// What the `$gpus` selection needs from the container (DMN-143). A
+    /// changed selection is drift like any other setting; a selected card
+    /// that is gone fails `load`, so the start proceeds with the container
+    /// as it is and the Engine reports the missing device itself.
+    gpus: super::gpus::GpuGrant,
 }
 
 impl Desired {
@@ -193,6 +198,7 @@ impl Desired {
             .map(|volume| volume_bind(volume, app_dir, owner))
             .collect::<Result<Vec<String>>>()?;
         binds.sort();
+        let gpus = super::gpus::grant_for(&inputs.gpus)?;
         Ok(Self {
             manifest,
             manifest_dir,
@@ -203,6 +209,7 @@ impl Desired {
             binds,
             command,
             image_id,
+            gpus,
         })
     }
 
@@ -229,6 +236,8 @@ impl Desired {
             && self.binds == actual.binds
             && nano_cpus == actual.nano_cpus
             && memory == actual.memory
+            && self.gpus.nvidia_ids == actual.gpu_ids
+            && self.gpus.devices == actual.gpu_devices
             && match &self.command {
                 Some(command) => actual.cmd.as_deref() == Some(std::slice::from_ref(command)),
                 None => true,

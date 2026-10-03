@@ -83,6 +83,12 @@ pub const CAPABILITIES: &[&str] = &[
     "app.setup",
     // DMN-140: ListAppVersionsResponse.branches, UpgradeAppRequest.branch/tag.
     "app.upgrade.ref",
+    // DMN-142: MonitorService.GetHardwareInfo, GET /v1/hardware.
+    "hardware",
+    // DMN-144: SystemMetrics.temperatures / fans.
+    "sensors",
+    // DMN-143: the reserved `$gpus` app setting.
+    "app-gpus",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -1660,6 +1666,21 @@ impl ApiState {
             let (file, _, config_dir) = s.settings_of(&ctx, &id)?;
             let defs = file.as_ref().map(|f| f.settings.as_slice()).unwrap_or(&[]);
             values.validate_against(defs)?;
+            // GPUs (DMN-143): only a Docker container can be handed a card,
+            // and every address must resolve to a card this host can attach
+            // — refuse here, while the caller is still looking at the form,
+            // rather than at the next start.
+            let gpus = values.gpus()?;
+            if !gpus.is_empty() {
+                let meta = s.manager.get_authorized(&ctx, &id)?;
+                if !matches!(
+                    meta.runtime,
+                    crate::daemon::apps::meta::Runtime::Docker { .. }
+                ) {
+                    anyhow::bail!("GPUs can only be attached to Docker apps");
+                }
+                pkg::gpus::grant_for(&gpus)?;
+            }
             std::fs::create_dir_all(&config_dir)
                 .with_context(|| format!("cannot create directory {}", config_dir.display()))?;
             values.save(&config_dir)?;

@@ -44,6 +44,9 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "app.install.cancel",
         "app.setup",
         "app.upgrade.ref",
+        "hardware",
+        "sensors",
+        "app-gpus",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()
@@ -92,6 +95,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
 /// for the daemon's background sampler.
 fn fake_metrics(timestamp: i64) -> asc_daemon::daemon::monitor::SystemMetrics {
     use asc_daemon::daemon::monitor::GpuMetrics;
+    use asc_daemon::daemon::monitor::sensors::{FanReading, SensorReading};
     use asc_daemon::daemon::monitor::system::*;
     SystemMetrics {
         timestamp,
@@ -142,6 +146,20 @@ fn fake_metrics(timestamp: i64) -> asc_daemon::daemon::monitor::SystemMetrics {
             read_bytes_per_sec: Some(1_000.0),
             write_bytes_per_sec: Some(500.0),
             io_ms: 42,
+        }],
+        temperatures: vec![SensorReading {
+            kind: "cpu".into(),
+            device_id: "cpu".into(),
+            chip: "coretemp".into(),
+            label: "Package id 0".into(),
+            temperature_c: 47.0,
+            max_c: Some(100.0),
+            crit_c: None,
+        }],
+        fans: vec![FanReading {
+            chip: "nct6798".into(),
+            label: "CPU Fan".into(),
+            rpm: 920,
         }],
         uptime_secs: 3600,
     }
@@ -300,6 +318,12 @@ mod rest {
         assert_eq!(m["gpus"][0]["memory_used"], 2_u64 * 1024 * 1024 * 1024);
         assert_eq!(m["disk_io"][0]["device"], "sda");
         assert_eq!(m["disk_io"][0]["read_bytes_per_sec"], 1_000.0);
+        assert_eq!(m["temperatures"][0]["kind"], "cpu");
+        assert_eq!(m["temperatures"][0]["label"], "Package id 0");
+        assert_eq!(m["temperatures"][0]["temperature_c"], 47.0);
+        assert_eq!(m["temperatures"][0]["max_c"], 100.0);
+        assert!(m["temperatures"][0]["crit_c"].is_null());
+        assert_eq!(m["fans"][0]["rpm"], 920);
 
         // History honours the limit and returns oldest-first.
         let (status, body) = call(&state, "GET", "/v1/metrics/history", Some(TOKEN), None).await;
@@ -326,6 +350,24 @@ mod rest {
         assert_eq!(status, StatusCode::OK);
         let interfaces = body["interfaces"].as_array().unwrap();
         assert!(interfaces.iter().any(|i| i["is_loopback"] == true));
+    }
+
+    #[tokio::test]
+    async fn hardware_inventory_rest() {
+        let (state, _ws) = test_state();
+        let (status, body) = call(&state, "GET", "/v1/hardware", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Whatever the test host is, it classifies itself.
+        assert!(body["machine"]["machine_type"].is_string());
+        assert!(body["cpu"]["threads"].as_u64().unwrap() >= 1);
+        assert!(body["memory"]["total_bytes"].as_u64().unwrap() > 0);
+        assert!(body["disks"].is_array());
+        assert!(body["gpus"].is_array());
+
+        let (status, _) = call(&state, "GET", "/v1/hardware?refresh=1", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(&state, "GET", "/v1/hardware", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -773,6 +815,21 @@ mod grpc {
         assert_eq!(metrics.gpus[0].temperature_c, Some(52.0));
         assert_eq!(metrics.disk_io[0].device, "sda");
         assert_eq!(metrics.disk_io[0].io_ms, 42);
+        assert_eq!(metrics.temperatures[0].device_id, "cpu");
+        assert_eq!(metrics.temperatures[0].max_c, Some(100.0));
+        assert_eq!(metrics.temperatures[0].crit_c, None);
+        assert_eq!(metrics.fans[0].rpm, 920);
+
+        let hardware = client
+            .get_hardware_info(with_auth(tonic::Request::new(pb::GetHardwareInfoRequest {
+                refresh: false,
+            })))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(hardware.cpu.unwrap().threads >= 1);
+        assert!(hardware.memory.unwrap().total_bytes > 0);
+        assert!(!hardware.machine.unwrap().machine_type.is_empty());
 
         let history = client
             .get_metrics_history(with_auth(tonic::Request::new(

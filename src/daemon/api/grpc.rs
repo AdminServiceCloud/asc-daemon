@@ -2115,6 +2115,27 @@ impl FileService for Grpc {
         }))
     }
 
+    async fn create_link(
+        &self,
+        request: Request<pb::CreateLinkRequest>,
+    ) -> Result<Response<pb::CreateLinkResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let kind = match pb::LinkKind::try_from(req.kind) {
+            Ok(pb::LinkKind::Symbolic) => files::LinkKind::Symbolic,
+            Ok(pb::LinkKind::Hard) => files::LinkKind::Hard,
+            _ => return Err(Status::invalid_argument("kind must be SYMBOLIC or HARD")),
+        };
+        let entry = self
+            .0
+            .create_link(ctx, req.app_id, req.path, req.target, kind)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::CreateLinkResponse {
+            entry: Some(file_entry_to_pb(&entry)),
+        }))
+    }
+
     async fn move_path(
         &self,
         request: Request<pb::MovePathRequest>,

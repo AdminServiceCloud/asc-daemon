@@ -49,6 +49,10 @@ See [📁 app-file-manager](../../../asc-platform/docs/features/app-file-manager
 
 An upload is written to a temporary file next to the target (`.asc-upload-<random>.part`, mode `0600`), fsynced, then renamed into place — the same atomic-write discipline used for the stored token. An interrupted upload never leaves a truncated file where a good one used to be — the temporary `.part` file simply stays behind and is cleaned up on the next attempt or a sweep. Without `overwrite`, a name collision is checked **before** the first byte is accepted.
 
+### 🔗 Links (DMN-146)
+
+`CreateLink` makes a symbolic (`symlink(2)`) or hard (`link(2)`) link at `path` pointing at `target`. The target is absolute or relative to the link's directory — the way `ln` takes it. A symbolic link stores it verbatim (a relative link survives the tree being moved) and may dangle; a hard link needs an existing non-directory on the same filesystem. An existing path is never replaced. App-scoped, the target is confined too, resolved lexically against the link's directory: a link leading out of the app cannot even be created.
+
 ### Archiving
 
 Only `tar.gz` is supported (`tar` + `flate2`, already daemon dependencies). The `zip` format is reserved in the protocol and answers `UNIMPLEMENTED` — adding a zip encoder would complicate the aarch64/armv7 cross-build matrix with its own set of optional dependencies, and minimal dependencies is a project rule. An archive contains exactly the requested names, with no symlink members.
@@ -71,6 +75,7 @@ Directory listing is capped at **10,000 entries**; past the cap, the response ca
 | `GET /v1/files/stat?path=&app_id=` | `FileService.StatPath` | Metadata for one path |
 | `POST /v1/files/directory {"path","parents","app_id"?}` | `FileService.CreateDirectory` | Create a directory |
 | `POST /v1/files/move {"source","destination","overwrite","app_id"?}` | `FileService.MovePath` | Move/rename |
+| `POST /v1/files/link {"path","target","kind":"symbolic"\|"hard","app_id"?}` | `FileService.CreateLink` | Create a symbolic or hard link |
 | `POST /v1/files/copy {"source","destination","overwrite","app_id"?}` | `FileService.CopyPath` | Copy |
 | `POST /v1/files/delete {"paths":[...],"recursive","app_id"?}` | `FileService.DeletePaths` | Delete; best-effort — one failure does not abort the rest |
 | `POST /v1/files/archive {"directory","names","archive_path","format","app_id"?}` | `FileService.CreateArchive` | Archive into `tar.gz` |
@@ -84,6 +89,7 @@ Directory listing is capped at **10,000 entries**; past the cap, the response ca
 ## 🔗 Related tasks
 
 - DMN-070 — `FileService` implementation in the daemon.
+- DMN-146 — `CreateLink`: symbolic and hard links.
 - DMN-086 — app-scoped `FileService` (`app_id`/`AppScope`), the `app_dir` field on `GetAppDisk`.
 - NODE-012 / BE-011 — nodeservice file RPCs and the platform REST facade that consume this API.
 - FE-008 — the "Files" tab on the node page.

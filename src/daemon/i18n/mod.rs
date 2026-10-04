@@ -224,6 +224,8 @@ pub enum Msg {
     PlatformNotConnected,
     PlatformStatus,
     PlatformInsecureUrl,
+    PlatformSshGranted,
+    PlatformSshFailed,
     PlatformDirectEnabled,
     TokenPrimaryLabel,
     TokenAccessLive,
@@ -777,6 +779,14 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::PlatformDirectEnabled => (
             "API exposed to the network over TLS; the platform will reach it directly",
             "API открыт в сеть по TLS; платформа будет обращаться к нему напрямую",
+        ),
+        Msg::PlatformSshGranted => (
+            "SSH access granted: the platform key was added to root's authorized_keys",
+            "SSH-доступ выдан: ключ платформы добавлен в authorized_keys пользователя root",
+        ),
+        Msg::PlatformSshFailed => (
+            "warning: could not add the platform SSH key ({}); add it by hand or set up the connection on the platform",
+            "внимание: не удалось добавить SSH-ключ платформы ({}); добавьте его вручную или настройте подключение на платформе",
         ),
         Msg::PlatformInsecureUrl => (
             "warning: the platform URL uses plain HTTP; the registration token is sent unencrypted",

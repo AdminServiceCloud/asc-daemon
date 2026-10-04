@@ -84,7 +84,8 @@ The daemon sends one request to the platform's public bootstrap endpoint:
 POST <url>/bootstrap/asc.node.v1.BootstrapService/RegisterNode
 Content-Type: application/json
 
-{"token":"…","hostname":"…","primaryIp":"…","os":"…","arch":"x86_64","daemonVersion":"0.10.0"}
+{"token":"…","hostname":"…","primaryIp":"…","os":"…","arch":"x86_64","daemonVersion":"0.56.0",
+ "apiToken":"…","sshPort":22,"sshUser":"root","sshHostKeys":["ssh-ed25519 AAAA…","ecdsa-sha2-nistp256 AAAA…"]}
 ```
 
 The body is sent through stdin rather than as a command argument, so the token
@@ -93,6 +94,26 @@ once — and replies with the node and organization ids.
 
 `http://` URLs are permitted for local development, with a warning: the token
 crosses the network unencrypted.
+
+### 🔑 SSH access for the platform (DMN-145)
+
+A node added with the install command was never logged into by the platform,
+so it used to end up registered and still unreachable. Registration now hands
+the platform its way in:
+
+- the request carries sshd's port (`sshd -T`, falling back to `sshd_config`,
+  then 22), the account to log in as (`root` — registration runs as root) and
+  the host's public keys from `/etc/ssh/ssh_host_*_key.pub`, so the platform can
+  pin the one its SSH client will be shown;
+- the API token is sent in SSH mode too — nothing else would ever read it off
+  the machine;
+- the platform answers with `sshAuthorizedKey`, a key it generated for this
+  node, and the daemon appends it to `/root/.ssh/authorized_keys` (idempotently,
+  via the same code as `asc users`' authorized-keys management).
+
+A key that cannot be installed is reported as a warning — the node is
+registered either way, and the key can be added by hand. A node that already
+has SSH credentials on the platform gets no new key.
 
 ### Failure handling
 
@@ -109,7 +130,8 @@ reach the daemon.
 
 **Through SSH (default).** The API stays on loopback and the platform forwards
 to it over the SSH connection it already holds. Nothing is exposed to the
-network; the platform reads `/etc/asc/api.token` during installation.
+network; the platform reads `/etc/asc/api.token` during installation or,
+for a node added with the install command, receives it at registration.
 
 **Directly (`--direct`).** The API moves to `0.0.0.0` and serves TLS. The two
 are switched on together and never apart: the bearer token grants full control
@@ -119,8 +141,9 @@ platform pins its SHA-256 fingerprint at registration, exactly as it pins an
 SSH host key. The daemon hands its API token to the platform inside the
 registration call, because without SSH there is no other way to deliver it.
 
-A node installed with the plain command and no `--direct` cannot report its
-status at all: the platform has neither SSH access nor an endpoint to dial.
+A node installed with the plain command and no `--direct` is reached over the
+SSH access granted at registration (DMN-145); only an older daemon, which
+grants none, stays unable to report its status.
 
 ```toml
 [api]
@@ -177,6 +200,6 @@ with the platform tunnel (NODE-002 on the platform side).
 
 ## 🔗 Related tasks
 
-DMN-058 in the [ROADMAP](../../../asc-platform/ROADMAP.md); on the platform
-side — NODE-001 (node registry and registration tokens) and NODE-002 (the
-platform ↔ daemon channel).
+DMN-058, DMN-145 in the [ROADMAP](../../../asc-platform/ROADMAP.md); on the platform
+side — NODE-001 (node registry and registration tokens), NODE-002 (the
+platform ↔ daemon channel) and NODE-067 (SSH access granted at registration).

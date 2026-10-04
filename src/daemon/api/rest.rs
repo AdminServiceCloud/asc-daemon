@@ -118,6 +118,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/files/stat", get(stat_path))
         .route("/v1/files/directory", post(create_directory))
         .route("/v1/files/move", post(move_path))
+        .route("/v1/files/link", post(create_link))
         .route("/v1/files/copy", post(copy_path))
         .route("/v1/files/delete", post(delete_paths))
         .route("/v1/files/archive", post(create_archive))
@@ -1907,6 +1908,42 @@ async fn create_directory(
 ) -> Result<Response, ApiError> {
     let entry = state
         .create_directory(ctx, body.app_id, body.path, body.parents)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "entry": file_entry_json(&entry) })),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct LinkBody {
+    path: String,
+    target: String,
+    /// "symbolic" (default) or "hard".
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    app_id: Option<String>,
+}
+
+async fn create_link(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<LinkBody>,
+) -> Result<Response, ApiError> {
+    let kind = match body.kind.as_deref().unwrap_or("symbolic") {
+        "symbolic" | "symlink" => files::LinkKind::Symbolic,
+        "hard" => files::LinkKind::Hard,
+        other => {
+            return Err(anyhow::Error::from(files::FileError::InvalidPath(format!(
+                "kind must be \"symbolic\" or \"hard\", got {other:?}"
+            )))
+            .into());
+        }
+    };
+    let entry = state
+        .create_link(ctx, body.app_id, body.path, body.target, kind)
         .await?;
     Ok((
         StatusCode::CREATED,

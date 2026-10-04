@@ -8,6 +8,12 @@
 //! There is no tunnel yet (that is NODE-002 on the platform side), so a
 //! registered node is exactly that — registered. It does not report health and
 //! the platform will not show it as online until the channel exists.
+//!
+//! Registration also gives the platform its way in (DMN-145): the daemon
+//! reports how sshd is reached and which host keys it presents, and installs
+//! the public key the platform answers with into root's `authorized_keys`.
+//! Without that a node added with the install command was registered and
+//! still unreachable — nothing else ever puts a platform key on it.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +23,10 @@ use tracing::warn;
 
 use crate::daemon::config::Config;
 use crate::daemon::http;
+
+/// The account the platform logs in as. Registration runs as root, and root
+/// is what an SSH-provisioned node is reached as too.
+const SSH_USER: &str = "root";
 
 /// Default platform, used when `--url` is omitted.
 pub const DEFAULT_PLATFORM_URL: &str = "https://adminservice.cloud";
@@ -56,6 +66,10 @@ struct RegisterResponse {
     node_id: String,
     #[serde(default, rename = "organizationId")]
     organization_id: String,
+    /// The platform's key for this node; empty when it already had SSH
+    /// access or did not ask for any.
+    #[serde(default, rename = "sshAuthorizedKey")]
+    ssh_authorized_key: String,
 }
 
 /// Store the token and URL, then register with the platform.
@@ -84,15 +98,12 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
     // SSH connection, or straight to the API when it is exposed with TLS.
     let advertised = direct_endpoint(config);
     let api_endpoint = advertised.endpoint.clone();
-    // Handed over only in direct mode: with SSH the platform reads the token
-    // off the machine itself, and there is no reason to send it twice.
-    let api_token = if api_endpoint.is_empty() {
-        String::new()
-    } else {
-        std::fs::read_to_string(crate::daemon::api::api_token_path())
-            .map(|value| value.trim().to_string())
-            .unwrap_or_default()
-    };
+    // Handed over in both modes: a node that registers itself was never
+    // logged into by the platform, so nothing else would ever read it — over
+    // SSH included (the platform used to read it only after provisioning).
+    let api_token = std::fs::read_to_string(crate::daemon::api::api_token_path())
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
     let body = serde_json::json!({
         "token": token,
         "hostname": hostname(),
@@ -105,6 +116,9 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
         "tlsMode": advertised.tls_mode,
         "domain": advertised.domain,
         "apiToken": api_token,
+        "sshPort": ssh_port(),
+        "sshUser": SSH_USER,
+        "sshHostKeys": ssh_host_keys(),
     })
     .to_string();
 
@@ -120,11 +134,133 @@ pub fn register(config: &mut Config, token: &str, url: Option<&str>) -> Result<R
     config.platform.registered_at = Some(now_rfc3339());
     config.save().context("cannot save config.toml")?;
 
+    // The node is registered either way: a key that cannot be installed is
+    // reported, and the operator can still add it by hand or finish the
+    // connection settings on the platform.
+    let ssh_access = install_platform_key(&parsed.ssh_authorized_key);
+
     Ok(Registration {
         node_id: parsed.node_id,
         organization_id: parsed.organization_id,
         platform_url,
+        ssh_access,
     })
+}
+
+/// What became of the platform's SSH key.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SshAccess {
+    /// The key is in root's `authorized_keys` (or already was).
+    Granted,
+    /// The platform sent none: the node already had SSH credentials there.
+    NotOffered,
+    Failed(String),
+}
+
+/// Tell the operator running the install what became of the key — shared by
+/// `asc connect` and `asc-updater install --token`.
+pub fn print_ssh_access(access: &SshAccess) {
+    use crate::daemon::i18n::{Msg, t, tf};
+    match access {
+        SshAccess::Granted => println!("{}", t(Msg::PlatformSshGranted)),
+        SshAccess::NotOffered => {}
+        SshAccess::Failed(reason) => eprintln!("{}", tf(Msg::PlatformSshFailed, reason)),
+    }
+}
+
+fn install_platform_key(key: &str) -> SshAccess {
+    let key = key.trim();
+    if key.is_empty() {
+        return SshAccess::NotOffered;
+    }
+    match crate::daemon::users::add_authorized_key(SSH_USER, key) {
+        Ok(_) => SshAccess::Granted,
+        Err(err) => {
+            warn!("cannot install the platform ssh key: {err}");
+            SshAccess::Failed(err.to_string())
+        }
+    }
+}
+
+/// sshd's effective port. `sshd -T` answers with the configuration it would
+/// actually run with (includes, Match-free defaults); reading sshd_config is
+/// the fallback for when it cannot — no host keys yet, or no sshd binary on
+/// PATH — and 22 the last resort.
+fn ssh_port() -> u16 {
+    for binary in ["sshd", "/usr/sbin/sshd"] {
+        if let Ok(out) = std::process::Command::new(binary).arg("-T").output()
+            && out.status.success()
+            && let Some(port) = port_from_sshd_t(&String::from_utf8_lossy(&out.stdout))
+        {
+            return port;
+        }
+    }
+    std::fs::read_to_string("/etc/ssh/sshd_config")
+        .ok()
+        .and_then(|text| port_from_sshd_config(&text))
+        .unwrap_or(22)
+}
+
+/// The first `port N` line of `sshd -T` output (lowercase keys, one per line).
+fn port_from_sshd_t(text: &str) -> Option<u16> {
+    text.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next() == Some("port"))
+            .then(|| parts.next()?.parse().ok())
+            .flatten()
+    })
+}
+
+/// The first global `Port` directive of sshd_config. Keywords are
+/// case-insensitive; everything after a `Match` block starts applies only
+/// conditionally, so the scan stops there.
+fn port_from_sshd_config(text: &str) -> Option<u16> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line
+            .split(|c: char| c.is_whitespace() || c == '=')
+            .filter(|p| !p.is_empty());
+        let Some(keyword) = parts.next() else {
+            continue;
+        };
+        if keyword.eq_ignore_ascii_case("match") {
+            return None;
+        }
+        if keyword.eq_ignore_ascii_case("port") {
+            return parts.next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// The host's public keys as `<algo> <base64>`, for the platform to pin the
+/// one its SSH client will be shown. Comments are dropped: they name the
+/// machine at the time the key was generated, nothing the pin needs.
+fn ssh_host_keys() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/etc/ssh") else {
+        return Vec::new();
+    };
+    let mut names: Vec<_> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ssh_host_") && name.ends_with("_key.pub"))
+        .collect();
+    names.sort();
+    names
+        .iter()
+        .filter_map(|name| std::fs::read_to_string(Path::new("/etc/ssh").join(name)).ok())
+        .filter_map(|text| host_key_line(&text))
+        .collect()
+}
+
+fn host_key_line(text: &str) -> Option<String> {
+    let mut parts = text.split_whitespace();
+    let algo = parts.next()?;
+    let blob = parts.next()?;
+    (algo.starts_with("ssh-") || algo.starts_with("ecdsa-")).then(|| format!("{algo} {blob}"))
 }
 
 /// What the platform needs in order to dial this daemon directly.
@@ -251,6 +387,7 @@ pub struct Registration {
     pub node_id: String,
     pub organization_id: String,
     pub platform_url: String,
+    pub ssh_access: SshAccess,
 }
 
 /// Write a secret file with 0600 permissions, creating its directory.
@@ -348,5 +485,44 @@ mod tests {
         );
         assert!(normalize_url("ftp://example.com").is_err());
         assert!(normalize_url("adminservice.cloud").is_err());
+    }
+
+    #[test]
+    fn sshd_port_is_read_from_the_effective_configuration() {
+        assert_eq!(
+            port_from_sshd_t("permitrootlogin yes\nport 2222\nport 22\n"),
+            Some(2222)
+        );
+        assert_eq!(port_from_sshd_t("passwordauthentication no\n"), None);
+    }
+
+    #[test]
+    fn sshd_config_port_stops_at_the_first_match_block() {
+        assert_eq!(
+            port_from_sshd_config("# Port 1\n  port = 2200\n"),
+            Some(2200)
+        );
+        assert_eq!(port_from_sshd_config("Port\t2022\nPort 22\n"), Some(2022));
+        assert_eq!(port_from_sshd_config("Match User git\n  Port 2222\n"), None);
+        assert_eq!(port_from_sshd_config("PermitRootLogin yes\n"), None);
+    }
+
+    #[test]
+    fn host_keys_lose_their_comment() {
+        assert_eq!(
+            host_key_line("ssh-ed25519 AAAAC3Nza root@node\n").as_deref(),
+            Some("ssh-ed25519 AAAAC3Nza")
+        );
+        assert_eq!(
+            host_key_line("ecdsa-sha2-nistp256 AAAAE2Vj").as_deref(),
+            Some("ecdsa-sha2-nistp256 AAAAE2Vj")
+        );
+        assert_eq!(host_key_line("garbage"), None);
+        assert_eq!(host_key_line("command=\"x\" ssh-rsa AAAA"), None);
+    }
+
+    #[test]
+    fn no_key_from_the_platform_means_nothing_to_install() {
+        assert_eq!(install_platform_key("  "), SshAccess::NotOffered);
     }
 }

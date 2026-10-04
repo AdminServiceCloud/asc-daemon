@@ -5001,6 +5001,7 @@ fn connect_cmd(mut config: Config, token: &str, url: Option<&str>) -> anyhow::Re
             &registration.node_id
         )
     );
+    platform::print_ssh_access(&registration.ssh_access);
     Ok(())
 }
 

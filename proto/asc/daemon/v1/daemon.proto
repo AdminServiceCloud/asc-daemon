@@ -1593,6 +1593,8 @@ service FileService {
   rpc MovePath(MovePathRequest) returns (MovePathResponse);
   rpc CopyPath(CopyPathRequest) returns (CopyPathResponse);
   rpc DeletePaths(DeletePathsRequest) returns (DeletePathsResponse);
+  // A symbolic or hard link at path pointing at target (DMN-146).
+  rpc CreateLink(CreateLinkRequest) returns (CreateLinkResponse);
   rpc CreateArchive(CreateArchiveRequest) returns (CreateArchiveResponse);
   rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
   rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse);
@@ -1693,6 +1695,31 @@ message MovePathRequest {
 }
 
 message MovePathResponse {
+  FileEntry entry = 1;
+}
+
+enum LinkKind {
+  LINK_KIND_UNSPECIFIED = 0;
+  // symlink(2): target is stored as given — absolute, or relative to the
+  // link's own directory — and need not exist.
+  LINK_KIND_SYMBOLIC = 1;
+  // link(2): target must be an existing non-directory on the same
+  // filesystem; relative targets resolve against the link's directory.
+  LINK_KIND_HARD = 2;
+}
+
+message CreateLinkRequest {
+  // The link to create. Never overwritten: an existing path is refused.
+  string path = 1;
+  string target = 2;
+  LinkKind kind = 3;
+  // See ListDirectoryRequest.app_id. Confines the link and, resolved
+  // against the link's directory, its target too — a link planted in an
+  // app must not lead out of it.
+  optional string app_id = 4;
+}
+
+message CreateLinkResponse {
   FileEntry entry = 1;
 }
 

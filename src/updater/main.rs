@@ -176,14 +176,17 @@ fn enable_direct_api(config: &mut Config) -> Result<()> {
 /// failures.
 fn connect(config: &mut Config, token: &str, url: Option<&str>) {
     match platform::register(config, token, url) {
-        Ok(registration) => println!(
-            "{}",
-            tf2(
-                Msg::PlatformRegistered,
-                &registration.platform_url,
-                &registration.node_id
-            )
-        ),
+        Ok(registration) => {
+            println!(
+                "{}",
+                tf2(
+                    Msg::PlatformRegistered,
+                    &registration.platform_url,
+                    &registration.node_id
+                )
+            );
+            platform::print_ssh_access(&registration.ssh_access);
+        }
         Err(err) => {
             eprintln!("{}", tf(Msg::PlatformRegisterFailed, format!("{err:#}")));
             eprintln!("{}", t(Msg::PlatformRetryHint));

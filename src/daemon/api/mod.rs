@@ -1928,6 +1928,21 @@ impl ApiState {
         .await
     }
 
+    pub async fn create_link(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        app_id: Option<String>,
+        path: String,
+        target: String,
+        kind: files::LinkKind,
+    ) -> Result<files::FileEntry> {
+        self.blocking(move |s| {
+            let scope = s.app_file_scope(&ctx, &app_id)?;
+            Ok(files::create_link(&path, &target, kind, scope.as_ref())?)
+        })
+        .await
+    }
+
     pub async fn move_path(
         self: &Arc<Self>,
         ctx: UserContext,

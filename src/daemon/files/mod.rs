@@ -466,6 +466,87 @@ pub fn move_path(
     describe(&dst_target)
 }
 
+/// What [`create_link`] makes (DMN-146).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    /// `symlink(2)`: the target is stored exactly as given and need not exist.
+    Symbolic,
+    /// `link(2)`: a second name for an existing non-directory.
+    Hard,
+}
+
+/// Create a link at `raw_path` pointing at `raw_target`. The target may be
+/// absolute or relative to the link's directory — the way `ln -s` takes it —
+/// and a symbolic link keeps it verbatim, so a relative link survives the
+/// tree being moved. An existing path is never replaced.
+///
+/// In an app scope the target is confined too, resolved against the link's
+/// directory: reading through a planted link is already refused, but a link
+/// that leads out of the app should not be creatable in the first place.
+pub fn create_link(
+    raw_path: &str,
+    raw_target: &str,
+    kind: LinkKind,
+    scope: Option<&AppScope>,
+) -> Result<FileEntry> {
+    let safe = SafePath::parse(raw_path)?;
+    // Checked before scoping: canonicalizing an existing symlink would follow
+    // it and report on the wrong path.
+    if std::fs::symlink_metadata(safe.as_path()).is_ok() {
+        return Err(FileError::Exists(safe.as_path().to_path_buf()));
+    }
+    let link = scoped(&safe, scope)?;
+    if is_protected(&link) || in_pseudo_root(&link) {
+        return Err(FileError::Protected(link));
+    }
+    if raw_target.is_empty() || raw_target.contains('\0') {
+        return Err(FileError::InvalidPath(
+            "link target must not be empty".into(),
+        ));
+    }
+    let parent = safe.parent().unwrap_or(safe.clone());
+    let resolved = SafePath::parse(&resolve_link_target(parent.as_path(), raw_target))?;
+    let resolved_target = scoped(&resolved, scope)?;
+
+    match kind {
+        LinkKind::Symbolic => {
+            std::os::unix::fs::symlink(raw_target, &link).map_err(|e| FileError::io(&link, e))?
+        }
+        LinkKind::Hard => {
+            let meta = std::fs::symlink_metadata(&resolved_target)
+                .map_err(|e| FileError::io(&resolved_target, e))?;
+            if meta.is_dir() {
+                return Err(FileError::IsADirectory(resolved_target));
+            }
+            std::fs::hard_link(&resolved_target, &link).map_err(|e| FileError::io(&link, e))?;
+        }
+    }
+    describe(&link)
+}
+
+/// `target` as an absolute path, the way the kernel would resolve it from a
+/// link in `dir` — lexically, `..` included, without touching the disk. A
+/// `..` past `/` stays at `/`, as it does in the kernel.
+fn resolve_link_target(dir: &Path, target: &str) -> String {
+    use std::path::Component;
+    let joined = if target.starts_with('/') {
+        PathBuf::from(target)
+    } else {
+        dir.join(target)
+    };
+    let mut normalized = PathBuf::from("/");
+    for component in joined.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    normalized.display().to_string()
+}
+
 pub fn copy_path(
     raw_source: &str,
     raw_destination: &str,
@@ -1226,6 +1307,114 @@ mod tests {
 
         let result = list_directory(&outside.path().display().to_string(), false, Some(&scope));
         assert!(matches!(result, Err(FileError::OutsideScope(_))));
+    }
+
+    #[test]
+    fn symbolic_links_keep_their_target_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("shared")).unwrap();
+        std::fs::write(dir.path().join("shared/app.conf"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("site")).unwrap();
+        let link = dir.path().join("site/app.conf");
+
+        let entry = create_link(
+            &link.display().to_string(),
+            "../shared/app.conf",
+            LinkKind::Symbolic,
+            None,
+        )
+        .unwrap();
+        assert!(entry.is_symlink);
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            PathBuf::from("../shared/app.conf")
+        );
+        assert_eq!(std::fs::read(&link).unwrap(), b"x");
+
+        // A dangling symbolic link is legal; an existing path is never replaced.
+        create_link(
+            &dir.path().join("later").display().to_string(),
+            "/nonexistent/yet",
+            LinkKind::Symbolic,
+            None,
+        )
+        .unwrap();
+        let err = create_link(
+            &link.display().to_string(),
+            "/etc/hostname",
+            LinkKind::Symbolic,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FileError::Exists(_)));
+    }
+
+    #[test]
+    fn hard_links_need_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data"), b"payload").unwrap();
+
+        create_link(
+            &dir.path().join("alias").display().to_string(),
+            "data",
+            LinkKind::Hard,
+            None,
+        )
+        .unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(dir.path().join("data")).unwrap().nlink(),
+            2
+        );
+
+        let missing = create_link(
+            &dir.path().join("ghost").display().to_string(),
+            "nope",
+            LinkKind::Hard,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(missing, FileError::NotFound(_)));
+        let directory = create_link(
+            &dir.path().join("dirlink").display().to_string(),
+            dir.path().display().to_string().as_str(),
+            LinkKind::Hard,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(directory, FileError::IsADirectory(_)));
+    }
+
+    #[test]
+    fn links_cannot_lead_out_of_an_app_scope() {
+        let app = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scope = AppScope::new(vec![app.path().to_path_buf()]).unwrap();
+        let link = app.path().join("escape").display().to_string();
+
+        let absolute = create_link(
+            &link,
+            &outside.path().display().to_string(),
+            LinkKind::Symbolic,
+            Some(&scope),
+        )
+        .unwrap_err();
+        assert!(matches!(absolute, FileError::OutsideScope(_)));
+        let relative =
+            create_link(&link, "../../..", LinkKind::Symbolic, Some(&scope)).unwrap_err();
+        assert!(matches!(relative, FileError::OutsideScope(_)));
+        assert!(std::fs::symlink_metadata(app.path().join("escape")).is_err());
+
+        create_link(&link, "./data", LinkKind::Symbolic, Some(&scope)).unwrap();
+    }
+
+    #[test]
+    fn link_targets_resolve_like_the_kernel_does() {
+        let dir = Path::new("/srv/site");
+        assert_eq!(resolve_link_target(dir, "../shared/a"), "/srv/shared/a");
+        assert_eq!(resolve_link_target(dir, "./a/./b"), "/srv/site/a/b");
+        assert_eq!(resolve_link_target(dir, "/etc/x"), "/etc/x");
+        assert_eq!(resolve_link_target(dir, "../../../.."), "/");
     }
 
     #[test]

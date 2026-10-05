@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod complete;
+mod fail2ban;
+mod firewall;
+mod wireguard;
 
 use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
@@ -200,6 +203,24 @@ enum Command {
     Web {
         #[command(subcommand)]
         action: WebAction,
+    },
+    /// The node's firewall: nftables rules with an automatic rollback,
+    /// allow/block lists of addresses and an expert RAW mode (DMN-148)
+    Firewall {
+        #[command(subcommand)]
+        action: firewall::FirewallAction,
+    },
+    /// The node's fail2ban: install it, switch jails on and off, list and
+    /// release bans (DMN-150)
+    Fail2ban {
+        #[command(subcommand)]
+        action: fail2ban::Fail2banAction,
+    },
+    /// The node's WireGuard: tunnels, peers with generated keys and client
+    /// configs, import of a ready .conf (DMN-152)
+    Wireguard {
+        #[command(subcommand)]
+        action: wireguard::WireguardAction,
     },
     /// Manage daemon configuration
     Config {
@@ -982,6 +1003,9 @@ fn run() -> anyhow::Result<()> {
         Command::Backup { action } => backup_cmd(action, &config),
         Command::Schedule { action } => schedule_cmd(action, &config),
         Command::Web { action } => web_cmd(action, &config),
+        Command::Firewall { action } => firewall::run(action, &config),
+        Command::Fail2ban { action } => fail2ban::run(action, &config),
+        Command::Wireguard { action } => wireguard::run(action, &config),
         Command::Config { action } => config_cmd(action, config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
         // Both were handled above, before the config was loaded.

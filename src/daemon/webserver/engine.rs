@@ -4,10 +4,7 @@
 //! network). Blocking; the manager calls this from worker threads.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
 
 use anyhow::{Context, Result, bail};
 
@@ -15,6 +12,7 @@ use super::model::{HostProfile, Mode, Settings};
 use super::render::Paths;
 use crate::daemon::config::DockerConfig;
 use crate::daemon::docker;
+use crate::daemon::exec::{OsRelease, has_command, os_release, run_captured, run_streaming};
 
 pub const CONTAINER: &str = "asc-webserver";
 const SYSTEM_CONF: &str = "/etc/nginx/nginx.conf";
@@ -44,8 +42,7 @@ fn content_binds(settings: &Settings) -> Vec<String> {
         .collect()
 }
 
-/// Progress sink for long operations: one human line at a time.
-pub type Progress<'a> = &'a mut dyn FnMut(&str);
+pub use crate::daemon::exec::Progress;
 
 /// Where the main `nginx.conf` lives for a mode.
 pub fn main_conf_path(mode: Mode, paths: &Paths) -> PathBuf {
@@ -89,38 +86,6 @@ pub fn parse_version_output(output: &str) -> Option<String> {
 /// IPv6 is usable when the kernel has any inet6 address at all.
 pub fn host_has_ipv6() -> bool {
     std::fs::read_to_string("/proc/net/if_inet6").is_ok_and(|s| !s.trim().is_empty())
-}
-
-#[derive(Debug, Default, Clone)]
-struct OsRelease {
-    id: String,
-    id_like: String,
-    codename: String,
-}
-
-fn os_release() -> OsRelease {
-    let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let mut out = OsRelease::default();
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"').to_ascii_lowercase();
-        match key.trim() {
-            "ID" => out.id = value,
-            "ID_LIKE" => out.id_like = value,
-            "VERSION_CODENAME" => out.codename = value,
-            "UBUNTU_CODENAME" if out.codename.is_empty() => out.codename = value,
-            _ => {}
-        }
-    }
-    out
-}
-
-impl OsRelease {
-    fn is(&self, family: &str) -> bool {
-        self.id == family || self.id_like.split_whitespace().any(|f| f == family)
-    }
 }
 
 /// Reads what the generated `nginx.conf` must keep from the one the
@@ -215,74 +180,6 @@ pub fn default_server_ports(text: &str) -> (bool, bool) {
 fn user_exists(name: &str) -> bool {
     std::fs::read_to_string("/etc/passwd")
         .is_ok_and(|p| p.lines().any(|l| l.split(':').next() == Some(name)))
-}
-
-// ── Commands ────────────────────────────────────────────────────────────────
-
-/// Runs a command, forwarding every output line to `progress`.
-fn run_streaming(cmd: &str, args: &[&str], progress: Progress<'_>) -> Result<()> {
-    progress(&format!("$ {cmd} {}", args.join(" ")));
-    let mut child = Command::new(cmd)
-        .args(args)
-        .env("DEBIAN_FRONTEND", "noninteractive")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("cannot run {cmd}"))?;
-    let (tx, rx) = mpsc::channel::<String>();
-    let mut readers = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        let tx = tx.clone();
-        readers.push(std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                let _ = tx.send(line);
-            }
-        }));
-    }
-    if let Some(err) = child.stderr.take() {
-        let tx = tx.clone();
-        readers.push(std::thread::spawn(move || {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let _ = tx.send(line);
-            }
-        }));
-    }
-    drop(tx);
-    for line in rx {
-        if !line.trim().is_empty() {
-            progress(&line);
-        }
-    }
-    for reader in readers {
-        let _ = reader.join();
-    }
-    let status = child
-        .wait()
-        .with_context(|| format!("{cmd} did not finish"))?;
-    if !status.success() {
-        bail!("{cmd} {} failed with {status}", args.join(" "));
-    }
-    Ok(())
-}
-
-/// Runs a command and returns (success, stdout+stderr).
-fn run_captured(cmd: &str, args: &[&str]) -> Result<(bool, String)> {
-    let out = Command::new(cmd)
-        .args(args)
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("cannot run {cmd}"))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.success(), text))
-}
-
-fn has_command(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
 }
 
 // ── Engine ──────────────────────────────────────────────────────────────────

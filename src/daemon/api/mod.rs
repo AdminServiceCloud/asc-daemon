@@ -7,6 +7,8 @@
 
 mod backups;
 pub mod console;
+mod fail2ban;
+mod firewall;
 mod grpc;
 mod grpc_backups;
 mod local;
@@ -17,6 +19,7 @@ pub mod tls;
 pub mod tokens;
 pub mod uds;
 mod webserver;
+mod wireguard;
 mod ws;
 
 use std::future::Future;
@@ -89,6 +92,13 @@ pub const CAPABILITIES: &[&str] = &[
     "sensors",
     // DMN-143: the reserved `$gpus` app setting.
     "app-gpus",
+    // DMN-148/DMN-149: FirewallService (nftables, automatic rollback), RAW mode.
+    "firewall",
+    "firewall.raw",
+    // DMN-150: Fail2banService.
+    "fail2ban",
+    // DMN-152: WireguardService.
+    "wireguard",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -117,6 +127,12 @@ pub struct ApiState {
     pub tokens: TokenStore,
     /// The node's web server and its sites (DMN-122).
     pub webserver: Arc<crate::daemon::webserver::WebServer>,
+    /// The node's firewall (DMN-148).
+    pub firewall: Arc<crate::daemon::firewall::Firewall>,
+    /// The node's fail2ban (DMN-150).
+    pub fail2ban: Arc<crate::daemon::fail2ban::Fail2ban>,
+    /// The node's WireGuard tunnels (DMN-152).
+    pub wireguard: Arc<crate::daemon::wireguard::Wireguard>,
     /// The certificate the TLS listener serves, swappable at runtime
     /// (DMN-127). Empty while the API is plain.
     pub api_tls: tls::Live,
@@ -846,6 +862,9 @@ impl ApiState {
             monitor,
             tokens: TokenStore::new(token),
             webserver,
+            firewall: Arc::new(crate::daemon::firewall::Firewall::new()),
+            fail2ban: Arc::new(crate::daemon::fail2ban::Fail2ban::new()),
+            wireguard: Arc::new(crate::daemon::wireguard::Wireguard::new()),
             api_tls: tls::Live::default(),
         })
     }

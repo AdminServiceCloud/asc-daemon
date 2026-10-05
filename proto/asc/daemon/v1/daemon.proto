@@ -3060,3 +3060,687 @@ message ReadSiteLogResponse {
   // Only the last 8 MiB are searched; true when the file is larger.
   bool truncated = 4;
 }
+
+// ── Firewall (DMN-148, DMN-149) ─────────────────────────────────────────────
+//
+// nftables through one table the daemon owns, `inet asc`, built from settings,
+// rules and IP sets. Changes are applied with an automatic rollback: unless
+// the caller confirms within the window, the previous ruleset is restored. A
+// RAW mode replaces the whole ruleset with the operator's text. Root-only.
+// Capabilities "firewall" and "firewall.raw". See docs/english/firewall.md.
+service FirewallService {
+  rpc GetFirewall(GetFirewallRequest) returns (GetFirewallResponse);
+  // Installs the nftables package; streams progress lines, the last event
+  // carries the final state or the error.
+  rpc InstallNftablesStream(InstallNftablesRequest) returns (stream FirewallInstallEvent);
+  // Stores the settings; nothing changes in the kernel until ApplyFirewall.
+  rpc UpdateFirewallSettings(UpdateFirewallSettingsRequest) returns (UpdateFirewallSettingsResponse);
+  rpc UpsertFirewallRule(UpsertFirewallRuleRequest) returns (UpsertFirewallRuleResponse);
+  rpc RemoveFirewallRule(RemoveFirewallRuleRequest) returns (RemoveFirewallRuleResponse);
+  // Replaces the allowlist or the blocklist.
+  rpc SetFirewallIpSet(SetFirewallIpSetRequest) returns (SetFirewallIpSetResponse);
+  // The table that ApplyFirewall would load, next to the one in force.
+  rpc RenderFirewall(RenderFirewallRequest) returns (RenderFirewallResponse);
+  // Loads the stored model and starts the confirmation window.
+  rpc ApplyFirewall(ApplyFirewallRequest) returns (ApplyFirewallResponse);
+  rpc ConfirmFirewall(ConfirmFirewallRequest) returns (ConfirmFirewallResponse);
+  rpc RollbackFirewall(RollbackFirewallRequest) returns (RollbackFirewallResponse);
+  // Removes `table inet asc` and the boot unit.
+  rpc DisableFirewall(DisableFirewallRequest) returns (DisableFirewallResponse);
+  // The whole ruleset as the kernel has it, and the RAW draft.
+  rpc GetFirewallRuleset(GetFirewallRulesetRequest) returns (GetFirewallRulesetResponse);
+  // RAW mode: `flush ruleset` and the given text, with the same rollback.
+  // Refused without `acknowledge_risk`.
+  rpc ApplyFirewallRuleset(ApplyFirewallRulesetRequest) returns (ApplyFirewallRulesetResponse);
+  // Every table of the host, read-only.
+  rpc ListFirewallTables(ListFirewallTablesRequest) returns (ListFirewallTablesResponse);
+}
+
+enum FirewallMode {
+  FIREWALL_MODE_UNSPECIFIED = 0;
+  // The daemon touches nothing.
+  FIREWALL_MODE_DISABLED = 1;
+  // The daemon owns `table inet asc`.
+  FIREWALL_MODE_MANAGED = 2;
+  // The operator's text is the whole ruleset.
+  FIREWALL_MODE_RAW = 3;
+}
+
+enum FirewallPolicy {
+  FIREWALL_POLICY_UNSPECIFIED = 0;
+  FIREWALL_POLICY_ACCEPT = 1;
+  FIREWALL_POLICY_DROP = 2;
+}
+
+enum FirewallAction {
+  FIREWALL_ACTION_UNSPECIFIED = 0;
+  FIREWALL_ACTION_ACCEPT = 1;
+  FIREWALL_ACTION_DROP = 2;
+  FIREWALL_ACTION_REJECT = 3;
+}
+
+enum FirewallProtocol {
+  // Treated as ANY.
+  FIREWALL_PROTOCOL_UNSPECIFIED = 0;
+  FIREWALL_PROTOCOL_TCP = 1;
+  FIREWALL_PROTOCOL_UDP = 2;
+  FIREWALL_PROTOCOL_ANY = 3;
+  FIREWALL_PROTOCOL_ICMP = 4;
+}
+
+enum FirewallScope {
+  // Treated as HOST.
+  FIREWALL_SCOPE_UNSPECIFIED = 0;
+  // Traffic to the host itself.
+  FIREWALL_SCOPE_HOST = 1;
+  // Ports published by Docker containers.
+  FIREWALL_SCOPE_DOCKER = 2;
+  FIREWALL_SCOPE_BOTH = 3;
+}
+
+message FirewallSettings {
+  FirewallPolicy input_policy = 1;
+  // Answer ping.
+  bool allow_icmp = 2;
+  // Filter IPv6 with the same rules; off leaves IPv6 unfiltered.
+  bool ipv6 = 3;
+  // Close Docker's published ports unless a rule opens them.
+  bool protect_docker = 4;
+  // "ssh", "api" or "web" presets the operator switched off.
+  repeated string disabled_presets = 5;
+}
+
+message FirewallRule {
+  // Assigned by the daemon when empty.
+  string id = 1;
+  bool enabled = 2;
+  FirewallAction action = 3;
+  FirewallProtocol protocol = 4;
+  // "80" or "8000-8100"; tcp and udp rules only.
+  repeated string ports = 5;
+  // IPs, CIDRs, "@allowlist" or "@blocklist"; empty — any source.
+  repeated string sources = 6;
+  FirewallScope scope = 7;
+  string comment = 8;
+  // "user", or "preset:ssh" / "preset:api" / "preset:web" for derived rules.
+  string managed_by = 9;
+  // Matched traffic since the table was loaded (read-only).
+  uint64 packets = 10;
+  uint64 bytes = 11;
+}
+
+message FirewallSetEntry {
+  // An IP or a CIDR.
+  string value = 1;
+  // Unix time the entry stops applying; 0 — permanent.
+  int64 expires_unix = 2;
+  string comment = 3;
+}
+
+message FirewallConflict {
+  // "ufw" or "firewalld".
+  string kind = 1;
+  string detail = 2;
+}
+
+message FirewallPending {
+  string id = 1;
+  int64 deadline_unix = 2;
+  int64 seconds_left = 3;
+  FirewallMode target_mode = 4;
+}
+
+message FirewallState {
+  bool nft_installed = 1;
+  string nft_version = 2;
+  // What is in force (confirmed), not what is pending.
+  FirewallMode mode = 3;
+  FirewallSettings settings = 4;
+  repeated FirewallRule rules = 5;
+  // Rules the daemon derives from the host (SSH, the API port, the web
+  // server); read-only.
+  repeated FirewallRule presets = 6;
+  repeated FirewallSetEntry allowlist = 7;
+  repeated FirewallSetEntry blocklist = 8;
+  // Present while a change waits for confirmation.
+  FirewallPending pending = 9;
+  repeated FirewallConflict conflicts = 10;
+  // The stored model differs from what is in force.
+  bool changed = 11;
+  string last_error = 12;
+  int64 applied_unix = 13;
+}
+
+message GetFirewallRequest {}
+
+message GetFirewallResponse {
+  FirewallState firewall = 1;
+}
+
+message InstallNftablesRequest {}
+
+message FirewallInstallEvent {
+  oneof event {
+    string log = 1;
+    FirewallState done = 2;
+    string error = 3;
+  }
+}
+
+message UpdateFirewallSettingsRequest {
+  FirewallSettings settings = 1;
+  // Needed to switch off the "ssh" or "api" preset.
+  bool force = 2;
+}
+
+message UpdateFirewallSettingsResponse {
+  FirewallState firewall = 1;
+}
+
+message UpsertFirewallRuleRequest {
+  FirewallRule rule = 1;
+}
+
+message UpsertFirewallRuleResponse {
+  FirewallRule rule = 1;
+}
+
+message RemoveFirewallRuleRequest {
+  string id = 1;
+}
+
+message RemoveFirewallRuleResponse {
+  bool removed = 1;
+}
+
+message SetFirewallIpSetRequest {
+  // "allowlist" or "blocklist".
+  string set = 1;
+  repeated FirewallSetEntry entries = 2;
+}
+
+message SetFirewallIpSetResponse {
+  repeated FirewallSetEntry entries = 1;
+}
+
+message RenderFirewallRequest {}
+
+message RenderFirewallResponse {
+  // `table inet asc { … }` as the next apply would load it.
+  string proposed = 1;
+  // The table as it was loaded and confirmed.
+  string applied = 2;
+  bool changed = 3;
+}
+
+message ApplyFirewallRequest {
+  // Confirmation window, 15–600 s; 0 applies without rollback; unset — 60.
+  optional uint32 timeout_seconds = 1;
+  // Switch off a competing ufw/firewalld.
+  bool force = 2;
+}
+
+message ApplyFirewallResponse {
+  FirewallState firewall = 1;
+}
+
+message ConfirmFirewallRequest {
+  // The pending change's id; empty — whichever is pending.
+  string id = 1;
+}
+
+message ConfirmFirewallResponse {
+  FirewallState firewall = 1;
+}
+
+message RollbackFirewallRequest {}
+
+message RollbackFirewallResponse {
+  FirewallState firewall = 1;
+}
+
+message DisableFirewallRequest {}
+
+message DisableFirewallResponse {
+  FirewallState firewall = 1;
+}
+
+message GetFirewallRulesetRequest {}
+
+message GetFirewallRulesetResponse {
+  // `nft list ruleset` as the kernel has it.
+  string live = 1;
+  // The operator's RAW text; empty if there is none.
+  string raw = 2;
+}
+
+message ApplyFirewallRulesetRequest {
+  string ruleset = 1;
+  // The caller knows this replaces every table, Docker's and fail2ban's
+  // included.
+  bool acknowledge_risk = 2;
+  // As in ApplyFirewallRequest.
+  optional uint32 timeout_seconds = 3;
+}
+
+message ApplyFirewallRulesetResponse {
+  FirewallState firewall = 1;
+}
+
+message ListFirewallTablesRequest {}
+
+message FirewallTable {
+  string family = 1;
+  string name = 2;
+  // "asc", "fail2ban", "iptables" or "other".
+  string owner = 3;
+  string text = 4;
+  bool truncated = 5;
+}
+
+message ListFirewallTablesResponse {
+  repeated FirewallTable tables = 1;
+}
+
+// ── fail2ban (DMN-150) ──────────────────────────────────────────────────────
+//
+// Installs fail2ban and owns one file of its configuration,
+// `/etc/fail2ban/jail.d/asc.local`: global defaults and the known jails
+// (sshd, recidive and — with the web server installed — three nginx jails).
+// Bans are enforced through nftables in fail2ban's own table. Root-only.
+// Capability "fail2ban". See docs/english/fail2ban.md.
+service Fail2banService {
+  rpc GetFail2ban(GetFail2banRequest) returns (GetFail2banResponse);
+  // Installs the package and writes the configuration; streams progress
+  // lines, the last event carries the final state or the error.
+  rpc InstallFail2banStream(InstallFail2banRequest) returns (stream Fail2banInstallEvent);
+  rpc UninstallFail2ban(UninstallFail2banRequest) returns (UninstallFail2banResponse);
+  // Writes the defaults. A configuration fail2ban refuses is not kept: the
+  // error carries fail2ban's message and the previous file is restored.
+  rpc UpdateFail2banSettings(UpdateFail2banSettingsRequest) returns (UpdateFail2banSettingsResponse);
+  // Switches a known jail on or off and sets its overrides.
+  rpc UpsertFail2banJail(UpsertFail2banJailRequest) returns (UpsertFail2banJailResponse);
+  rpc ListFail2banBans(ListFail2banBansRequest) returns (ListFail2banBansResponse);
+  rpc BanFail2banIp(BanFail2banIpRequest) returns (BanFail2banIpResponse);
+  rpc UnbanFail2banIp(UnbanFail2banIpRequest) returns (UnbanFail2banIpResponse);
+}
+
+message Fail2banSettings {
+  // fail2ban time syntax: "1h", "10m", "90", "1w"; "-1" bans for good.
+  string bantime = 1;
+  string findtime = 2;
+  uint32 maxretry = 3;
+  // Repeat offenders are banned for longer each time.
+  bool bantime_increment = 4;
+  // IPs and CIDRs that are never banned.
+  repeated string ignoreip = 5;
+}
+
+message Fail2banJail {
+  // "sshd", "recidive", "nginx-http-auth", "nginx-botsearch" or
+  // "nginx-limit-req".
+  string name = 1;
+  bool enabled = 2;
+  // Overrides; 0 / empty keeps the default.
+  uint32 maxretry = 3;
+  string bantime = 4;
+  string findtime = 5;
+  string port = 6;
+  string logpath = 7;
+  // Read-only:
+  // False — the jail needs the web server, which is not installed.
+  bool available = 8;
+  bool needs_web = 9;
+  // fail2ban is running the jail.
+  bool active = 10;
+  uint64 currently_failed = 11;
+  uint64 total_failed = 12;
+  uint64 currently_banned = 13;
+  uint64 total_banned = 14;
+}
+
+message Fail2banState {
+  bool installed = 1;
+  bool running = 2;
+  string version = 3;
+  Fail2banSettings settings = 4;
+  // Every known jail, running or not.
+  repeated Fail2banJail jails = 5;
+  string last_error = 6;
+}
+
+message Fail2banBan {
+  string ip = 1;
+  string jail = 2;
+  // Unix time of the ban; 0 when fail2ban did not say.
+  int64 banned_unix = 3;
+  // Unix time the ban ends; 0 for a permanent or unknown end.
+  int64 unban_unix = 4;
+}
+
+message GetFail2banRequest {}
+
+message GetFail2banResponse {
+  Fail2banState fail2ban = 1;
+}
+
+message InstallFail2banRequest {}
+
+message Fail2banInstallEvent {
+  oneof event {
+    string log = 1;
+    Fail2banState done = 2;
+    string error = 3;
+  }
+}
+
+message UninstallFail2banRequest {
+  // Also remove the daemon's state and fail2ban's configuration.
+  bool purge = 1;
+}
+
+message UninstallFail2banResponse {}
+
+message UpdateFail2banSettingsRequest {
+  Fail2banSettings settings = 1;
+}
+
+message UpdateFail2banSettingsResponse {
+  Fail2banState fail2ban = 1;
+}
+
+message UpsertFail2banJailRequest {
+  Fail2banJail jail = 1;
+}
+
+message UpsertFail2banJailResponse {
+  Fail2banState fail2ban = 1;
+}
+
+message ListFail2banBansRequest {
+  // A jail's name; empty — every running jail.
+  string jail = 1;
+}
+
+message ListFail2banBansResponse {
+  repeated Fail2banBan bans = 1;
+}
+
+message BanFail2banIpRequest {
+  string jail = 1;
+  // One address, not a network.
+  string ip = 2;
+}
+
+message BanFail2banIpResponse {}
+
+message UnbanFail2banIpRequest {
+  // Empty — release the address from every jail.
+  string jail = 1;
+  string ip = 2;
+}
+
+message UnbanFail2banIpResponse {
+  // False — the address was not banned.
+  bool released = 1;
+}
+
+// ── WireGuard (DMN-152) ─────────────────────────────────────────────────────
+
+// The node's WireGuard: install wireguard-tools, manage tunnels as
+// /etc/wireguard/<name>.conf files (the daemon edits only files that carry
+// its marker; others are listed, shown and switched), add peers with
+// generated keys and a client config, edit each peer's AllowedIPs, and import
+// a ready-made .conf. Private and pre-shared keys are never returned except
+// inside a client config. Root-only. Capability "wireguard".
+// See docs/english/wireguard.md.
+service WireguardService {
+  rpc GetWireguard(GetWireguardRequest) returns (GetWireguardResponse);
+  // Installs the package; streams progress lines, the last event carries the
+  // final state or the error.
+  rpc InstallWireguardStream(InstallWireguardRequest) returns (stream WireguardInstallEvent);
+  // Stops the managed interfaces and removes the package; purge also deletes
+  // their files (which hold the private keys).
+  rpc UninstallWireguard(UninstallWireguardRequest) returns (UninstallWireguardResponse);
+  // Creates an interface (generating its key) and brings it up, or changes
+  // the listed fields of an existing one; its peers and key are kept.
+  rpc UpsertWireguardInterface(UpsertWireguardInterfaceRequest) returns (UpsertWireguardInterfaceResponse);
+  rpc RemoveWireguardInterface(RemoveWireguardInterfaceRequest) returns (RemoveWireguardInterfaceResponse);
+  // Up and enabled at boot, or down and disabled. Works on files the daemon
+  // does not manage too.
+  rpc SetWireguardInterfaceState(SetWireguardInterfaceStateRequest) returns (SetWireguardInterfaceStateResponse);
+  // The interface's file for reading, with the private and pre-shared keys
+  // hidden. Works on files the daemon does not manage too.
+  rpc GetWireguardInterfaceConfig(GetWireguardInterfaceConfigRequest) returns (GetWireguardInterfaceConfigResponse);
+  // Takes a .conf — a server's or a client's — validates it, rewrites it with
+  // the daemon's marker and optionally brings it up.
+  rpc ImportWireguardConfig(ImportWireguardConfigRequest) returns (ImportWireguardConfigResponse);
+  rpc AddWireguardPeer(AddWireguardPeerRequest) returns (AddWireguardPeerResponse);
+  // Replaces the editable fields of a peer, AllowedIPs among them.
+  rpc UpdateWireguardPeer(UpdateWireguardPeerRequest) returns (UpdateWireguardPeerResponse);
+  rpc RemoveWireguardPeer(RemoveWireguardPeerRequest) returns (RemoveWireguardPeerResponse);
+  // The client config of an existing peer, with a <PRIVATE_KEY> placeholder
+  // (the daemon does not keep the peer's private key).
+  rpc GetWireguardPeerConfig(GetWireguardPeerConfigRequest) returns (GetWireguardPeerConfigResponse);
+}
+
+message WireguardLive {
+  // Where the peer was last seen; empty before the first packet.
+  string endpoint = 1;
+  // Unix time of the last handshake; 0 — none yet.
+  int64 latest_handshake_unix = 2;
+  uint64 rx_bytes = 3;
+  uint64 tx_bytes = 4;
+}
+
+message WireguardPeer {
+  string public_key = 1;
+  string name = 2;
+  // False: the peer is kept in the file but not loaded.
+  bool enabled = 3;
+  // Addresses and networks routed to the peer; a host address is /32 or /128.
+  repeated string allowed_ips = 4;
+  // host:port the peer is reached at; empty for roaming clients.
+  string endpoint = 5;
+  // Seconds; 0 — off.
+  uint32 persistent_keepalive = 6;
+  bool has_preshared_key = 7;
+  // Present while the interface is up.
+  WireguardLive live = 8;
+}
+
+message WireguardInterface {
+  string name = 1;
+  // 0 — the tunnel does not listen (a client-style interface).
+  uint32 listen_port = 2;
+  repeated string addresses = 3;
+  repeated string dns = 4;
+  // 0 — the default.
+  uint32 mtu = 5;
+  string public_key = 6;
+  // The public host clients connect to; used in client configs.
+  string endpoint = 7;
+  // Masquerade the VPN subnet to the internet.
+  bool masquerade = 8;
+  bool running = 9;
+  // Comes up at boot.
+  bool enabled = 10;
+  // The operator's PreUp/PostUp/PreDown/PostDown commands ("PostUp: cmd"),
+  // which run as root.
+  repeated string hooks = 11;
+  string table = 12;
+  string fwmark = 13;
+  repeated WireguardPeer peers = 14;
+  // What the server's clients are told to use for DNS (their config's DNS line).
+  // `dns` above is different: what this host uses while the tunnel is up.
+  repeated string client_dns = 15;
+}
+
+// A file in /etc/wireguard the daemon does not manage.
+message WireguardUnmanaged {
+  string name = 1;
+  bool running = 2;
+  // Why a file that carries the daemon's marker could not be read.
+  string error = 3;
+}
+
+message WireguardState {
+  bool installed = 1;
+  string version = 2;
+  repeated WireguardInterface interfaces = 3;
+  repeated WireguardUnmanaged unmanaged = 4;
+  // The node's own address, a starting point for the public endpoint.
+  string primary_address = 5;
+}
+
+message GetWireguardRequest {}
+
+message GetWireguardResponse {
+  WireguardState wireguard = 1;
+}
+
+message InstallWireguardRequest {}
+
+message WireguardInstallEvent {
+  oneof event {
+    string log = 1;
+    WireguardState done = 2;
+    string error = 3;
+  }
+}
+
+message UninstallWireguardRequest {
+  bool purge = 1;
+}
+
+message UninstallWireguardResponse {}
+
+message UpsertWireguardInterfaceRequest {
+  string name = 1;
+  // 0 — the tunnel does not listen.
+  uint32 listen_port = 2;
+  repeated string addresses = 3;
+  repeated string dns = 4;
+  uint32 mtu = 5;
+  string endpoint = 6;
+  bool masquerade = 7;
+  // To bring a key in; empty generates one (new) or keeps the current (existing).
+  string private_key = 8;
+  // What the server's clients are told to use for DNS. `dns` is what this host
+  // uses while the tunnel is up; leave it empty on a server.
+  repeated string client_dns = 9;
+}
+
+message UpsertWireguardInterfaceResponse {
+  WireguardState wireguard = 1;
+}
+
+message RemoveWireguardInterfaceRequest {
+  string name = 1;
+}
+
+message RemoveWireguardInterfaceResponse {
+  WireguardState wireguard = 1;
+}
+
+message SetWireguardInterfaceStateRequest {
+  string name = 1;
+  bool up = 2;
+}
+
+message SetWireguardInterfaceStateResponse {
+  WireguardState wireguard = 1;
+}
+
+message GetWireguardInterfaceConfigRequest {
+  string name = 1;
+}
+
+message GetWireguardInterfaceConfigResponse {
+  string config = 1;
+}
+
+message ImportWireguardConfigRequest {
+  // The interface name (from the file name, usually).
+  string name = 1;
+  string text = 2;
+  // Replace an existing interface; the old file is kept as <name>.conf.asc-bak.
+  bool overwrite = 3;
+  // The file may run PreUp/PostUp/PreDown/PostDown commands as root.
+  bool accept_hooks = 4;
+  // Bring the tunnel up and enable it at boot.
+  bool start = 5;
+}
+
+message ImportWireguardConfigResponse {
+  WireguardState wireguard = 1;
+  string name = 2;
+  // What the file had that was dropped or not understood.
+  repeated string warnings = 3;
+}
+
+// How a client config is built.
+message WireguardClientOptions {
+  // What the client sends through the tunnel (its AllowedIPs): "full"
+  // (0.0.0.0/0, ::/0), "subnet" or empty (the VPN network), or a
+  // comma-separated list of networks.
+  string routes = 1;
+  // Replaces the interface's DNS when not empty.
+  repeated string dns = 2;
+  // Replaces the interface's public endpoint (a host, no port) when not empty.
+  string endpoint = 3;
+}
+
+message AddWireguardPeerRequest {
+  string interface = 1;
+  string name = 2;
+  // Empty: the daemon generates the key pair and returns the private key once.
+  string public_key = 3;
+  // Empty: the next free address of the interface's network.
+  repeated string allowed_ips = 4;
+  bool preshared = 5;
+  uint32 persistent_keepalive = 6;
+  string endpoint = 7;
+  WireguardClientOptions client = 8;
+}
+
+message AddWireguardPeerResponse {
+  WireguardState wireguard = 1;
+  string public_key = 2;
+  // Empty for a peer that only routes networks.
+  string client_config = 3;
+}
+
+message UpdateWireguardPeerRequest {
+  string interface = 1;
+  // The public key, or the name when it is unique.
+  string peer = 2;
+  string name = 3;
+  repeated string allowed_ips = 4;
+  string endpoint = 5;
+  uint32 persistent_keepalive = 6;
+  bool enabled = 7;
+}
+
+message UpdateWireguardPeerResponse {
+  WireguardState wireguard = 1;
+}
+
+message RemoveWireguardPeerRequest {
+  string interface = 1;
+  string peer = 2;
+}
+
+message RemoveWireguardPeerResponse {
+  WireguardState wireguard = 1;
+}
+
+message GetWireguardPeerConfigRequest {
+  string interface = 1;
+  string peer = 2;
+  WireguardClientOptions client = 3;
+}
+
+message GetWireguardPeerConfigResponse {
+  string config = 1;
+}

@@ -47,6 +47,10 @@ fn assert_base_capabilities(capabilities: &[&str]) {
         "hardware",
         "sensors",
         "app-gpus",
+        "firewall",
+        "firewall.raw",
+        "fail2ban",
+        "wireguard",
     ];
     let without_compose: Vec<&str> = capabilities
         .iter()

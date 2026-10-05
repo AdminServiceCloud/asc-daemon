@@ -29,6 +29,9 @@ Open source CLI-утилита и демон на Rust, устанавливае
 | 🖥️ WebSocket-консоль приложений | [console](console.md) |
 | ⏰ Планировщик задач | [scheduler](scheduler.md) |
 | 🌐 Веб-сервер: nginx, сайты, Let's Encrypt, реальные IP за Cloudflare | [webserver](webserver.md) |
+| 🛡️ Firewall: таблица nftables, правила, автооткат, режим RAW | [firewall](firewall.md) |
+| 🚫 fail2ban: установка, jail'ы, баны через nftables | [fail2ban](fail2ban.md) |
+| 🔐 WireGuard: туннели, пиры, клиентские конфиги, импорт готового .conf | [wireguard](wireguard.md) |
 | ⌨️ Автодополнение в шелле (Tab) для bash, zsh и fish | [completion](completion.md) |
 | 🔄 Утилита обновлений asc-updater | [updater](updater.md) |
 | 🔗 Подключение ноды к платформе | [platform](platform.md) |
@@ -48,7 +51,7 @@ Community-файлы: [🛡️ SECURITY.md](SECURITY.md) — политика б
 │   │   ├── apps/     # драйверы: docker, systemd, process
 │   │   ├── pkg/      # пакетный менеджер + реестры
 │   │   ├── mcp/      # MCP-сервер
-│   │   ├── backup/ monitor/ sftp/ files/ console/ scheduler/ webserver/
+│   │   ├── backup/ monitor/ sftp/ files/ console/ scheduler/ webserver/ firewall/ fail2ban/ wireguard/
 │   │   ├── i18n/     # система переводов вывода команд (EN/RU)
 │   │   └── config/   # /etc/asc/config.toml
 │   └── updater/      # 🔄 asc-updater — отдельный бинарник обновлений (см. updater.md)

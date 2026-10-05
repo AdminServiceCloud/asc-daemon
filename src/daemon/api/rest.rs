@@ -152,6 +152,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .merge(super::rest_backups::routes())
         .merge(super::webserver::routes())
+        .merge(super::firewall::routes())
+        .merge(super::fail2ban::routes())
+        .merge(super::wireguard::routes())
         .with_state(state)
 }
 
@@ -262,6 +265,16 @@ impl IntoResponse for ApiError {
                 })),
             )
                 .into_response();
+        }
+        // Typed errors of the system modules (firewall, fail2ban).
+        if let Some(err) = self.0.downcast_ref::<crate::daemon::exec::ModuleError>() {
+            use crate::daemon::exec::ModuleError as M;
+            let status = match err {
+                M::Invalid(_) => StatusCode::BAD_REQUEST,
+                M::Precondition(_) => StatusCode::CONFLICT,
+                M::NotFound(_) => StatusCode::NOT_FOUND,
+            };
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
         // Typed process errors (DMN-119), same mapping as the gRPC
         // `to_status` arm.

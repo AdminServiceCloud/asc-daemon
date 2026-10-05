@@ -45,6 +45,13 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 | Scheduled tasks | `asc task list|add|cancel` |
 | Publish an app on a domain | `sudo asc web install` once, then `asc web site add <domain> --app <name> --port <port> --tls letsencrypt` |
 | Web server state / config check | `asc web status` / `asc web test` |
+| Firewall state / rules | `asc firewall status` / `asc firewall rules` |
+| Open or block a port | `sudo asc firewall allow 443/tcp`, `sudo asc firewall deny --from <ip>` — with the firewall on, a change must be confirmed (`asc firewall confirm`) or it rolls back by itself |
+| fail2ban state / bans | `asc fail2ban status` / `asc fail2ban bans`; release an address with `sudo asc fail2ban unban <ip>` |
+| WireGuard tunnels / peers | `asc wireguard status` (handshakes, traffic); `sudo asc wireguard up|down <name>`; read a tunnel with `asc wireguard show <name>` (keys hidden) |
+| Give someone VPN access | `sudo asc wireguard peer add <tunnel> <name> -o <name>.conf` — the config holds the peer's private key and is shown once; `--routes full` sends all traffic through the VPN |
+| Change what a peer may reach | `sudo asc wireguard peer set <tunnel> <peer> --allowed-ips 10.8.0.2/32,192.168.50.0/24`; cut a peer off with `--disable` |
+| Bring in a .conf | `sudo asc wireguard import <file> --start` — a file with PostUp/PostDown runs commands as root, so it is refused until you review them and pass `--accept-hooks` |
 
 ## Troubleshooting flow
 
@@ -57,5 +64,6 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 ## Safety rules
 
 - Destructive actions (`app remove`, `backup restore`) — always confirm with the user first.
+- Firewall changes can lock the user out of the node: never run `asc firewall enable`, `deny`, `settings --policy`, `ruleset apply` or `--no-rollback` without the user's explicit go-ahead. Never use `--force` or `--i-understand-the-risk` on your own; leave the confirmation window running (`asc firewall confirm` only after the user checked they still have access).
 - Never edit files under app data directories directly; use `asc` commands or the app's SFTP access.
 - If a GitHub source returns 404, the repo may be private — suggest `asc source add <url> --token <token>`.

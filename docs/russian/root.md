@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/ci.yml)
 [![Release](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml/badge.svg)](https://github.com/AdminServiceCloud/asc-daemon/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.56.1-blue)](../../version.txt)
+[![Version](https://img.shields.io/badge/version-0.57.0-blue)](../../version.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/xzJfp3ePfV)
 
@@ -153,6 +153,9 @@ cp -r skills/* .claude/skills/
 | [🖥️ console](console.md) | WebSocket-консоль приложений |
 | [⏰ scheduler](scheduler.md) | Планировщик задач |
 | [🌐 webserver](webserver.md) | Веб-сервер: nginx, сайты, Let's Encrypt, реальные IP за Cloudflare |
+| [🛡️ firewall](firewall.md) | Firewall: таблица nftables, правила, автооткат, режим RAW |
+| [🚫 fail2ban](fail2ban.md) | fail2ban: установка, jail'ы, баны через nftables |
+| [🔐 wireguard](wireguard.md) | WireGuard: туннели, пиры, клиентские конфиги, импорт готового .conf |
 | [⌨️ completion](completion.md) | Автодополнение по Tab для bash, zsh и fish — команды, флаги и живые значения |
 | [🔄 updater](updater.md) | Утилита asc-updater: автообновления, каналы, откат |
 | [🔗 platform](platform.md) | Подключение ноды к платформе: `--token`, `asc connect` |

@@ -23,7 +23,9 @@ use pb::backup_service_server::BackupServiceServer;
 use pb::credential_service_server::{CredentialService, CredentialServiceServer};
 use pb::daemon_service_server::{DaemonService, DaemonServiceServer};
 use pb::docker_service_server::{DockerService, DockerServiceServer};
+use pb::fail2ban_service_server::Fail2banServiceServer;
 use pb::file_service_server::{FileService, FileServiceServer};
+use pb::firewall_service_server::FirewallServiceServer;
 use pb::monitor_service_server::{MonitorService, MonitorServiceServer};
 use pb::process_service_server::{ProcessService, ProcessServiceServer};
 use pb::schedule_service_server::ScheduleServiceServer;
@@ -32,6 +34,7 @@ use pb::system_service_server::{SystemService, SystemServiceServer};
 use pb::token_service_server::{TokenService, TokenServiceServer};
 use pb::user_service_server::{UserService, UserServiceServer};
 use pb::web_server_service_server::WebServerServiceServer;
+use pb::wireguard_service_server::WireguardServiceServer;
 
 /// gRPC routes as an axum router (mounted next to REST on one listener).
 pub fn routes(state: Arc<ApiState>) -> Router {
@@ -48,7 +51,10 @@ pub fn routes(state: Arc<ApiState>) -> Router {
         .add_service(DockerServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(BackupServiceServer::new(Grpc(Arc::clone(&state))))
         .add_service(ScheduleServiceServer::new(Grpc(Arc::clone(&state))))
-        .add_service(WebServerServiceServer::new(Grpc(state)))
+        .add_service(WebServerServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(FirewallServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(Fail2banServiceServer::new(Grpc(Arc::clone(&state))))
+        .add_service(WireguardServiceServer::new(Grpc(state)))
         .into_axum_router()
 }
 
@@ -90,6 +96,14 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
                 Status::failed_precondition(msg)
             }
             F::Io(..) => Status::internal(msg),
+        };
+    }
+    if let Some(err) = err.downcast_ref::<crate::daemon::exec::ModuleError>() {
+        use crate::daemon::exec::ModuleError as M;
+        return match err {
+            M::Invalid(_) => Status::invalid_argument(msg),
+            M::Precondition(_) => Status::failed_precondition(msg),
+            M::NotFound(_) => Status::not_found(msg),
         };
     }
     if err.downcast_ref::<super::ContainerOwnedByApp>().is_some() {

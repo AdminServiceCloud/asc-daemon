@@ -3041,6 +3041,7 @@ mod tests {
             size_rw: None,
             size_root_fs: None,
             networks: Vec::new(),
+            mounts: Vec::new(),
         }
     }
 

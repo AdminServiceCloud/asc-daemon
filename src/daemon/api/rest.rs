@@ -890,6 +890,13 @@ async fn list_containers(
             "sizeRw": row.info.size_rw,
             "sizeRootFs": row.info.size_root_fs,
             "networks": row.info.networks,
+            "mounts": row.info.mounts.iter().map(|mount| serde_json::json!({
+                "type": mount.kind,
+                "name": mount.name,
+                "source": mount.source,
+                "destination": mount.destination,
+                "rw": mount.rw,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     }))
     .into_response())

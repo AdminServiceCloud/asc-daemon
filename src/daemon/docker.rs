@@ -424,6 +424,17 @@ pub fn remove(cfg: &DockerConfig, container: &str) -> Result<()> {
 const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
+/// One mount of a container as the Engine's container list reports it.
+pub struct ContainerMountInfo {
+    /// `volume`, `bind`, `tmpfs` or `npipe`.
+    pub kind: String,
+    /// Volume name; empty for a bind or tmpfs mount.
+    pub name: String,
+    pub source: String,
+    pub destination: String,
+    pub rw: bool,
+}
+
 /// One port row of a container as the Engine's container list reports it.
 /// Unlike [`PublishedPort`], which describes what an app's *manifest asks
 /// for*, this is what the Engine actually has: a port that is merely exposed
@@ -467,6 +478,8 @@ pub struct ContainerInfo {
     pub size_root_fs: Option<u64>,
     /// Networks the container is attached to.
     pub networks: Vec<String>,
+    /// Volumes and bind mounts, ordered by destination.
+    pub mounts: Vec<ContainerMountInfo>,
 }
 
 /// Every container on the host, like `docker ps` (`all` = `docker ps -a`).
@@ -509,6 +522,19 @@ fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
             names
         })
         .unwrap_or_default();
+    let mut mounts: Vec<ContainerMountInfo> = summary
+        .mounts
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mount| ContainerMountInfo {
+            kind: mount.typ.unwrap_or_default(),
+            name: mount.name.unwrap_or_default(),
+            source: mount.source.unwrap_or_default(),
+            destination: mount.destination.unwrap_or_default(),
+            rw: mount.rw.unwrap_or(true),
+        })
+        .collect();
+    mounts.sort_by(|a, b| a.destination.cmp(&b.destination));
     ContainerInfo {
         id: summary.id.unwrap_or_default(),
         names: summary
@@ -549,6 +575,7 @@ fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
             .flatten()
             .and_then(|v| u64::try_from(v).ok()),
         networks,
+        mounts,
     }
 }
 

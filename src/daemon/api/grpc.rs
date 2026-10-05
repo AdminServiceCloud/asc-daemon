@@ -2740,6 +2740,17 @@ fn container_to_pb(row: &super::ContainerRow) -> pb::Container {
         size_rw: info.size_rw,
         size_root_fs: info.size_root_fs,
         networks: info.networks.clone(),
+        mounts: info
+            .mounts
+            .iter()
+            .map(|mount| pb::ContainerMount {
+                r#type: mount.kind.clone(),
+                name: mount.name.clone(),
+                source: mount.source.clone(),
+                destination: mount.destination.clone(),
+                rw: mount.rw,
+            })
+            .collect(),
     }
 }
 

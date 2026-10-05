@@ -2124,6 +2124,23 @@ message Container {
   optional uint64 size_root_fs = 15;
   // Names of the networks the container is attached to.
   repeated string networks = 16;
+  // Volumes and bind mounts of the container, as the Engine's list reports them.
+  repeated ContainerMount mounts = 17;
+}
+
+// One mount of a container. A named volume carries its `name`; a bind mount
+// only the host `source`.
+message ContainerMount {
+  // volume | bind | tmpfs | npipe.
+  string type = 1;
+  // Volume name; empty for a bind or tmpfs mount.
+  string name = 2;
+  // Host path (bind) or the volume's storage location.
+  string source = 3;
+  // Path inside the container.
+  string destination = 4;
+  // False for a read-only mount.
+  bool rw = 5;
 }
 
 message ContainerPort {

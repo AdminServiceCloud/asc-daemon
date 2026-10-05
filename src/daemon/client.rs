@@ -111,6 +111,17 @@ pub struct RemoteContainerPort {
     pub ip: String,
 }
 
+/// One mount of a container (volume or bind) in the container list.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteContainerMount {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub source: String,
+    pub destination: String,
+    pub rw: bool,
+}
+
 /// One container on the host — ASC-managed or not (DMN-102).
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +145,8 @@ pub struct RemoteContainer {
     pub size_root_fs: Option<u64>,
     #[serde(default)]
     pub networks: Vec<String>,
+    #[serde(default)]
+    pub mounts: Vec<RemoteContainerMount>,
 }
 
 /// One container's live resource usage (DMN-112).

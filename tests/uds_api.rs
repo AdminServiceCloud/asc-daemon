@@ -1,4 +1,4 @@
-//! Unix-socket API integration (DMN-042): a real listener on a temp socket,
+//! Unix-socket API integration: a real listener on a temp socket,
 //! the real CLI client — verifying that the peer uid from SO_PEERCRED is
 //! what scopes app visibility, with no token involved.
 
@@ -127,7 +127,7 @@ fn peer_uid_scopes_app_visibility_without_a_token() {
     }
 }
 
-/// DMN-043: the settings editor works for a caller who cannot touch the app
+/// the settings editor works for a caller who cannot touch the app
 /// tree itself — the daemon serves the schema and the current values, and
 /// takes the edited ones back, validating them against that same schema.
 #[test]
@@ -198,7 +198,7 @@ fn settings_round_trip_over_the_socket() {
     );
 }
 
-/// DMN-043: `asc app attach` goes through the daemon's console, so the
+/// `asc app attach` goes through the daemon's console, so the
 /// caller needs neither the docker group nor access to the app tree — what
 /// they do need is a console token, and the daemon issues one only for an
 /// app that is theirs.
@@ -237,7 +237,7 @@ fn console_tokens_are_scoped_to_the_callers_apps() {
     }
 }
 
-/// DMN-053: the apps-wide reports (`asc disk`, `asc ports`, `asc stats`) are
+/// the apps-wide reports (`asc disk`, `asc ports`, `asc stats`) are
 /// scoped by the peer uid like `asc ls` is — before they went through the
 /// daemon they read the caller's own app tree, so a user whose apps live in
 /// the system tree saw them listed by `asc ls` and "no apps installed"
@@ -302,7 +302,7 @@ fn missing_socket_means_no_daemon() {
     assert!(Daemon::connect(&config).unwrap().is_none());
 }
 
-/// DMN-013: backup routes used by the stdio MCP server live only on the UDS
+/// backup routes used by the stdio MCP server live only on the UDS
 /// listener and must apply the exact same ownership rule as app routes.
 #[test]
 fn local_backup_routes_are_peer_scoped() {

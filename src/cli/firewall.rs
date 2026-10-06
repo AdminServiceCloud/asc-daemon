@@ -1,4 +1,4 @@
-//! `asc firewall` (DMN-148, DMN-149): the node's nftables firewall through
+//! `asc firewall`: the node's nftables firewall through
 //! the running daemon. The command needs the daemon on purpose — the
 //! automatic rollback is a timer inside it, and a CLI process that exits
 //! right after applying could not keep that promise.

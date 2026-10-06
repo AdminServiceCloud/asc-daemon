@@ -29,22 +29,22 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/system/reboot", post(reboot_system))
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
-        // Sampling cadences (DMN-135).
+        // Sampling cadences.
         .route(
             "/v1/monitor/settings",
             get(monitor_settings).put(set_monitor_settings),
         )
         .route("/v1/network/interfaces", get(network_interfaces))
         .route("/v1/hardware", get(hardware))
-        // Real host listening-port inventory (DMN-103), see
+        // Real host listening-port inventory, see
         // docs/monitoring.md — distinct from /v1/ports above, which reports
         // what apps *declare*, not what is actually bound.
         .route("/v1/ports/listening", get(listening_ports))
-        // Host processes and signals (DMN-119).
+        // Host processes and signals.
         .route("/v1/processes", get(list_processes))
         .route("/v1/processes/{pid}/signal", post(signal_process))
         .route("/v1/apps", get(list_apps).post(install_app))
-        // Apps-wide reports (DMN-053): the per-app routes below answer for
+        // Apps-wide reports: the per-app routes below answer for
         // one app, these for every app the caller may see — the figures the
         // CLI cannot compute itself without reading the app tree.
         .route("/v1/disk", get(disk_summary))
@@ -52,12 +52,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/stats", get(stats))
         .route("/v1/apps/{id}", get(get_app).delete(remove_app))
         .route("/v1/apps/{id}/disk", get(app_disk))
-        // Image freshness and repull of a Docker app (DMN-120).
+        // Image freshness and repull of a Docker app.
         .route("/v1/apps/{id}/image", get(app_image))
         .route("/v1/apps/{id}/repull", post(repull_app))
         .route("/v1/apps/{id}/ports", get(app_ports))
         .route("/v1/apps/{id}/upgrade", post(upgrade_app))
-        // Full copy of an installed app under a new id (DMN-019/DMN-113) —
+        // Full copy of an installed app under a new id —
         // no streamed REST sibling; the platform's clone dialog uses the
         // gRPC CloneAppStream instead, the same split InstallApp/
         // InstallAppStream already has.
@@ -73,13 +73,13 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(app_settings).put(set_app_settings),
         )
         .route("/v1/apps/{id}/console-token", post(console_token))
-        // Docker host inventory (DMN-102/DMN-112, see
+        // Docker host inventory (see
         // docs/app-management.md): the whole Engine, not just ASC's own
         // containers. Root context only, enforced in the service layer —
         // a container ASC did not create has no owner to authorize against.
         .route("/v1/docker/containers", get(list_containers))
         .route("/v1/docker/stats", get(container_stats))
-        // Host inventory beyond containers (DMN-104) and cleanup (DMN-105) —
+        // Host inventory beyond containers and cleanup —
         // same root-only, service-layer-enforced pattern as the two above.
         .route("/v1/docker/images", get(list_images))
         .route("/v1/docker/volumes", get(list_volumes))
@@ -87,9 +87,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/docker/disk-usage", get(docker_disk_usage))
         .route("/v1/docker/prune", post(prune_docker))
         // Lifecycle control over non-ASC containers and compose stacks
-        // (DMN-111) — ASC apps' own containers are refused with 409.
+        // — ASC apps' own containers are refused with 409.
         .route("/v1/docker/control", post(control_container))
-        // Registry sources & credentials (DMN-083/084), pushed by the
+        // Registry sources & credentials, pushed by the
         // platform — see docs/custom-registry.md, docs/package-manager.md.
         .route("/v1/sources", get(list_sources).put(replace_sources))
         .route(
@@ -97,7 +97,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(list_credentials).post(upsert_credential),
         )
         .route("/v1/credentials/{pattern}", delete(remove_credential))
-        // API tokens (DMN-065/DMN-066). Mounted here, so the CLI reaches them
+        // API tokens. Mounted here, so the CLI reaches them
         // over the unix socket too — `asc api token …` needs no bearer.
         .route("/v1/token", get(token_status))
         .route(
@@ -106,11 +106,11 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/v1/token/rotate", post(rotate_primary_token))
         .route("/v1/token/rotate/commit", post(commit_token_rotation))
-        // Node filesystem access (DMN-070, see docs/files.md). Every handler
+        // Node filesystem access (see docs/files.md). Every handler
         // requires a root caller context (files::require_root, enforced in
         // the service layer) — unlike the rest of this API, a non-root
         // unix-socket peer is refused here. With an `app_id` query/body
-        // field the call is app-scoped instead (DMN-086): only app
+        // field the call is app-scoped instead: only app
         // ownership is required, and the daemon confines every path to that
         // app's directory and private volumes — see
         // `ApiState::app_file_scope`.
@@ -128,7 +128,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             "/v1/files/content",
             get(read_file_content).put(write_file_content),
         )
-        // Local account management (DMN-100, see docs/user-management.md):
+        // Local account management (see docs/user-management.md):
         // list local accounts (including root), create/delete, lock/unlock,
         // change shell, manage supplementary groups, and deploy an SSH
         // public key into an account's authorized_keys. Every handler
@@ -160,7 +160,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
 
 /// anyhow errors → JSON error responses (404 for missing apps/packages).
 ///
-/// The typed install errors keep their structure (DMN-028/DMN-042): a
+/// The typed install errors keep their structure: a
 /// client that can act on them — the CLI's consent prompt, the platform
 /// UI's dialog — reads the payload instead of parsing the message.
 pub(super) struct ApiError(anyhow::Error);
@@ -276,7 +276,7 @@ impl IntoResponse for ApiError {
             };
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
-        // Typed process errors (DMN-119), same mapping as the gRPC
+        // Typed process errors, same mapping as the gRPC
         // `to_status` arm.
         if let Some(err) = self
             .0
@@ -326,7 +326,7 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
-        // Typed file-operation errors (DMN-070): the file manager UI needs
+        // Typed file-operation errors: the file manager UI needs
         // "already exists" told apart from "the node is broken", and both
         // arrive here as one `anyhow::Error`.
         if let Some(err) = self.0.downcast_ref::<files::FileError>() {
@@ -346,7 +346,7 @@ impl IntoResponse for ApiError {
             };
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
-        // Typed account-management errors (DMN-100), same status mapping as
+        // Typed account-management errors, same status mapping as
         // the gRPC `to_status` arm.
         if let Some(err) = self.0.downcast_ref::<users::UserError>() {
             use users::UserError as U;
@@ -360,8 +360,8 @@ impl IntoResponse for ApiError {
             };
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
-        // Token management attempted with something other than the primary
-        // (DMN-065). 403, not 401: the credential is valid, the operation is
+        // Token management attempted with something other than the primary.
+        // 403, not 401: the credential is valid, the operation is
         // not open to it, and a client must not read this as "refresh me".
         if let Some(denied) = self.0.downcast_ref::<super::tokens::TokenDenied>() {
             return (
@@ -374,7 +374,7 @@ impl IntoResponse for ApiError {
                 .into_response();
         }
         // The repository is private and nothing the caller configured opens
-        // it (DMN-062). The URL travels structured so the CLI can offer the
+        // it. The URL travels structured so the CLI can offer the
         // token / ssh-key setup right there and retry, instead of leaving the
         // user to read an `asc auth add` hint out of a message.
         if let Some(required) = self
@@ -416,13 +416,13 @@ struct AppJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     /// Registry install spec (`name` or `stack/app`) — what groups an app
-    /// under its stack in `asc stacks` (DMN-051); absent for apps installed
-    /// straight from a repository URL and for pre-DMN-003 installs.
+    /// under its stack in `asc stacks`; absent for apps installed
+    /// straight from a repository URL and for legacy installs.
     #[serde(skip_serializing_if = "Option::is_none")]
     package: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota: Option<crate::daemon::apps::meta::Quota>,
-    /// Stable instance identity (DMN-044); absent for pre-DMN-044 installs.
+    /// Stable instance identity; absent for legacy installs.
     #[serde(skip_serializing_if = "Option::is_none")]
     uuid: Option<String>,
 }
@@ -575,7 +575,7 @@ struct HardwareQuery {
     refresh: Option<String>,
 }
 
-/// Hardware inventory (DMN-142), serialized straight from the monitor
+/// Hardware inventory, serialized straight from the monitor
 /// module's structs: their field names are the proto's.
 async fn hardware(Query(query): Query<HardwareQuery>) -> Response {
     let refresh = matches!(query.refresh.as_deref(), Some("1" | "true"));
@@ -593,7 +593,7 @@ async fn hardware(Query(query): Query<HardwareQuery>) -> Response {
     }
 }
 
-/// Real host listening ports (DMN-103), merged with Docker/app attribution —
+/// Real host listening ports, merged with Docker/app attribution —
 /// see `ApiState::listening_ports`.
 async fn listening_ports(
     State(state): State<Arc<ApiState>>,
@@ -627,7 +627,7 @@ struct ProcessesQuery {
     kernel_threads: bool,
 }
 
-/// Host processes (DMN-119), see `ApiState::list_processes`.
+/// Host processes, see `ApiState::list_processes`.
 async fn list_processes(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -666,7 +666,7 @@ async fn list_processes(
     .into_response())
 }
 
-/// Body of `POST /v1/processes/{pid}/signal` (DMN-119).
+/// Body of `POST /v1/processes/{pid}/signal`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SignalProcessBody {
@@ -813,7 +813,7 @@ async fn app_disk(
 }
 
 /// `asc disk` with no app: every visible app's footprint plus the capacity of
-/// the filesystem the app store lives on (DMN-053).
+/// the filesystem the app store lives on.
 async fn disk_summary(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -861,7 +861,7 @@ async fn ports_summary(
     .into_response())
 }
 
-/// Query of `GET /v1/docker/containers` (DMN-102).
+/// Query of `GET /v1/docker/containers`.
 #[derive(Deserialize)]
 struct ContainersQuery {
     /// Include stopped containers, like `docker ps -a`.
@@ -915,7 +915,7 @@ async fn list_containers(
     .into_response())
 }
 
-/// Query of `GET /v1/docker/stats` (DMN-112).
+/// Query of `GET /v1/docker/stats`.
 #[derive(Deserialize)]
 struct ContainerStatsQuery {
     /// Comma-separated container ids or names; absent = every running one.
@@ -954,7 +954,7 @@ async fn container_stats(
     .into_response())
 }
 
-/// Every image on the host, ASC-owned or not (DMN-104). Root context only.
+/// Every image on the host, ASC-owned or not. Root context only.
 async fn list_images(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -975,7 +975,7 @@ async fn list_images(
     .into_response())
 }
 
-/// Every named volume on the host (DMN-104). Root context only.
+/// Every named volume on the host. Root context only.
 async fn list_volumes(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -997,7 +997,7 @@ async fn list_volumes(
     .into_response())
 }
 
-/// Every network on the host (DMN-104), inventory-only. Root context only.
+/// Every network on the host, inventory-only. Root context only.
 async fn list_networks(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -1017,7 +1017,7 @@ async fn list_networks(
     .into_response())
 }
 
-/// `docker system df`'s four categories (DMN-104). Root context only.
+/// `docker system df`'s four categories. Root context only.
 async fn docker_disk_usage(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -1040,7 +1040,7 @@ async fn docker_disk_usage(
     .into_response())
 }
 
-/// Body of `POST /v1/docker/prune` (DMN-105).
+/// Body of `POST /v1/docker/prune`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PruneDockerBody {
@@ -1088,7 +1088,7 @@ async fn prune_docker(
     .into_response())
 }
 
-/// Body of `POST /v1/docker/control` (DMN-111): exactly one of `container`
+/// Body of `POST /v1/docker/control`: exactly one of `container`
 /// and `composeProject`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1139,7 +1139,7 @@ async fn control_container(
 #[derive(Deserialize)]
 struct StatsQuery {
     /// Comma-separated app ids; empty/absent means every app the caller can
-    /// see (DMN-080). Applied before the sampling window, same as the gRPC
+    /// see. Applied before the sampling window, same as the gRPC
     /// GetAppStats/StreamAppStats filter.
     #[serde(default)]
     ids: Option<String>,
@@ -1191,17 +1191,17 @@ struct UpgradeBody {
     /// newest tag, or the tracked branch for a direct repository install.
     #[serde(default)]
     version: Option<String>,
-    /// Switch to following this branch (DMN-140); it is remembered, so later
+    /// Switch to following this branch; it is remembered, so later
     /// upgrades keep pulling it. Exclusive with `tag` and `version`.
     #[serde(default)]
     branch: Option<String>,
-    /// Pin to this tag and stop following a branch (DMN-140). Exclusive with
+    /// Pin to this tag and stop following a branch. Exclusive with
     /// `branch` and `version`.
     #[serde(default)]
     tag: Option<String>,
 }
 
-/// Upgrade one app (DMN-053). The app must be stopped; the caller must own
+/// Upgrade one app. The app must be stopped; the caller must own
 /// it. Cloning uses the daemon's git credentials.
 async fn upgrade_app(
     State(state): State<Arc<ApiState>>,
@@ -1223,7 +1223,7 @@ async fn upgrade_app(
         None => id,
     };
     let json = match state.upgrade(ctx, spec, target).await? {
-        // The commits are full shas (DMN-056); abbreviating them is the
+        // The commits are full shas; abbreviating them is the
         // caller's choice.
         crate::daemon::pkg::UpgradeOutcome::Upgraded {
             id,
@@ -1251,12 +1251,12 @@ async fn upgrade_app(
 #[derive(Deserialize)]
 struct InstallBody {
     /// "name", "stack" or "stack/app", optionally with "@version" — or a
-    /// direct git repository URL (DMN-040).
+    /// direct git repository URL.
     spec: String,
     /// Registry source to install from; required when several provide the package.
     #[serde(default)]
     source: Option<String>,
-    /// Custom app name (DMN-024); for a stack — the per-app name prefix.
+    /// Custom app name; for a stack — the per-app name prefix.
     #[serde(default)]
     name: Option<String>,
     /// Branch/tag to check out — direct repository installs only.
@@ -1264,31 +1264,31 @@ struct InstallBody {
     branch: Option<String>,
     #[serde(default)]
     tag: Option<String>,
-    /// In-repository subdirectory of the manifest (DMN-096) — direct
+    /// In-repository subdirectory of the manifest — direct
     /// repository installs only, for a monorepo package.
     #[serde(default)]
     path: Option<String>,
     /// One app of a stack to install instead of every non-optional one
-    /// (DMN-097) — direct repository installs only, where there is no
+    /// — direct repository installs only, where there is no
     /// registry entry and so no `<stack>/<app>` spec form.
     #[serde(default)]
     stack_app: Option<String>,
-    /// Consent to the package license (DMN-028); without it a repository
+    /// Consent to the package license; without it a repository
     /// shipping a LICENSE fails with the structured license error.
     #[serde(default)]
     license_ack: bool,
-    /// Image source when the manifest offers both `image` and `image-build`
-    /// (DMN-050): "prebuilt" or "build". Absent → the structured image-choice
+    /// Image source when the manifest offers both `image` and `image-build`:
+    /// "prebuilt" or "build". Absent → the structured image-choice
     /// error for such manifests.
     #[serde(default)]
     image_choice: Option<crate::daemon::apps::ImageSource>,
-    /// Skip the resource shortfall check (DMN-099); without it, a host that
+    /// Skip the resource shortfall check; without it, a host that
     /// cannot currently cover the package's requirements or runtime quota
     /// fails with the structured `requirements_not_met` error.
     #[serde(default)]
     force: bool,
     /// Install as one of InspectPackageResponse's detected methods instead
-    /// of the package's own asc.yaml (DMN-107) — direct repository installs
+    /// of the package's own asc.yaml — direct repository installs
     /// only. Absent, `asc_manifest` and `asc_stack` all read the manifest
     /// normally.
     #[serde(default)]
@@ -1349,7 +1349,7 @@ struct CloneBody {
     name: Option<String>,
 }
 
-/// Full copy of one app the caller owns (DMN-019/DMN-113), under the next
+/// Full copy of one app the caller owns, under the next
 /// free `<id>-N`. The clone always starts stopped.
 async fn clone_app(
     State(state): State<Arc<ApiState>>,
@@ -1430,7 +1430,7 @@ struct AppImageQuery {
     check_remote: bool,
 }
 
-/// Image freshness of a Docker app (DMN-120); `{}` for other runtimes.
+/// Image freshness of a Docker app; `{}` for other runtimes.
 async fn app_image(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -1521,7 +1521,7 @@ async fn remove_app(
 
 /// The app's settings schema (`asc.settings.yaml`, `null` when the package
 /// defines none) together with the values chosen so far — everything an
-/// out-of-process editor needs (DMN-043).
+/// out-of-process editor needs.
 async fn app_settings(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
@@ -1587,7 +1587,7 @@ async fn console_token(
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
 }
 
-// ── Registry sources & credentials (DMN-083/084) ──
+// ── Registry sources & credentials ──
 
 async fn list_sources(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
     let sources = state.list_sources().await?;
@@ -1645,7 +1645,7 @@ async fn list_credentials(State(state): State<Arc<ApiState>>) -> Result<Response
 }
 
 /// Exactly one of `token`/`sshPrivateKeyPem` is required — mirrors the
-/// gRPC contract's `oneof secret` (DMN-087).
+/// gRPC contract's `oneof secret`.
 #[derive(Deserialize)]
 struct UpsertCredentialBody {
     #[serde(rename = "type", default)]
@@ -1678,7 +1678,7 @@ async fn upsert_credential(
     };
     let credential = state
         // Not managed by anything pushed through the local REST API — that
-        // marker is reserved for the platform's own gRPC push (DMN-110).
+        // marker is reserved for the platform's own gRPC push.
         .upsert_credential(kind, body.target, secret, body.username, body.app, None)
         .await?;
     Ok(Json(serde_json::json!({ "credential": credential_to_json(&credential) })).into_response())
@@ -1704,7 +1704,7 @@ async fn remove_credential(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-// ── API tokens (DMN-065, DMN-066 — see docs/security-tokens.md) ──
+// ── API tokens (see docs/security-tokens.md) ──
 //
 // Four routes, three of them behind `require_primary`: an access token may
 // drive the whole daemon but may not touch the tokens themselves.
@@ -1821,7 +1821,7 @@ async fn token_status(
     .into_response())
 }
 
-// ── Files (DMN-070) — see docs/files.md ──
+// ── Files — see docs/files.md ──
 
 fn file_kind_str(kind: files::FileKind) -> &'static str {
     match kind {
@@ -1871,7 +1871,7 @@ struct ListQuery {
     path: String,
     #[serde(default)]
     hidden: bool,
-    /// App-scoped confinement (DMN-086) — see `ApiState::app_file_scope`.
+    /// App-scoped confinement — see `ApiState::app_file_scope`.
     #[serde(default)]
     app_id: Option<String>,
 }
@@ -2157,7 +2157,7 @@ async fn list_system_identities(
     .into_response())
 }
 
-// ── Local account management (DMN-100, see docs/user-management.md) ──
+// ── Local account management (see docs/user-management.md) ──
 
 fn managed_user_json(u: &users::ManagedUser) -> serde_json::Value {
     serde_json::json!({
@@ -2432,7 +2432,7 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
 
-    /// The producing side of the DMN-062 contract the client reconstructs in
+    /// The producing side of the contract the client reconstructs in
     /// `daemon::client::typed_error`: a private repository must reach the
     /// caller as a structured `auth_required`, not as a message to parse.
     #[tokio::test]

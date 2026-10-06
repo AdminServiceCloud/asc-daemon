@@ -1,4 +1,4 @@
-//! `~/.ssh/authorized_keys` management for a managed account (DMN-100):
+//! `~/.ssh/authorized_keys` management for a managed account:
 //! idempotent add, fingerprint-based remove, and a deliberately limited
 //! listing parser — see [`list_authorized_keys`]'s doc comment for what it
 //! does not attempt to parse.

@@ -1,4 +1,4 @@
-//! Image freshness and repull of a Docker app (DMN-120).
+//! Image freshness and repull of a Docker app.
 //!
 //! [`status`] answers "which image does this app run, what version is it,
 //! and is there a newer build of the same tag": the tag's local manifest
@@ -52,7 +52,7 @@ pub struct ImageStatus {
     pub image: String,
     /// Tag part; `None` for a digest reference.
     pub tag: Option<String>,
-    /// Built from the package's Dockerfile (DMN-050) rather than pulled.
+    /// Built from the package's Dockerfile rather than pulled.
     pub built_locally: bool,
     /// [`repull`] applies: pulled from a registry under a mutable tag.
     pub repullable: bool,

@@ -1,4 +1,4 @@
-//! End-to-end install from a bare Dockerfile with no `asc.yaml` (DMN-107).
+//! End-to-end install from a bare Dockerfile with no `asc.yaml`.
 //! Gated behind `ASC_DAEMON_TEST_DOCKER=1` since it needs a live Docker
 //! daemon (the Docker runtime always builds/creates a real container,
 //! `install_method` or not) — mirrors `tests/exec_docker.rs`.

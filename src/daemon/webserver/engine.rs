@@ -1,4 +1,4 @@
-//! Driving nginx itself (DMN-122): install or adopt it, test a
+//! Driving nginx itself: install or adopt it, test a
 //! configuration, reload, report its state — in `system` mode (package +
 //! systemd) or `docker` mode (the `asc-webserver` container on the host
 //! network). Blocking; the manager calls this from worker threads.
@@ -24,7 +24,7 @@ const APT_PIN: &str = "/etc/apt/preferences.d/99nginx-asc";
 const YUM_REPO: &str = "/etc/yum.repos.d/nginx-asc.repo";
 const NGINX_KEY_URL: &str = "https://nginx.org/keys/nginx_signing.key";
 
-/// The read-write bind of the site log directory (DMN-128).
+/// The read-write bind of the site log directory.
 fn log_bind(paths: &Paths) -> String {
     format!("{0}:{0}", paths.logs.display())
 }
@@ -388,7 +388,7 @@ impl Engine<'_> {
         Ok(())
     }
 
-    /// A container created before site logs existed (DMN-128) does not see
+    /// A container created before site logs existed does not see
     /// the log directory, and one created before the default site pointed at
     /// a host directory does not see that one: nginx would fail to open the
     /// files. Recreate it with the binds — same image, same configuration.

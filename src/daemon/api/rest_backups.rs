@@ -1,4 +1,4 @@
-//! REST transport for backups and scheduled jobs (DMN-114/DMN-115) — the
+//! REST transport for backups and scheduled jobs — the
 //! same operations as BackupService/ScheduleService, field names mirroring
 //! the proto messages (see docs/api.md).
 

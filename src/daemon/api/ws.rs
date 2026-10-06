@@ -44,7 +44,7 @@ struct ConsoleQuery {
     /// Initial log tail (logs sessions).
     #[serde(default)]
     tail: Option<usize>,
-    /// Initial PTY geometry (exec sessions, DMN-082). Defaults to 80x24
+    /// Initial PTY geometry (exec sessions). Defaults to 80x24
     /// until the client's first resize frame — a plain fallback, not a
     /// negotiated one, since the handshake carries no room for it.
     #[serde(default)]
@@ -162,7 +162,7 @@ async fn stream_docker_logs(
     container: &str,
     tail: usize,
 ) -> anyhow::Result<()> {
-    // Only the current run (DMN-116): a restarted container keeps appending
+    // Only the current run: a restarted container keeps appending
     // to the log of every run before it.
     let log_stream = match docker::run_started_at(cfg, container).await {
         Ok(since) => docker::logs_follow(cfg, container, tail, since).await,
@@ -198,7 +198,7 @@ async fn stream_docker_logs(
 }
 
 /// How many of the current run's log messages a fresh attach session starts
-/// with (DMN-116). Later joiners get the hub's own replay buffer instead.
+/// with. Later joiners get the hub's own replay buffer instead.
 const ATTACH_BACKLOG_TAIL: usize = 1000;
 
 /// Docker attach (bidirectional): client frames → stdin, container → binary
@@ -211,7 +211,7 @@ async fn attach_docker(
     container: &str,
 ) -> anyhow::Result<()> {
     let cfg = &state.config.docker;
-    // The session's backlog is the current run only (DMN-116). Attach's own
+    // The session's backlog is the current run only. Attach's own
     // `logs` replay cannot give that — it is every run the container ever
     // had — so the live attach goes up bare first and the backlog is read
     // from the log afterwards, cut at both ends: at `StartedAt` (earlier
@@ -269,7 +269,7 @@ async fn attach_docker(
     Ok(())
 }
 
-/// Frame tags for an exec session (DMN-082) — the one console kind where
+/// Frame tags for an exec session — the one console kind where
 /// both directions are tagged, unlike LOGS/ATTACH. Values match
 /// wsapi/protocol.go's TagData/TagResize byte-for-byte: the platform relay
 /// forwards these largely unchanged rather than re-deriving them from an
@@ -278,7 +278,7 @@ async fn attach_docker(
 const EXEC_TAG_DATA: u8 = 0x00;
 const EXEC_TAG_RESIZE: u8 = 0x01;
 
-/// Interactive shell inside a container (DMN-082): tagged binary frames in
+/// Interactive shell inside a container: tagged binary frames in
 /// both directions — data (0x00) and, client→daemon only, resize (0x01: a
 /// 4-byte big-endian cols then rows payload). Not run through the console
 /// hub: unlike attach, an exec session is personal to whoever opened it,

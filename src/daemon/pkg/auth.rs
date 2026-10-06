@@ -1,19 +1,19 @@
 //! Per-user credentials for private package repositories and image
-//! registries (DMN-003, DMN-045, DMN-046).
+//! registries.
 //!
 //! One store holds both kinds, told apart by `type` ([`Kind`]): `repo`
 //! credentials authorize `git clone`, `registry` credentials authorize the
 //! Docker Engine image pull. Both are keyed by a host or host/prefix
 //! (`github.com/myorg`, `ghcr.io/myorg`) and may additionally be bound to a
-//! single application ([`Credential::app`], its DMN-044 uuid or id), so a
+//! single application ([`Credential::app`], its uuid or id), so a
 //! token can be scoped to exactly the app that needs it.
 //!
 //! The file is JSON, 0600, one per scope: `/etc/asc/auth.json` (root) and
-//! `~/.asc/auth.json` (user, alongside the rest of the DMN-041 tree). A
+//! `~/.asc/auth.json` (user, alongside the rest of the tree). A
 //! regular user therefore cannot open the system store at all — that is the
 //! point of 0600 — so it reads as "no credentials in that scope" rather than
 //! as an error, and unprivileged commands keep working on `~/.asc`. The
-//! pre-DMN-045 TOML files (`/etc/asc/git-auth.toml`,
+//! legacy TOML files (`/etc/asc/git-auth.toml`,
 //! `~/.config/asc/git-auth.toml`) are still read when no JSON store exists
 //! and are migrated on the next write, so configured auth keeps working.
 //!
@@ -42,9 +42,9 @@ use crate::daemon::apps::UserContext;
 use crate::daemon::i18n::{Msg, t, tf, tf2};
 
 const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/auth.json";
-/// Pre-DMN-045 TOML store, read-only (migrated on the next write).
+/// Legacy TOML store, read-only (migrated on the next write).
 const LEGACY_SYSTEM_PATH: &str = "/etc/asc/git-auth.toml";
-/// Where `add_ssh_key` (DMN-087) writes the private-key files it owns —
+/// Where `add_ssh_key` writes the private-key files it owns —
 /// separate from `~/.ssh`, which belongs to the user, not to a credential
 /// pushed over the API.
 const DEFAULT_SYSTEM_SSH_KEY_DIR: &str = "/etc/asc/ssh-keys";
@@ -88,11 +88,11 @@ pub struct Credential {
     /// Registry user name — the Engine needs it alongside the token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// Bind to a single application (DMN-044 uuid, or its id). `None` — the
+    /// Bind to a single application (uuid, or its id). `None` — the
     /// credential applies to every app whose URL/image matches `pattern`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
-    /// Ownership marker (DMN-110): `Some("platform")` for an entry a
+    /// Ownership marker: `Some("platform")` for an entry a
     /// platform push installed; `None` for anything the operator added by
     /// hand (`asc auth add`). Only the push that sets this ever removes an
     /// entry on the operator's behalf — see `docs/*/org-credentials.md`.
@@ -124,7 +124,7 @@ impl Method {
 }
 
 /// What a caller of [`GitAuth::add`]/[`GitAuth::add_ssh_key`] through the API
-/// (DMN-084/DMN-087) supplies — kept separate from [`Method`] because a
+/// supplies — kept separate from [`Method`] because a
 /// caller never supplies a `PathBuf`: where the key file ends up on this
 /// host is [`GitAuth::add_ssh_key`]'s own decision, not the caller's.
 pub enum CredentialSecret {
@@ -140,7 +140,7 @@ struct AuthFile {
     credentials: Vec<Credential>,
 }
 
-/// Pre-DMN-045 TOML store: `[[credential]]` tables.
+/// Legacy TOML store: `[[credential]]` tables.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct LegacyAuthFile {
     #[serde(default, rename = "credential")]
@@ -155,7 +155,7 @@ pub struct GitAuth {
     user: Vec<Credential>,
     scope: Scope,
     /// Where the user list came from, when it is *not* this process's own
-    /// `~/.asc/auth.json` — the daemon reading a caller's store (DMN-062).
+    /// `~/.asc/auth.json` — the daemon reading a caller's store.
     /// [`Self::save`] writes here instead of resolving `$HOME`.
     user_file: Option<PathBuf>,
 }
@@ -205,7 +205,7 @@ impl GitAuth {
         }
     }
 
-    /// Pre-DMN-045 TOML paths, consulted only when the JSON store is absent.
+    /// Legacy TOML paths, consulted only when the JSON store is absent.
     fn legacy_system_path() -> PathBuf {
         PathBuf::from(LEGACY_SYSTEM_PATH)
     }
@@ -218,7 +218,7 @@ impl GitAuth {
         Self::load_with(Scope::current())
     }
 
-    /// Credentials to use **on behalf of** `ctx` (DMN-062).
+    /// Credentials to use **on behalf of** `ctx`.
     ///
     /// The daemon runs as root, so `Scope::current()` would only ever see
     /// `/etc/asc/auth.json` — a regular user's own `~/.asc/auth.json`, the
@@ -333,7 +333,7 @@ impl GitAuth {
     /// Path-explicit loader — the env-free core of [`Self::load_with`], so
     /// tests can exercise the legacy fallback without touching process env.
     /// A missing JSON store falls back to the legacy TOML one, so an install
-    /// configured before DMN-045 keeps authenticating until the next write
+    /// configured by an older version keeps authenticating until the next write
     /// migrates it.
     fn load_paths(
         system_path: &Path,
@@ -451,7 +451,7 @@ impl GitAuth {
     }
 
     /// Like [`Self::add`], but the secret is raw PEM bytes rather than an
-    /// already-resolved [`Method`] (DMN-087): the key is written to a
+    /// already-resolved [`Method`]: the key is written to a
     /// deterministic, 0600 file this store owns — `/etc/asc/ssh-keys` for
     /// `Scope::System`, alongside `auth.json` for `Scope::User` — and a
     /// [`Method::SshKey`] pointing at it is registered via [`Self::add`].
@@ -491,7 +491,7 @@ impl GitAuth {
     /// Remove credentials for a host or prefix. `kind` narrows the removal to
     /// one type; `None` removes every entry with that pattern. `managed_by`,
     /// when set, additionally narrows the removal to entries carrying that
-    /// exact marker — a platform harvest (DMN-110) passes its own marker so
+    /// exact marker — a platform harvest passes its own marker so
     /// it can never delete an operator-added entry that happens to share the
     /// same `(kind, pattern)` under a different app binding. Also deletes
     /// the backing key file of any removed ssh-key credential.
@@ -534,7 +534,7 @@ impl GitAuth {
     /// e.g. `ghcr.io/org/app:1.0` or the implicit-Docker-Hub `nginx:1.28`.
     ///
     /// `apps` are the identities the app answers to — its id and, once it
-    /// exists, its DMN-044 uuid — so `--app` accepts either spelling.
+    /// exists, its uuid — so `--app` accepts either spelling.
     pub fn lookup_registry(&self, image: &str, apps: &[&str]) -> Option<&Credential> {
         let target = normalize_image(image);
         // Prefer a credential bound to one of this app's identities; fall
@@ -687,7 +687,7 @@ fn is_out_of_reach(err: &std::io::Error, owner: Scope) -> bool {
     owner == Scope::System && err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
-/// Read a pre-DMN-045 TOML store. Entries have no `type` and are therefore
+/// Read a legacy TOML store. Entries have no `type` and are therefore
 /// all `Kind::Repo` — the only kind that existed.
 fn read_legacy_auth(path: &Path) -> Result<Option<Vec<Credential>>> {
     match fs::read_to_string(path) {

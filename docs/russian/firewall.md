@@ -10,7 +10,7 @@
 
 Для опытных есть **режим RAW**: весь ruleset сервера правится текстом. Он намеренно огорожен — требует явного подтверждения риска и использует тот же откат.
 
-Всё работает автономно через `asc firewall …`; платформа AdminService.Cloud пользуется тем же API ([🧩 node-modules](../../../asc-platform/docs/features/node-modules.md)). Команде нужен работающий демон: таймер отката живёт внутри него. Файрволом управляет только системный (root) демон.
+Всё работает автономно через `asc firewall …`; платформа AdminService.Cloud пользуется тем же API (🧩 node-modules). Команде нужен работающий демон: таймер отката живёт внутри него. Файрволом управляет только системный (root) демон.
 
 ## 🎯 Сценарии использования
 
@@ -99,12 +99,6 @@ Capabilities в `GetStatus`: `firewall`, `firewall.raw`. Все вызовы —
 
 `asc firewall status | install | enable | disable | allow | deny | rules | remove | set | settings | render | apply | confirm | rollback | ruleset | tables`. Справочник команд: <https://docs.adminservice.cloud/ru/commands/firewall>.
 
-## 🔗 Связанные задачи
-
-| ID | Что |
-|---|---|
-| DMN-148 | Модуль: модель, рендер, персистентность, обнаружение конфликтов |
-| DMN-149 | Применение с автооткатом и режим RAW |
-| DMN-151 | CLI, переводы, зеркало документации |
+## 🔗 См. также
 
 См. также: [🚫 fail2ban](fail2ban.md) — банит через собственную таблицу nftables рядом с `inet asc`; [🌐 webserver](webserver.md) — установщик лишь подсказывает про файрвол и его не меняет.

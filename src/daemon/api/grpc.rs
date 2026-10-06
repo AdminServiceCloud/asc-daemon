@@ -78,7 +78,7 @@ pub(super) fn ctx_of<T>(request: &Request<T>) -> UserContext {
 }
 
 /// anyhow errors → gRPC status. Typed [`files::FileError`]s keep their own
-/// code (DMN-070); "not found" text otherwise keeps its code too; everything
+/// code; "not found" text otherwise keeps its code too; everything
 /// else becomes INTERNAL with the message preserved.
 pub(super) fn to_status(err: anyhow::Error) -> Status {
     let msg = format!("{err:#}");
@@ -349,7 +349,7 @@ fn metrics_to_pb(m: &crate::daemon::monitor::SystemMetrics) -> pb::SystemMetrics
     }
 }
 
-/// Hardware inventory (DMN-142) → proto. Kept next to `metrics_to_pb`: the
+/// Hardware inventory → proto. Kept next to `metrics_to_pb`: the
 /// two mirror the monitor module's structs one to one.
 fn hardware_to_pb(h: &crate::daemon::monitor::hardware::HardwareInfo) -> pb::HardwareInfo {
     pb::HardwareInfo {
@@ -510,7 +510,7 @@ impl MonitorService for Grpc {
         // Subscribe before reading `latest()`: the other order would drop a
         // sample taken between the two calls.
         let rx = self.0.monitor.subscribe();
-        // The sample already in the buffer is the first frame (DMN-075), so a
+        // The sample already in the buffer is the first frame, so a
         // panel that just connected paints immediately instead of waiting out
         // a whole sampling interval. Repeating it as the next broadcast frame
         // is harmless — the client only ever renders the newest numbers.
@@ -720,9 +720,9 @@ fn repull_outcome_to_pb(
     }
 }
 
-/// The inspected package (DMN-098) in its wire form. `compose_available`
+/// The inspected package in its wire form. `compose_available`
 /// reflects whether the `docker compose` plugin was found on this host
-/// (DMN-109) — unlike every other method, `DockerCompose.supported()` cannot
+/// — unlike every other method, `DockerCompose.supported()` cannot
 /// be a pure function of the kind alone.
 fn package_info_to_pb(
     info: pkg::PackageInfo,
@@ -737,7 +737,7 @@ fn package_info_to_pb(
         license,
     });
     let requirements_not_met = info.shortfall.map(requirements_not_met_detail);
-    // Same shape GetAppSettingsResponse.settings_json carries (DMN-138); a
+    // Same shape GetAppSettingsResponse.settings_json carries; a
     // SettingsFile always serializes, so a failure here is not worth an error.
     let settings_json = info
         .settings
@@ -781,7 +781,7 @@ fn package_info_to_pb(
 }
 
 /// Reverse of `detected_method_to_pb`'s kind mapping: which method the
-/// caller wants `InstallApp`/`InstallAppStream` to install as (DMN-107),
+/// caller wants `InstallApp`/`InstallAppStream` to install as,
 /// rather than reading whatever manifest happens to be at the package root.
 /// `Unspecified`/`AscManifest`/`AscStack` all mean "read the package's own
 /// manifest normally" — `install_one` already does that when given `None`.
@@ -871,7 +871,7 @@ fn requirements_to_pb(
 }
 
 /// `LicenseRequired` is not a gRPC error: the caller's request otherwise
-/// succeeded, it just needs a consent round trip (DMN-091). `install_app`
+/// succeeded, it just needs a consent round trip. `install_app`
 /// and `install_app_stream` catch the typed error before it would reach
 /// [`to_status`] and render it through this instead.
 fn license_required_to_pb(required: pkg::LicenseRequired) -> pb::InstallAppResponse {
@@ -886,8 +886,8 @@ fn license_required_to_pb(required: pkg::LicenseRequired) -> pb::InstallAppRespo
     }
 }
 
-/// `RequirementsNotMet` is the same non-error shape as `LicenseRequired`
-/// (DMN-099): the caller renders its own "not enough resources" screen and
+/// `RequirementsNotMet` is the same non-error shape as `LicenseRequired`:
+/// the caller renders its own "not enough resources" screen and
 /// retries with `force = true`.
 fn requirements_not_met_to_pb(not_met: pkg::RequirementsNotMet) -> pb::InstallAppResponse {
     pb::InstallAppResponse {
@@ -897,7 +897,7 @@ fn requirements_not_met_to_pb(not_met: pkg::RequirementsNotMet) -> pb::InstallAp
 }
 
 /// The wire form of a resource shortfall — an install's typed error and the
-/// inspect preflight (DMN-131) alike.
+/// inspect preflight alike.
 fn requirements_not_met_detail(not_met: pkg::RequirementsNotMet) -> pb::RequirementsNotMetDetail {
     pb::RequirementsNotMetDetail {
         app: not_met.app,
@@ -917,8 +917,8 @@ fn requirements_not_met_detail(not_met: pkg::RequirementsNotMet) -> pb::Requirem
 /// "otherwise succeeded, needs one more round trip" install errors
 /// (`LicenseRequired`, `RequirementsNotMet`, `AuthRequired`) before they
 /// would reach [`to_status`] and renders each as a normal, successful
-/// response instead of a bare INTERNAL status (DMN-106 for the last one —
-/// `to_status` has no downcast for `pkg::auth::AuthRequired`).
+/// response instead of a bare INTERNAL status.
+/// (`to_status` has no downcast for `pkg::auth::AuthRequired`.)
 fn install_error_to_pb(err: anyhow::Error) -> Result<pb::InstallAppResponse, Status> {
     let err = match err.downcast::<pkg::LicenseRequired>() {
         Ok(required) => return Ok(license_required_to_pb(required)),
@@ -939,7 +939,7 @@ fn install_error_to_pb(err: anyhow::Error) -> Result<pb::InstallAppResponse, Sta
 
 /// Shared by `upgrade_app` and `upgrade_app_stream`: both end in the same
 /// result shape, one returned directly, the other as the last stream event.
-/// `UpgradeAppRequest.branch`/`.tag` -> the upgrade target (DMN-140). They
+/// `UpgradeAppRequest.branch`/`.tag` -> the upgrade target. They
 /// are mutually exclusive: naming both would leave it unclear whether the app
 /// should follow a branch afterwards.
 fn upgrade_target(
@@ -1149,7 +1149,7 @@ impl AppService for Grpc {
                 request.path,
                 request.stack_app,
                 request.license_ack,
-                // The image-source choice (DMN-050) has no gRPC field yet; a
+                // The image-source choice has no gRPC field yet; a
                 // both-image manifest surfaces ImageChoiceRequired here. The
                 // interactive flow is the CLI/REST path.
                 None,
@@ -1163,7 +1163,7 @@ impl AppService for Grpc {
         }
     }
 
-    /// Streamed sibling of `install_app` (DMN-090): the platform's install
+    /// Streamed sibling of `install_app`: the platform's install
     /// dialog uses this one instead, so an operator watching it sees the
     /// package clone / image pull / image build happen live rather than a
     /// spinner that resolves minutes later with no way to tell progress from
@@ -1261,9 +1261,9 @@ impl AppService for Grpc {
                 &git_url,
             ))),
             // The repository is private and nothing the caller configured
-            // opens it (DMN-062) — not a gRPC error, the same "otherwise
+            // opens it — not a gRPC error, the same "otherwise
             // succeeded, needs one more round trip" shape install_error_to_pb
-            // gives InstallAppResponse (DMN-106).
+            // gives InstallAppResponse.
             Err(err) => match err.downcast::<pkg::auth::AuthRequired>() {
                 Ok(required) => Ok(Response::new(pb::InspectPackageResponse {
                     auth_required: Some(auth_required_to_pb(&required)),
@@ -1341,7 +1341,7 @@ impl AppService for Grpc {
         Ok(Response::new(clone_outcome_to_pb(meta, copied_bytes)))
     }
 
-    /// Streamed sibling of `clone_app` (DMN-113), mirroring
+    /// Streamed sibling of `clone_app`, mirroring
     /// `upgrade_app_stream` exactly: the danger-zone clone dialog watches
     /// this one so a large copy doesn't look like a hang. A disconnect here
     /// does not cancel the clone — see `ApiState::clone_app_stream`.
@@ -1531,8 +1531,8 @@ impl AppService for Grpc {
         let ctx = ctx_of(&request);
         let req = request.into_inner();
         // A sampling window already costs ~500ms; anything faster than 1s
-        // is not a live stream, it is a busy loop (DMN-081). Nor faster than
-        // the node's own sampler (DMN-135): an operator who slowed the
+        // is not a live stream, it is a busy loop. Nor faster than
+        // the node's own sampler: an operator who slowed the
         // cadence down to spare the CPU meant the app page too.
         let sampler = Duration::from_millis(self.0.monitor.settings().interval_ms);
         let min_interval = Duration::from_secs(req.min_interval_secs.max(1) as u64).max(sampler);
@@ -1679,7 +1679,7 @@ fn port_protocol_to_pb(p: crate::daemon::docker::PortProtocol) -> pb::PortProtoc
     }
 }
 
-// ── Registry sources & credentials (DMN-083/084) ──
+// ── Registry sources & credentials ──
 
 fn source_to_pb(s: &pkg::sources::Source) -> pb::Source {
     pb::Source {
@@ -1815,7 +1815,7 @@ impl CredentialService for Grpc {
     }
 }
 
-// ── API tokens (DMN-065, DMN-066 — see docs/security-tokens.md) ──
+// ── API tokens (see docs/security-tokens.md) ──
 
 /// How the calling request authenticated, stamped by the transport
 /// middleware next to the [`UserContext`]. Absent means a middleware bug, and
@@ -2031,7 +2031,7 @@ impl TokenService for Grpc {
     }
 }
 
-// ── Files (DMN-070) — see docs/files.md ──
+// ── Files — see docs/files.md ──
 
 fn file_kind_to_pb(kind: files::FileKind) -> pb::FileKind {
     match kind {
@@ -2374,7 +2374,7 @@ fn authorized_key_to_pb(k: users::AuthorizedKey) -> pb::AuthorizedKey {
     }
 }
 
-/// Local Linux account management (DMN-100, see docs/user-management.md):
+/// Local Linux account management (see docs/user-management.md):
 /// every method is root-gated, mirroring `FileService` above — whole-machine
 /// account administration, not scoped per calling user.
 #[tonic::async_trait]
@@ -2519,7 +2519,7 @@ impl UserService for Grpc {
         Ok(Response::new(pb::RemoveAuthorizedKeyResponse {}))
     }
 }
-/// Docker host inventory (DMN-102/DMN-112, see docs/app-management.md): the
+/// Docker host inventory (see docs/app-management.md): the
 /// whole Engine, not just ASC's own containers. Root-only — the service
 /// layer enforces it, the same way FileService/UserService do.
 #[tonic::async_trait]
@@ -2803,7 +2803,7 @@ mod tests {
         assert_eq!(auth_required_to_pb(&ssh).transport, "ssh");
     }
 
-    /// Before DMN-106, `to_status` had no branch for `pkg::auth::AuthRequired`
+    /// Previously `to_status` had no branch for `pkg::auth::AuthRequired`
     /// and this fell through to a bare `Status::internal` — the exact bug the
     /// non-error `auth_required` field exists to fix.
     #[test]

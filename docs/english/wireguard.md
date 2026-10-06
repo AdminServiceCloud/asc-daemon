@@ -6,7 +6,7 @@
 
 The `wireguard` module installs [WireGuard](https://www.wireguard.com/) on the node and manages its tunnels: a VPN server for your team, a site-to-site link between two servers, or a client tunnel to someone else's VPN. It creates interfaces, hands out addresses and keys to peers, builds ready-to-use client configs, shows live handshakes and traffic, and **imports an existing `.conf`** — yours or one a provider gave you.
 
-The source of truth is the standard `/etc/wireguard/<name>.conf` read by `wg-quick`, so a tunnel keeps working without the daemon and can be handed over to other tools. The daemon manages the files that carry its marker (`# Managed by ASC`); any other `*.conf` in that directory is listed, can be read (keys hidden) and switched on and off, and is never edited — import it to take it over. Everything works standalone through `asc wireguard …`; the AdminService.Cloud platform uses the same API ([🧩 node-modules](../../../asc-platform/docs/features/node-modules.md)). The command needs the running daemon. Only the system (root) daemon manages WireGuard.
+The source of truth is the standard `/etc/wireguard/<name>.conf` read by `wg-quick`, so a tunnel keeps working without the daemon and can be handed over to other tools. The daemon manages the files that carry its marker (`# Managed by ASC`); any other `*.conf` in that directory is listed, can be read (keys hidden) and switched on and off, and is never edited — import it to take it over. Everything works standalone through `asc wireguard …`; the AdminService.Cloud platform uses the same API (🧩 node-modules). The command needs the running daemon. Only the system (root) daemon manages WireGuard.
 
 ## 🎯 Scenarios
 
@@ -89,7 +89,3 @@ Capability: `wireguard`. The REST routes under `/v1/wireguard` mirror the calls 
 
 ### CLI
 `asc wireguard status | install | uninstall | add | set | remove | up | down | show | import | peer add | peer set | peer remove | peer config`. Strings go through the translation system (EN, RU). Command reference: <https://docs.adminservice.cloud/commands/wireguard>.
-
-## 🔗 Related tasks
-
-[DMN-152](../../../asc-platform/ROADMAP.md) (module), [DMN-153](../../../asc-platform/ROADMAP.md) (CLI, docs). Platform side: NODE-073, BE-093, FE-268 — [🧩 node-modules](../../../asc-platform/docs/features/node-modules.md).

@@ -1,4 +1,4 @@
-//! Upgrade flow (DMN-003): versions are git tags, upgrading checks out a
+//! Upgrade flow: versions are git tags, upgrading checks out a
 //! new tag. The package is resolved again, the requested (or latest) tag is
 //! cloned **next to** the current repository, the manifest is validated, and
 //! only then the repository is swapped and the runtime re-provisioned — any
@@ -6,9 +6,9 @@
 //! provisioning failure rolls back to the previous version.
 //!
 //! Where the new version is fetched from depends on how the app was
-//! installed (DMN-053): a registry app resolves its package through the
+//! installed: a registry app resolves its package through the
 //! registries again, while an app installed straight from a repository URL
-//! (`asc install <url>`, DMN-040) is re-resolved from that URL — it was never
+//! (`asc install <url>`) is re-resolved from that URL — it was never
 //! in any registry index, and `meta.source` (`"git:<url>"`) is the only
 //! origin it has. Such an app moves tag by tag like any other, unless it
 //! tracks a branch (`--branch`, recorded in `meta.branch`) or its repository
@@ -17,7 +17,7 @@
 //!
 //! Whatever the version moves from and to, the outcome also carries the two
 //! repository commits — the one that was installed and the one that now is
-//! (DMN-056) — so a branch-tracking upgrade, where both versions read `dev`,
+//! — so a branch-tracking upgrade, where both versions read `dev`,
 //! still says exactly what changed.
 
 use std::fs;
@@ -49,7 +49,7 @@ pub enum UpgradeOutcome {
         from: Option<String>,
         to: String,
         /// Full commit sha the repository was checked out at before and after
-        /// the upgrade (DMN-056) — the version alone does not identify what
+        /// the upgrade — the version alone does not identify what
         /// was actually installed for an app that follows a branch, and a
         /// re-tagged release moves a tag onto another commit. `None` when the
         /// commit cannot be read (the directory is not a git repository).
@@ -62,7 +62,7 @@ pub enum UpgradeOutcome {
     },
 }
 
-/// What an upgrade moves the app to (DMN-140).
+/// What an upgrade moves the app to.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum UpgradeRef {
     /// Whatever the spec says: `@version` pins a tag for this one upgrade,
@@ -105,7 +105,7 @@ pub fn upgrade(
     upgrade_to(config, ctx, spec, &UpgradeRef::Spec, report)
 }
 
-/// [`upgrade`] with an explicit branch or tag to move to (DMN-140).
+/// [`upgrade`] with an explicit branch or tag to move to.
 pub fn upgrade_to(
     config: &Config,
     ctx: &UserContext,
@@ -129,7 +129,7 @@ pub fn upgrade_to(
         bail!(tf2(Msg::PkgUpgradeStopFirst, &id, &id));
     }
     // Not a next-increment gap to paper over with a confusing "cannot read
-    // manifest" error: a compose app (DMN-108) has no manifest to re-resolve
+    // manifest" error: a compose app has no manifest to re-resolve
     // a version from in the first place, and re-cloning + rebuilding its
     // project is real, separate work.
     if matches!(meta.runtime, Runtime::Compose { .. }) {
@@ -137,14 +137,14 @@ pub fn upgrade_to(
     }
 
     // Where the new version comes from: the recorded repository URL for a
-    // direct install (DMN-040), the registries for everything else.
+    // direct install, the registries for everything else.
     let direct_git = meta
         .source
         .as_deref()
         .and_then(|s| s.strip_prefix("git:"))
         .map(str::to_string);
     let (git_url, entry_path, stack_app) = match &direct_git {
-        // The manifest's subdirectory inside the repository (DMN-096) — a
+        // The manifest's subdirectory inside the repository — a
         // direct install has no registry entry to carry this, so it is
         // recorded on the app itself at install time and just re-read here.
         Some(url) => (url.clone(), meta.repo_path.clone(), None),
@@ -176,7 +176,7 @@ pub fn upgrade_to(
     let entry_path = entry_path.as_deref();
     let stack_app = stack_app.as_deref();
 
-    // The version comes from the repository's tags (DMN-047): an explicit
+    // The version comes from the repository's tags: an explicit
     // `@version` wins, otherwise the newest tag. `None` means there is no tag
     // to move to and the app follows a moving ref instead — its own branch,
     // or the default branch of an untagged repository. Only a direct install
@@ -235,7 +235,7 @@ pub fn upgrade_to(
     };
     let cloned_ref = clone_repository(&git_url, checkout.as_deref(), &new_dir, ctx, report)?;
     // Both commits are read before the swap, while `repo_dir` still holds the
-    // installed version: they are reported to the caller (DMN-056) and decide
+    // installed version: they are reported to the caller and decide
     // whether a moving ref has moved at all.
     let from_commit = head_commit(&repo_dir);
     let to_commit = head_commit(&new_dir);
@@ -256,7 +256,7 @@ pub fn upgrade_to(
         });
     }
     let (new_manifest_dir, _) = locate_manifest(&new_dir, entry_path, stack_app)?;
-    // A Dockerfile install (DMN-107) re-detects its Dockerfile in the freshly
+    // A Dockerfile install re-detects its Dockerfile in the freshly
     // cloned version rather than trusting the old path blindly — the file
     // may have moved or been renamed between versions, same as a repository
     // that changed between inspect and install.
@@ -298,7 +298,7 @@ pub fn upgrade_to(
 
     // Tear down the old runtime (the container name is reused) and build the
     // new one; on failure restore the previous repository and runtime.
-    // Keep the app's image-source choice (DMN-050) across the upgrade.
+    // Keep the app's image-source choice across the upgrade.
     let image_source = match &meta.runtime {
         Runtime::Docker { image_source, .. } => *image_source,
         _ => None,
@@ -368,7 +368,7 @@ pub fn upgrade_to(
     };
     meta.install_method = new_install_method;
     // Switching to a branch starts following it; pinning a tag stops
-    // following one (DMN-140). A plain upgrade leaves the choice as it was.
+    // following one. A plain upgrade leaves the choice as it was.
     meta.branch = tracked_branch(&meta, target);
     meta.quota = quota;
     meta.runtime = runtime;
@@ -390,7 +390,7 @@ pub fn upgrade_to(
     })
 }
 
-/// The branch the app follows after an upgrade to `target` (DMN-140):
+/// The branch the app follows after an upgrade to `target`:
 /// switching to a branch starts following it, pinning a tag stops following
 /// one, and a plain upgrade leaves the choice as it was.
 fn tracked_branch(meta: &AppMeta, target: &UpgradeRef) -> Option<String> {
@@ -422,7 +422,7 @@ fn teardown_runtime(config: &Config, runtime: &Runtime) -> Result<()> {
         Runtime::Docker { container, .. } => docker::remove(&config.docker, container)
             .context("cannot remove the old container before upgrade"),
         // `upgrade()` already refuses a compose app before it ever reaches
-        // here (DMN-108) — kept exhaustive rather than `unreachable!()`.
+        // here — kept exhaustive rather than `unreachable!()`.
         Runtime::Systemd { .. } | Runtime::Process { .. } | Runtime::Compose { .. } => Ok(()),
     }
 }
@@ -459,7 +459,7 @@ fn rollback(
             &manifest,
             id,
             // Rollback recreates the runtime the app had before the upgrade;
-            // reuse the same image source (DMN-050). A prebuilt image is
+            // reuse the same image source. A prebuilt image is
             // already on the host, and a built one is rebuilt from the
             // restored repository.
             None,

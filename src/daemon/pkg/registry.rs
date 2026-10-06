@@ -196,7 +196,7 @@ impl RegistryClient {
     }
 
     /// Every package known to the on-disk index cache — cache only, never a
-    /// network fetch and never an error (DMN-055). Shell completion runs this
+    /// network fetch and never an error. Shell completion runs this
     /// on every Tab: a cold or half-written cache must yield fewer candidates
     /// rather than a stalled terminal, and staleness is irrelevant when the
     /// answer is only a suggestion. `asc update` / `asc search` remain the

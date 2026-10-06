@@ -1,4 +1,4 @@
-//! `asc fail2ban` (DMN-150): the node's fail2ban through the running daemon.
+//! `asc fail2ban`: the node's fail2ban through the running daemon.
 
 use clap::Subcommand;
 use serde_json::{Value, json};

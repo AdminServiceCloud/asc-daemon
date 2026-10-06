@@ -104,7 +104,7 @@ enum Command {
     /// all users' apps): each app and the host ports it publishes, with the
     /// container port after `->` when the two differ
     Ports {
-        /// Real listening ports on the host (DMN-103), not just what apps
+        /// Real listening ports on the host, not just what apps
         /// declare: merges /proc with Docker and app attribution
         #[arg(short, long)]
         listening: bool,
@@ -145,11 +145,11 @@ enum Command {
         #[arg(long = "app")]
         stack_app: Option<String>,
         /// Pull the prebuilt image when the manifest offers both `image` and
-        /// `image-build` (DMN-050); skips the interactive choice
+        /// `image-build`; skips the interactive choice
         #[arg(long, conflicts_with = "build")]
         image: bool,
         /// Build the image locally when the manifest offers both `image` and
-        /// `image-build` (DMN-050); skips the interactive choice
+        /// `image-build`; skips the interactive choice
         #[arg(long, conflicts_with = "image")]
         build: bool,
         /// Install even though the host cannot currently cover the
@@ -187,37 +187,37 @@ enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
-    /// Create, restore and manage app backups (DMN-009)
+    /// Create, restore and manage app backups
     Backup {
         #[command(subcommand)]
         action: BackupAction,
     },
     /// Scheduled jobs: reboots, app start/stop/restart/update, backups,
-    /// shell commands and HTTP checks, run by the daemon (DMN-114)
+    /// shell commands and HTTP checks, run by the daemon
     Schedule {
         #[command(subcommand)]
         action: ScheduleAction,
     },
     /// The node's web server: nginx, sites proxied to apps, Let's Encrypt
-    /// and Cloudflare real IP (DMN-122)
+    /// and Cloudflare real IP
     Web {
         #[command(subcommand)]
         action: WebAction,
     },
     /// The node's firewall: nftables rules with an automatic rollback,
-    /// allow/block lists of addresses and an expert RAW mode (DMN-148)
+    /// allow/block lists of addresses and an expert RAW mode
     Firewall {
         #[command(subcommand)]
         action: firewall::FirewallAction,
     },
     /// The node's fail2ban: install it, switch jails on and off, list and
-    /// release bans (DMN-150)
+    /// release bans
     Fail2ban {
         #[command(subcommand)]
         action: fail2ban::Fail2banAction,
     },
     /// The node's WireGuard: tunnels, peers with generated keys and client
-    /// configs, import of a ready .conf (DMN-152)
+    /// configs, import of a ready .conf
     Wireguard {
         #[command(subcommand)]
         action: wireguard::WireguardAction,
@@ -232,7 +232,7 @@ enum Command {
         /// enable | disable | status
         action: String,
     },
-    /// Print the shell completion script for bash, zsh or fish (DMN-055);
+    /// Print the shell completion script for bash, zsh or fish;
     /// `asc completion bash > /usr/share/bash-completion/completions/asc`
     /// installs it system-wide, which the installer already does
     Completion {
@@ -255,7 +255,7 @@ enum StatsSort {
     Mem,
 }
 
-/// `asc install <url> --method <kind>` (DMN-107): install as something other
+/// `asc install <url> --method <kind>`: install as something other
 /// than the package's own asc.yaml. Only one kind is installable so far —
 /// kept as its own clap enum rather than `pkg::detect::InstallMethod` itself,
 /// so the flag's accepted values don't grow the moment detection learns a new
@@ -293,7 +293,7 @@ enum LsAction {
     Stats,
 }
 
-/// `asc docker <action>` (DMN-102/DMN-112): the node's Docker Engine as a
+/// `asc docker <action>`: the node's Docker Engine as a
 /// whole, not just ASC's own apps. Root only — a container ASC did not
 /// create has no owner to authorize a non-root caller against.
 #[derive(Subcommand)]
@@ -312,15 +312,15 @@ enum DockerAction {
         /// Container ids or names; all running containers when omitted
         ids: Vec<String>,
     },
-    /// List images on this host, ASC-managed or not (DMN-104)
+    /// List images on this host, ASC-managed or not
     Images,
-    /// List named volumes on this host (DMN-104)
+    /// List named volumes on this host
     Volumes,
-    /// List networks on this host, inventory-only (DMN-104)
+    /// List networks on this host, inventory-only
     Networks,
-    /// Disk usage summary, like `docker system df` (DMN-104)
+    /// Disk usage summary, like `docker system df`
     Df,
-    /// Remove unused images/volumes/build cache, one at a time (DMN-105) —
+    /// Remove unused images/volumes/build cache, one at a time —
     /// never removes anything an installed app still needs
     Prune {
         target: PruneTargetArg,
@@ -604,7 +604,7 @@ enum AppAction {
     Ports {
         id: Option<String>,
     },
-    /// Clone an app instance (data, env, settings) into a new one (DMN-019)
+    /// Clone an app instance (data, env, settings) into a new one
     Clone {
         id: String,
         /// Custom name for the clone (skips the interactive prompt)
@@ -637,10 +637,10 @@ enum AppAction {
         /// repository installs only; a registry spec uses <stack>/<app>)
         #[arg(long = "app")]
         stack_app: Option<String>,
-        /// Pull the prebuilt image when the manifest offers both (DMN-050)
+        /// Pull the prebuilt image when the manifest offers both
         #[arg(long, conflicts_with = "build")]
         image: bool,
-        /// Build the image locally when the manifest offers both (DMN-050)
+        /// Build the image locally when the manifest offers both
         #[arg(long, conflicts_with = "image")]
         build: bool,
         /// Install even though the host cannot currently cover the
@@ -685,7 +685,7 @@ enum AppAction {
         /// Number of trailing lines
         #[arg(short = 'n', long, default_value_t = 100)]
         tail: usize,
-        /// Prefix each line with its timestamp (DMN-088)
+        /// Prefix each line with its timestamp
         #[arg(short = 't', long)]
         timestamps: bool,
     },
@@ -715,7 +715,7 @@ enum ServiceAction {
     Status,
 }
 
-/// `asc api …` — the daemon's own API surface (DMN-065, DMN-066, DMN-067).
+/// `asc api …` — the daemon's own API surface.
 #[derive(Subcommand)]
 enum ApiAction {
     /// Show the listener, TLS state and API token state
@@ -911,7 +911,7 @@ fn run() -> anyhow::Result<()> {
     }
 
     // Completion answers before the config is required and without a tracing
-    // subscriber (DMN-055): it runs on every Tab press inside the user's
+    // subscriber: it runs on every Tab press inside the user's
     // shell, so an unreadable config.toml must cost a few candidates, not a
     // broken Tab key or a log line pasted into the prompt.
     match &command {
@@ -1030,9 +1030,9 @@ fn autoupdate_cmd(action: &str) -> anyhow::Result<()> {
 }
 
 /// The daemon connection for app commands, when the local API socket is
-/// present (DMN-042): the daemon then owns identity (SO_PEERCRED) and
+/// present: the daemon then owns identity (SO_PEERCRED) and
 /// authorization, and the CLI needs neither docker.sock access nor sudo.
-/// `None` — no daemon on this host, the command runs in-process (DMN-041).
+/// `None` — no daemon on this host, the command runs in-process.
 /// A present-but-unresponsive daemon is an error for a regular user (they
 /// have no other way to the system apps) and a warned fallback for root
 /// (recovery must not depend on the daemon being healthy).
@@ -1136,9 +1136,9 @@ fn install_cmd(
             let mut force = force;
             // Interactive recoveries loop until the install passes or the user
             // declines: auth setup for private repositories, a source pick when
-            // several provide the package, a version pick for `pkg@` (DMN-048),
-            // an image-source pick when both are offered (DMN-050), license
-            // consent (DMN-028), a resource shortfall (DMN-099).
+            // several provide the package, a version pick for `pkg@`,
+            // an image-source pick when both are offered, license
+            // consent, a resource shortfall.
             loop {
                 match pkg::install(
                     config,
@@ -1187,7 +1187,7 @@ fn install_cmd(
 
 /// Map the mutually exclusive `--image` / `--build` flags (clap rejects both
 /// at once) to an image source; neither set leaves the choice open — the
-/// installer prompts, or errors non-interactively (DMN-050).
+/// installer prompts, or errors non-interactively.
 fn image_choice_flag(image: bool, build: bool) -> Option<ImageSource> {
     match (image, build) {
         (true, _) => Some(ImageSource::Prebuilt),
@@ -1199,7 +1199,7 @@ fn image_choice_flag(image: bool, build: bool) -> Option<ImageSource> {
 /// Install through the daemon, with the same interactive recoveries as the
 /// in-process path — the client reconstructs the typed errors from the
 /// structured REST payloads, so `offer_auth_setup`/`pick_source`/
-/// `accept_license` work unchanged. Auth setup included (DMN-062): the
+/// `accept_license` work unchanged. Auth setup included: the
 /// daemon looks credentials up in the *calling* user's store, so what the
 /// prompt saves here is exactly what its retry then finds.
 #[allow(clippy::too_many_arguments)]
@@ -1224,7 +1224,7 @@ fn install_daemon_loop(
     loop {
         // The daemon answers this call once the whole install is over —
         // clone, image pull or local image build, container create — with
-        // nothing on the wire in between (DMN-050 progress is rendered inside
+        // nothing on the wire in between (image-build progress is rendered inside
         // the daemon, where stderr is the journal). A spinner is what keeps
         // the terminal from reading as hung; `journalctl -u asc -f` is where
         // the steps themselves show up.
@@ -1394,12 +1394,12 @@ fn install_from_git_cmd(
     Ok(())
 }
 
-/// Interactive custom-name prompt of `asc install` (DMN-024): Enter keeps
+/// Interactive custom-name prompt of `asc install`: Enter keeps
 /// the default (the name from the package manifest), anything else becomes
 /// the app's name — commands then accept it interchangeably with the id.
 /// When instances of the package are already installed, the default shows
-/// the suffixed instance id the install would allocate (DMN-033). For a
-/// whole-stack spec the name is a prefix (DMN-034) and the prompt says so.
+/// the suffixed instance id the install would allocate. For a
+/// whole-stack spec the name is a prefix and the prompt says so.
 /// Skipped for non-interactive stdin, where `--name` is the way.
 fn prompt_app_name(
     spec: &str,
@@ -1449,7 +1449,7 @@ fn prompt_git_app_name(
     Ok(Some(answer).filter(|a| !a.is_empty()))
 }
 
-/// The default instance id shown in the name prompt (DMN-033): the next
+/// The default instance id shown in the name prompt: the next
 /// free `<base>`, `<base>-2`, ... Against the daemon's app list when the
 /// install goes through the daemon (that is where the id will be
 /// allocated), against the local store otherwise. Best-effort either way —
@@ -1565,7 +1565,7 @@ fn auth_cmd(action: AuthAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `asc backup ...` (DMN-009): create/restore/list/prune archives and manage
+/// `asc backup ...`: create/restore/list/prune archives and manage
 /// the storages they go to. Every subcommand resolves the app through
 /// `get_authorized`, so a user only ever touches their own apps' backups
 /// (root, everyone's) — same rule as every other `asc app` command.
@@ -2102,7 +2102,7 @@ fn pick_source(err: &anyhow::Error) -> anyhow::Result<Option<String>> {
 }
 
 /// When `err` says the manifest offers both a prebuilt image and a local
-/// build (DMN-050) and stdin is a terminal, print the two options and let the
+/// build and stdin is a terminal, print the two options and let the
 /// user pick one. `Ok(None)` = not that error or non-interactive (the caller
 /// then surfaces the `--image`/`--build` hint from the error message).
 fn pick_image(err: &anyhow::Error) -> anyhow::Result<Option<ImageSource>> {
@@ -2124,7 +2124,7 @@ fn pick_image(err: &anyhow::Error) -> anyhow::Result<Option<ImageSource>> {
     }
 }
 
-/// The user's chosen install spec after a version pick (DMN-048).
+/// The user's chosen install spec after a version pick.
 struct VersionChoice {
     /// Re-invocation spec: `<package>@<ref>`.
     spec: String,
@@ -2174,7 +2174,7 @@ fn pick_version(err: &anyhow::Error) -> anyhow::Result<Option<VersionChoice>> {
     }))
 }
 
-/// When `err` says the package repository ships a license (DMN-028), print
+/// When `err` says the package repository ships a license, print
 /// where the package comes from (source + repository), the license text, and
 /// ask for consent. Non-interactive stdin accepts automatically with a
 /// notice, so scripted installs keep working. `Ok(false)` = not that error,
@@ -2208,7 +2208,7 @@ fn accept_license(err: &anyhow::Error) -> anyhow::Result<bool> {
 }
 
 /// When `err` says the host cannot currently cover the package's declared
-/// requirements or runtime quota (DMN-099), print what's missing and, on a
+/// requirements or runtime quota, print what's missing and, on a
 /// terminal, ask to install anyway. Unlike a license, resource risk is never
 /// accepted on the caller's behalf: a non-interactive caller gets `Ok(false)`
 /// and the loop re-raises the original structured error for a script to act
@@ -2301,10 +2301,10 @@ fn offer_auth_setup(err: &anyhow::Error) -> bool {
     }
 }
 
-/// `asc upgrade <spec>` / `asc app upgrade <spec>` (DMN-003): through the
-/// daemon when its socket is there (DMN-053) — it owns the app tree, so an
+/// `asc upgrade <spec>` / `asc app upgrade <spec>`: through the
+/// daemon when its socket is there — it owns the app tree, so an
 /// app installed into the system tree is upgradable without sudo. Auth setup for a private repository is offered on that path
-/// too (DMN-062): the daemon resolves credentials against the calling user's
+/// too: the daemon resolves credentials against the calling user's
 /// store, so the prompt's answer applies to its retry.
 fn upgrade_cmd(spec: &str, config: &Config) -> anyhow::Result<()> {
     if let Some(daemon) = daemon_backend(config)? {
@@ -2347,7 +2347,7 @@ fn print_upgrade_outcome(outcome: &pkg::UpgradeOutcome) {
                 "{}",
                 tf3(Msg::PkgUpgraded, id, from.as_deref().unwrap_or("-"), to)
             );
-            // The repository commits behind those versions (DMN-056), shortened
+            // The repository commits behind those versions, shortened
             // the way git does. Printed whenever at least one of them could be
             // read — a version says which tag, the commit says which code.
             if from_commit.is_some() || to_commit.is_some() {
@@ -2380,8 +2380,8 @@ fn search_cmd(query: &str, config: &Config) -> anyhow::Result<()> {
         .max()
         .unwrap_or(4)
         .max(4);
-    // No version column: the version is a git tag of the package repository
-    // (DMN-047), resolved at install time — printing it here would mean an
+    // No version column: the version is a git tag of the package repository,
+    // resolved at install time — printing it here would mean an
     // `ls-remote` per row. `asc install <pkg>@` lists a package's versions.
     for pkg in results {
         println!(
@@ -2427,9 +2427,9 @@ fn source_cmd(action: SourceAction) -> anyhow::Result<()> {
 }
 
 fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
-    // Lifecycle commands go through the daemon when it is present
-    // (DMN-042); the rest operate on local files/consoles and stay
-    // in-process until their daemon RPCs exist (DMN-043).
+    // Lifecycle commands go through the daemon when it is present;
+    // the rest operate on local files/consoles and stay
+    // in-process until their daemon RPCs exist.
     let routable = matches!(
         action,
         AppAction::List
@@ -2483,7 +2483,7 @@ fn app_cmd_daemon(
                 true => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
             }
             // Auto-attach like the in-process path. The console now runs
-            // through the daemon (DMN-043), so this no longer needs the
+            // through the daemon, so this no longer needs the
             // caller to reach docker.sock themselves.
             // SAFETY: isatty() has no preconditions.
             let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
@@ -2646,7 +2646,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Requirements check before start (DMN-029): compare the manifest
+/// Requirements check before start: compare the manifest
 /// `requirements` with what the host has free right now; when short, warn
 /// and — interactively — ask to continue at the user's own risk. Read
 /// failures (manifest, metrics) never block the start: the check is advice,
@@ -2759,8 +2759,8 @@ fn quota_label(quota: &asc_daemon::daemon::apps::meta::Quota) -> String {
     parts.join(", ")
 }
 
-/// `asc disk [<app>]` / `asc app disk [<app>]` (DMN-035): through the daemon
-/// when its socket is there (DMN-053) — the app tree belongs to the daemon,
+/// `asc disk [<app>]` / `asc app disk [<app>]`: through the daemon
+/// when its socket is there — the app tree belongs to the daemon,
 /// so a user who cannot read it still gets the report — in-process otherwise.
 fn disk_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::disk;
@@ -2948,7 +2948,7 @@ fn print_disk_summary(rows: &[DiskRow], fs_total: Option<u64>, show_user: bool) 
     }
 }
 
-/// `asc docker <action>` (DMN-102/DMN-112). Through the daemon when its
+/// `asc docker <action>`. Through the daemon when its
 /// socket is there, in-process otherwise — the same two-backend shape
 /// [`ports_cmd`] uses.
 fn docker_cmd(action: DockerAction, config: &Config) -> anyhow::Result<()> {
@@ -3171,7 +3171,7 @@ fn print_container_stats(rows: &[(String, f64, u64, Option<u64>)]) {
     }
 }
 
-/// Images/volumes an installed app (running or not) still needs (DMN-105):
+/// Images/volumes an installed app (running or not) still needs:
 /// image reference -> reason, volume name -> reason. The daemon computes the
 /// same protection through `daemon::api::DockerProtection`; this is the
 /// in-process fallback used when `asc docker` talks to no running daemon, so
@@ -3213,7 +3213,7 @@ struct DockerImageRow {
     protected_reason: Option<String>,
 }
 
-/// `asc docker images` (DMN-104): every image on the host, ASC-managed or
+/// `asc docker images`: every image on the host, ASC-managed or
 /// not, through the daemon when its socket is there, in-process otherwise.
 fn docker_images_cmd(config: &Config) -> anyhow::Result<()> {
     let rows: Vec<DockerImageRow> = if let Some(daemon) = daemon_backend(config)? {
@@ -3287,7 +3287,7 @@ struct DockerVolumeRow {
     protected_reason: Option<String>,
 }
 
-/// `asc docker volumes` (DMN-104): every named volume on the host, through
+/// `asc docker volumes`: every named volume on the host, through
 /// the daemon when its socket is there, in-process otherwise.
 fn docker_volumes_cmd(config: &Config) -> anyhow::Result<()> {
     let rows: Vec<DockerVolumeRow> = if let Some(daemon) = daemon_backend(config)? {
@@ -3340,7 +3340,7 @@ fn docker_volumes_cmd(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `asc docker networks` (DMN-104): every network on the host, inventory
+/// `asc docker networks`: every network on the host, inventory
 /// only — through the daemon when its socket is there, in-process otherwise.
 fn docker_networks_cmd(config: &Config) -> anyhow::Result<()> {
     struct Row {
@@ -3383,7 +3383,7 @@ fn docker_networks_cmd(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `asc docker df` (DMN-104): disk usage summary, like `docker system df`.
+/// `asc docker df`: disk usage summary, like `docker system df`.
 fn docker_df_cmd(config: &Config) -> anyhow::Result<()> {
     struct Group {
         active: i64,
@@ -3443,7 +3443,7 @@ fn docker_df_cmd(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `asc docker prune <target>` (DMN-105): remove unused images/volumes/build
+/// `asc docker prune <target>`: remove unused images/volumes/build
 /// cache one item at a time — never anything an installed app still needs.
 fn docker_prune_cmd(
     target: PruneTargetArg,
@@ -3487,7 +3487,7 @@ fn docker_prune_cmd(
 
 /// In-process fallback of [`docker_prune_cmd`], the same per-item logic the
 /// daemon's `ApiState::prune_docker` runs, duplicated here because there is
-/// no daemon socket to call through (DMN-041's two-backend shape).
+/// no daemon socket to call through (the two-backend shape).
 fn in_process_prune(
     target: PruneTargetArg,
     dry_run: bool,
@@ -3606,10 +3606,10 @@ struct PruneCmdResult {
     skipped: Vec<(String, String)>,
 }
 
-/// `asc ports [<app>]` / `asc app ports [<app>]` (DMN-049): with an id, the
+/// `asc ports [<app>]` / `asc app ports [<app>]`: with an id, the
 /// app's published ports one per line; without one, a table of every visible
 /// app and its ports (root sees all users' apps, like [`print_app_list`]).
-/// Through the daemon when its socket is there (DMN-053), in-process
+/// Through the daemon when its socket is there, in-process
 /// otherwise.
 fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     use asc_daemon::daemon::apps::ports;
@@ -3644,7 +3644,7 @@ fn ports_cmd(reference: Option<&str>, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `asc ports --listening` (DMN-103): real host listening ports, merged
+/// `asc ports --listening`: real host listening ports, merged
 /// with Docker and app attribution — through the daemon when its socket is
 /// there, in-process otherwise, the same two-backend shape [`ports_cmd`]
 /// uses.
@@ -3960,7 +3960,7 @@ fn static_bar(used: u64, total: u64, width: usize) -> String {
     format!("[{}{}]", "█".repeat(filled), "░".repeat(width - filled))
 }
 
-/// `asc app clone <id>` (DMN-019): a full copy of an app instance (data,
+/// `asc app clone <id>`: a full copy of an app instance (data,
 /// env, settings) under a new id — the CLI's part is the same custom-name
 /// prompt as `asc install` plus a live byte-progress bar over the copy
 /// (`docker pull`/`git clone` style, on by default on a terminal).
@@ -4003,7 +4003,7 @@ fn clone_cmd(reference: &str, name: Option<String>, config: &Config) -> anyhow::
     Ok(())
 }
 
-/// `asc app settings <id>` — interactive settings editor (DMN-017/030).
+/// `asc app settings <id>` — interactive settings editor.
 /// The user first picks a **category** — environments, ports, volumes,
 /// quota, start_command — then edits its settings. Package-defined settings
 /// are validated against asc.settings.yaml; quota and start_command take
@@ -4020,7 +4020,7 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     let id = meta.id.clone();
     let app_dir = manager.store().app_dir(&id)?;
 
-    // A compose app declares no settings at all (DMN-108) — an empty schema,
+    // A compose app declares no settings at all — an empty schema,
     // not an error, same as a manifest with no `settings:`.
     let file = if matches!(
         meta.runtime,
@@ -4040,7 +4040,7 @@ fn app_settings_cmd(reference: &str, config: &Config) -> anyhow::Result<()> {
     settings_editor(&id, file, values, &SettingsSink::Local(config_dir))
 }
 
-/// `asc app settings <id>` against the daemon (DMN-043): the schema and the
+/// `asc app settings <id>` against the daemon: the schema and the
 /// values come from — and go back to — the daemon, so the editor works for a
 /// user whose app lives in the root-owned system tree they cannot read. The
 /// editing itself is the same code as in-process.
@@ -4379,9 +4379,9 @@ fn edit_start_command(
     Ok(())
 }
 
-/// The backups category (DMN-009): which configured storages to back up to
+/// The backups category: which configured storages to back up to
 /// (multi-select — toggle numbers on and off), how many copies to keep per
-/// storage, and a schedule the daemon's scheduler (DMN-012) enforces —
+/// storage, and a schedule the daemon's scheduler enforces —
 /// `daily@HH:MM` or a cron expression, validated on input here. Stored under
 /// the `$backup` reserved key, same convention as quota/start_command; an
 /// all-default policy is removed rather than stored empty.
@@ -4502,9 +4502,9 @@ fn edit_backup_policy(
     Ok(())
 }
 
-/// `asc attach` — through the daemon when one is running (DMN-043: no
+/// `asc attach` — through the daemon when one is running (no
 /// docker-group membership and no access to the system app tree needed),
-/// straight to the Engine otherwise (standalone install, DMN-041).
+/// straight to the Engine otherwise (standalone install).
 fn attach_anywhere(id: &str, config: &Config) -> anyhow::Result<()> {
     if let Some(daemon) = daemon_backend(config)? {
         eprintln!("{}", tf(Msg::AttachHint, id));
@@ -4580,9 +4580,9 @@ async fn attach_loop(
 /// interval, [`AppManager::stats`] sleeps for it) — that doubles as the live
 /// refresh cadence, no extra sleep needed.
 fn stats_cmd(sort: StatsSort, live: bool, config: &Config) -> anyhow::Result<()> {
-    // Through the daemon when its socket is there (DMN-053): it owns the app
+    // Through the daemon when its socket is there: it owns the app
     // tree and the Docker connection, so the counters are readable without
-    // sudo and without the docker group. In-process otherwise (DMN-041).
+    // sudo and without the docker group. In-process otherwise.
     let daemon = daemon_backend(config)?;
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
@@ -4926,11 +4926,11 @@ fn print_app_list_inner(apps: &[AppRow], show_user: bool, indent: &str, tree: bo
 /// package) they came from — a tree per stack (`├──`/`└──` branches over its
 /// apps, sorted by id), the stack name annotated with how many of its apps
 /// are running (root sees all users' apps, like [`print_app_list`]). An
-/// app's stack is read from `meta.package` (DMN-003: recorded as
+/// app's stack is read from `meta.package` (recorded as
 /// `"<stack>/<app>"` at install); an app installed on its own has no `/` in
 /// `package` and is not part of any stack, so it never appears here.
 fn stacks_cmd(config: &Config) -> anyhow::Result<()> {
-    // Same backend rule as `asc ls` (DMN-053): the daemon when it is there,
+    // Same backend rule as `asc ls`: the daemon when it is there,
     // in-process otherwise. The grouping is the CLI's own work either way.
     let apps: Vec<(String, AppRow)> = match daemon_backend(config)? {
         Some(daemon) => daemon
@@ -5029,8 +5029,8 @@ fn connect_cmd(mut config: Config, token: &str, url: Option<&str>) -> anyhow::Re
     Ok(())
 }
 
-/// `asc api …` — the daemon's API surface and its bearer tokens (DMN-065,
-/// DMN-066). Everything here goes through the unix socket, where the peer
+/// `asc api …` — the daemon's API surface and its bearer tokens.
+/// Everything here goes through the unix socket, where the peer
 /// uid is the authorization: the daemon itself decides whether this caller
 /// may manage tokens, so the CLI does not second-guess it with its own root
 /// check. What the CLI does insist on is a running daemon — the token store
@@ -5264,7 +5264,7 @@ fn print_system_metrics() {
     }
 }
 
-/// `asc hardware` (DMN-142, DMN-144): the machine's inventory plus the live
+/// `asc hardware`: the machine's inventory plus the live
 /// readings of every temperature and fan sensor. Read in-process, like the
 /// metrics block of `asc status` — it needs no running daemon.
 fn hardware_cmd(json: bool) -> anyhow::Result<()> {
@@ -5436,7 +5436,7 @@ fn gpu_hint_text(code: Option<&str>) -> &'static str {
     }
 }
 
-/// The gpus category of `asc app settings` (DMN-143): which of the host's
+/// The gpus category of `asc app settings`: which of the host's
 /// video cards the app's container is given. Multi-select by toggling
 /// numbers, like the backup storages; stored as PCI addresses under the
 /// `$gpus` reserved key. A card that cannot be attached cannot be added, but
@@ -5728,7 +5728,7 @@ mod tests {
     }
 }
 
-// ── asc web (DMN-122..DMN-125) ──────────────────────────────────────────────
+// ── asc web ──────────────────────────────────────────────
 
 #[derive(Subcommand)]
 enum WebAction {

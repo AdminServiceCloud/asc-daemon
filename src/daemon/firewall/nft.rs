@@ -1,4 +1,4 @@
-//! Talking to the kernel through the `nft` binary (DMN-148). Behind a trait
+//! Talking to the kernel through the `nft` binary. Behind a trait
 //! so the apply/rollback logic is testable without a kernel, and so a future
 //! libnftables binding can replace the process calls.
 

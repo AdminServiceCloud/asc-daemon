@@ -1,4 +1,4 @@
-//! Hardware inventory of the node (DMN-142): what kind of machine this is and
+//! Hardware inventory of the node: what kind of machine this is and
 //! what it is made of — as opposed to [`super::system`], which samples how busy
 //! it is right now.
 //!

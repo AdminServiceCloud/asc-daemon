@@ -1,4 +1,4 @@
-//! Service layer for the backup and scheduled-job APIs (DMN-114/DMN-115),
+//! Service layer for the backup and scheduled-job APIs,
 //! shared by the gRPC and REST transports. Like the sources/credentials
 //! section of [`super::ApiState`], storages act on the daemon process's own
 //! scope (the root daemon: the system list in `/etc/asc`), while every app

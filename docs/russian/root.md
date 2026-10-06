@@ -160,12 +160,6 @@ cp -r skills/* .claude/skills/
 | [🔄 updater](updater.md) | Утилита asc-updater: автообновления, каналы, откат |
 | [🔗 platform](platform.md) | Подключение ноды к платформе: `--token`, `asc connect` |
 
-## 🗺️ Roadmap
-
-Roadmap всего проекта ведётся в репозитории **asc-platform**:
-
-- [🎯 ROADMAP](../../../asc-platform/ROADMAP.md) — задачи демона имеют префикс `DMN-*`
-- [🤝 Регламент разработки](../../../asc-platform/AGENTS.md)
 
 > ⚠️ Каталог `old/` — прошлые наработки, используется как справка.
 

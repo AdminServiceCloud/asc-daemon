@@ -69,7 +69,3 @@ An alias from the daemon: `asc autoupdate enable|disable` proxies to `asc-update
 ```
 
 Failures write an event with `type: "error"` and `stage: "error"`, then exit with a non-zero status. `percent` and `version` are omitted from error events.
-
-## 🔗 Related tasks
-
-DMN-001, DMN-014, DMN-064 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

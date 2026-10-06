@@ -1,4 +1,4 @@
-//! Real Docker integration for `docker::exec` (DMN-082).
+//! Real Docker integration for `docker::exec`.
 //!
 //! Gated behind `ASC_DAEMON_TEST_DOCKER=1` since it needs a live Docker
 //! daemon and pulls `busybox:latest` — mirrors the platform's

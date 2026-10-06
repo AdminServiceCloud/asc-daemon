@@ -18,7 +18,7 @@
 
 ## 🏗️ Техническое решение
 
-### 🧱 Инвентарь (DMN-142)
+### 🧱 Инвентарь
 
 `src/daemon/monitor/hardware.rs`. API: `MonitorService.GetHardwareInfo` (gRPC), REST `GET /v1/hardware[?refresh=1]`, capability `hardware`. Ответ кэшируется на десять минут — железо почти не меняется, пока демон работает, а сбор запускает вспомогательные процессы, — если не передан `refresh`.
 
@@ -36,7 +36,7 @@
 - Модель видеокарты: у NVIDIA — из `nvidia-smi --query-gpu=pci.bus_id,uuid,name,memory.total` (запускается, только если NVIDIA-карта привязана к проприетарному драйверу); иначе `product_name`, затем системная база `pci.ids`, затем `вендор:устройство`.
 - **Можно ли подключить** (`attachable` / `attach_hint`): карте NVIDIA нужны загруженный проприетарный драйвер и установленный NVIDIA Container Toolkit (`driver_not_loaded`, `toolkit_missing`); картам AMD и Intel нужен DRM render-узел (`no_render_node`); остальное — `unsupported_vendor`.
 
-### 🌡️ Датчики (DMN-144)
+### 🌡️ Датчики
 
 `src/daemon/monitor/sensors.rs`. Температура — это метрика, а не элемент инвентаря, поэтому показания едут в `SystemMetrics.temperatures` / `fans` — в `GetSystemMetrics`, `StreamSystemMetrics` и REST `GET /v1/metrics`, а также в `asc hardware`. Читаются не чаще раза в секунду (capability `sensors`).
 
@@ -57,14 +57,10 @@
 - Каналы с нулём или значением вне разумного диапазона (разъём, к которому ничего не подключено) отбрасываются. `max_c` / `crit_c` — пороги драйвера, их нет, если драйвер их не знает.
 - У виртуальной машины датчиков, как правило, нет; пустой список — корректный ответ.
 
-### 🎮 Проброс видеокарт (DMN-143)
+### 🎮 Проброс видеокарт
 
-Выбор видеокарт для приложения описан в [📦 package-manager](package-manager.md#-проброс-видеокарт-dmn-143): настройка `$gpus` хранит PCI-адреса из этого инвентаря, а демон при создании контейнера превращает их в `DeviceRequest` (NVIDIA) или маппинг устройств (AMD/Intel).
+Выбор видеокарт для приложения описан в [📦 package-manager](package-manager.md#-проброс-видеокарт): настройка `$gpus` хранит PCI-адреса из этого инвентаря, а демон при создании контейнера превращает их в `DeviceRequest` (NVIDIA) или маппинг устройств (AMD/Intel).
 
 ### ⌨️ CLI
 
 `asc hardware [--json]` читает всё в самом процессе, как блок метрик в `asc status`, — запущенный демон не нужен. Вывод переведён (EN/RU); `--json` от языка не зависит.
-
-## 🔗 Связанные задачи
-
-DMN-142, DMN-143, DMN-144, NODE-066, BE-082, FE-244, FE-245 в [ROADMAP.md](../../../asc-platform/ROADMAP.md). Сторона платформы: [node-resources](../../../asc-platform/docs/features/node-resources.md).

@@ -1,4 +1,4 @@
-//! Detects which installation methods a cloned repository supports (DMN-106):
+//! Detects which installation methods a cloned repository supports:
 //! ASC's own manifest/stack (already installable), Docker Compose, a bare
 //! Dockerfile, Swarm, Kubernetes and Helm (detected, not yet installable —
 //! see the per-method `supported` flag callers attach).
@@ -42,7 +42,7 @@ impl InstallMethod {
     /// today. DockerCompose/Swarm/Kubernetes/Helm are detected so the
     /// operator sees "found, not supported" instead of the repository
     /// looking unrecognized, but none of the four has an install path yet
-    /// (DockerCompose lands in DMN-108).
+    /// (DockerCompose lands later).
     pub fn supported(self) -> bool {
         matches!(
             self,
@@ -298,7 +298,7 @@ fn relative(dir: &Path, path: &Path) -> String {
         .into_owned()
 }
 
-/// Loose compose shape (DMN-106): only what detection needs, and nothing
+/// Loose compose shape: only what detection needs, and nothing
 /// marked `deny_unknown_fields` — compose is a large, foreign format, and a
 /// feature this daemon doesn't model must not turn "detected" into "failed
 /// to parse".

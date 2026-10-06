@@ -1,4 +1,4 @@
-//! Talking to WireGuard (DMN-152): the `wg` and `wg-quick` tools and the
+//! Talking to WireGuard: the `wg` and `wg-quick` tools and the
 //! systemd units that keep an interface up. Behind a trait so the manager is
 //! testable without a kernel module; the parser of `wg show … dump` fails
 //! loudly on a shape it does not know.

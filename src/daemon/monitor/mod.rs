@@ -1,4 +1,4 @@
-//! Monitoring (DMN-006): system metrics sampled in the background, kept in
+//! Monitoring: system metrics sampled in the background, kept in
 //! an in-memory ring buffer and served over the daemon API (`MonitorService`
 //! plus REST `/v1/metrics`). Per-app metrics, SQLite history and the
 //! platform push stream are follow-up increments (see docs/monitoring.md).
@@ -27,7 +27,7 @@ use crate::daemon::config::{
     Config, MONITOR_IDLE_INTERVAL_MS_RANGE, MONITOR_INTERVAL_MS_RANGE, MonitorConfig,
 };
 
-/// The two sampling cadences (DMN-135): `interval_ms` while the live stream
+/// The two sampling cadences: `interval_ms` while the live stream
 /// has subscribers, `idle_interval_ms` otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorSettings {
@@ -66,8 +66,8 @@ impl MonitorSettings {
     }
 }
 
-/// Persist new cadences into `[monitor]` of the daemon's own config.toml
-/// (DMN-135). Re-read from disk rather than written from the in-memory
+/// Persist new cadences into `[monitor]` of the daemon's own config.toml.
+/// Re-read from disk rather than written from the in-memory
 /// config: whatever else changed in the file since startup must survive.
 pub fn save_settings(settings: MonitorSettings) -> Result<()> {
     let path = Config::path();
@@ -85,13 +85,13 @@ const BROADCAST_CAPACITY: usize = 16;
 
 /// Ring buffer of recent system samples plus a live broadcast, shared
 /// between the sampler task and the API. Lock scope stays tiny: clone-out on
-/// read, push on write. `StreamSystemMetrics` (DMN-072) subscribes to the
+/// read, push on write. `StreamSystemMetrics` subscribes to the
 /// broadcast side instead of polling `latest()`.
 pub struct Monitor {
     samples: RwLock<VecDeque<SystemMetrics>>,
     capacity: usize,
     live: broadcast::Sender<SystemMetrics>,
-    /// Live and idle cadences, changeable while the sampler runs (DMN-135).
+    /// Live and idle cadences, changeable while the sampler runs.
     interval_ms: AtomicU64,
     idle_interval_ms: AtomicU64,
     /// Cuts the sampler's current wait short: a new subscriber, or new
@@ -117,7 +117,7 @@ impl Monitor {
     /// callers should treat that as "skip ahead", not as an error to bubble up.
     ///
     /// Subscribing switches the sampler to the live cadence at once — it is
-    /// woken rather than left to finish an idle wait (DMN-135).
+    /// woken rather than left to finish an idle wait.
     pub fn subscribe(&self) -> broadcast::Receiver<SystemMetrics> {
         let rx = self.live.subscribe();
         self.wake.notify_one();
@@ -159,7 +159,7 @@ impl Monitor {
     /// so the API has data right after startup; usage/rate fields fill in
     /// from the second sample onward.
     ///
-    /// Cadence is adaptive (DMN-135): fast only while someone watches the
+    /// Cadence is adaptive: fast only while someone watches the
     /// live stream, slow otherwise. Each wait is measured from the start of
     /// the previous sample, so a slow sample (a busy host, a stalled
     /// `statvfs`) delays the next one instead of triggering a catch-up burst.
@@ -328,10 +328,10 @@ mod tests {
         assert_eq!(stamps, vec![4, 5]);
     }
 
-    /// DMN-075 end to end: a config carrying only the obsolete key must still
+    /// End to end: a config carrying only the obsolete key must still
     /// drive the sampler at the 100ms default while someone watches. Guards
     /// the sampler wiring, not just `interval_ms()` — the two were connected
-    /// by a fallback that made every pre-DMN-072 install sample once per 10
+    /// by a fallback that made every legacy install sample once per 10
     /// seconds.
     #[tokio::test(flavor = "multi_thread")]
     async fn legacy_config_still_samples_ten_times_a_second() {
@@ -352,7 +352,7 @@ mod tests {
         );
     }
 
-    /// DMN-135: nobody subscribed — the sampler takes its first sample and
+    /// nobody subscribed — the sampler takes its first sample and
     /// then idles instead of reading procfs ten times a second.
     #[tokio::test(flavor = "multi_thread")]
     async fn sampler_idles_without_subscribers() {
@@ -367,7 +367,7 @@ mod tests {
         );
     }
 
-    /// DMN-135: a subscriber arriving mid-idle wakes the sampler at once
+    /// a subscriber arriving mid-idle wakes the sampler at once
     /// rather than leaving the panel to wait out the idle interval.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_subscriber_wakes_an_idle_sampler() {

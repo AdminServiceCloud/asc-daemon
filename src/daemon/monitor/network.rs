@@ -1,4 +1,4 @@
-//! Network interface inventory (DMN-074): every interface on the machine,
+//! Network interface inventory: every interface on the machine,
 //! loopback included — this is deliberately not the same list as the metrics
 //! sampler's `NetworkMetrics`, which drops loopback because it only cares
 //! about traffic rates. This module answers "what is on this machine and

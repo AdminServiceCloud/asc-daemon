@@ -26,7 +26,7 @@ pub struct Manifest {
     pub description: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
-    /// Relative path to asc.settings.yaml (applied in DMN-017).
+    /// Relative path to asc.settings.yaml.
     #[serde(default)]
     pub settings: Option<String>,
     #[serde(default)]
@@ -51,12 +51,12 @@ pub enum AppType {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSpec {
     /// Prebuilt Docker image to pull (type: docker). May be given alongside
-    /// `image-build`, in which case the installer offers a choice (DMN-050).
+    /// `image-build`, in which case the installer offers a choice.
     #[serde(default)]
     pub image: Option<String>,
     /// Build the Docker image locally from a Dockerfile in the package
     /// instead of (or as an alternative to) pulling a prebuilt `image`
-    /// (type: docker, DMN-050).
+    /// (type: docker).
     #[serde(default, rename = "image-build")]
     pub image_build: Option<ImageBuild>,
     /// Keep the container's stdin open (Engine `OpenStdin`, like `docker run
@@ -79,7 +79,7 @@ pub struct RuntimeSpec {
     pub uninstall: Vec<String>,
 }
 
-/// Local image build (type: docker, DMN-050): the Engine builds the image
+/// Local image build (type: docker): the Engine builds the image
 /// from a Dockerfile shipped in the package repository. Mirrors the
 /// `image-build` object of `asc.schema.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

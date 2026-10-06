@@ -1,4 +1,4 @@
-//! Package manager (DMN-003): `asc.yaml` manifests, registries (apt-style
+//! Package manager: `asc.yaml` manifests, registries (apt-style
 //! sources), install by cloning the package repository (versions = git tags).
 
 pub mod auth;

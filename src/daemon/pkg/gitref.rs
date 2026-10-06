@@ -1,5 +1,5 @@
 //! Remote git refs: list a repository's tags and branches, and pick the
-//! latest version, without cloning (DMN-047, DMN-048).
+//! latest version, without cloning.
 //!
 //! The package version is a property of the **repository** (its git tags),
 //! not of the registry index — so `asc install pkg` resolves the newest tag

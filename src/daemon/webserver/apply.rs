@@ -1,4 +1,4 @@
-//! Applying configuration (DMN-122/DMN-123): resolve every site, render a
+//! Applying configuration: resolve every site, render a
 //! complete staging copy, let `nginx -t` judge it, then swap the live files
 //! and reload.
 //!
@@ -237,7 +237,7 @@ impl WebServer {
         let mut rejected: HashSet<String> = HashSet::new();
         let mut kept_live: HashSet<String> = HashSet::new();
         let mut messages: HashMap<String, String> = HashMap::new();
-        // Site logs (DMN-128): nginx opens every file at `-t` already, and
+        // Site logs: nginx opens every file at `-t` already, and
         // it creates files but not directories.
         std::fs::create_dir_all(&self.paths.logs)
             .with_context(|| format!("cannot create {}", self.paths.logs.display()))?;

@@ -1,4 +1,4 @@
-//! Firewall API (DMN-148, DMN-149): the service layer over
+//! Firewall API: the service layer over
 //! [`crate::daemon::firewall::Firewall`] shared by both transports, the gRPC
 //! `FirewallService` and the REST routes the CLI uses. Every call is
 //! root-only: a non-root unix-socket peer is refused before anything runs.

@@ -6,7 +6,7 @@
 
 The `fail2ban` module installs [fail2ban](https://github.com/fail2ban/fail2ban) on the node and manages it: it bans addresses that keep failing to log in to SSH, hit the web server with scanners or repeat their offences. Bans are enforced through **nftables** in fail2ban's own table, `inet f2b-table`, next to the daemon's `inet asc` ([🛡️ firewall](firewall.md)), so the two never overwrite each other.
 
-The daemon owns exactly one file, `/etc/fail2ban/jail.d/asc.local`. The operator's `jail.local` and the other `jail.d` files are never modified. Everything works standalone through `asc fail2ban …`; the AdminService.Cloud platform uses the same API ([🧩 node-modules](../../../asc-platform/docs/features/node-modules.md)). The command needs the running daemon. Only the system (root) daemon manages fail2ban.
+The daemon owns exactly one file, `/etc/fail2ban/jail.d/asc.local`. The operator's `jail.local` and the other `jail.d` files are never modified. Everything works standalone through `asc fail2ban …`; the AdminService.Cloud platform uses the same API (🧩 node-modules). The command needs the running daemon. Only the system (root) daemon manages fail2ban.
 
 ## 🎯 Scenarios
 
@@ -54,11 +54,6 @@ Capability in `GetStatus`: `fail2ban`. All calls are root-only. The same operati
 
 `asc fail2ban status | install | uninstall | settings | jails | enable | disable | tune | bans | ban | unban`. Command reference: <https://docs.adminservice.cloud/commands/fail2ban>.
 
-## 🔗 Related tasks
-
-| ID | What |
-|---|---|
-| DMN-150 | Module: install, configuration, jails, bans |
-| DMN-151 | CLI, translations, documentation mirror |
+## 🔗 Related
 
 See also: [🛡️ firewall](firewall.md), [🌐 webserver](webserver.md).

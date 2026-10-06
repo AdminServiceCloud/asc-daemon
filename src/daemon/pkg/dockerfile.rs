@@ -1,4 +1,4 @@
-//! Installing a bare Dockerfile with no `asc.yaml` (DMN-107): the manifest
+//! Installing a bare Dockerfile with no `asc.yaml`: the manifest
 //! and settings a normal install would read from the package repository are
 //! synthesized in memory instead — `EXPOSE`/`VOLUME` directives become
 //! `type: ports`/`type: volumes` settings, so the freshly installed app
@@ -35,7 +35,7 @@ pub(super) fn find(manifest_dir: &Path) -> Result<String> {
 }
 
 /// Re-synthesize the manifest and settings of an already-installed
-/// Dockerfile app (DMN-107) — the read path every caller other than the
+/// Dockerfile app — the read path every caller other than the
 /// install itself must use, since `repository/asc.yaml` never exists for one.
 pub fn resolve_installed(
     meta: &AppMeta,
@@ -115,7 +115,7 @@ pub(super) fn synthesize(
     Ok((manifest, settings))
 }
 
-/// Naive `EXPOSE`/`VOLUME` scan (DMN-107): line-based, no `ARG`/`ENV`
+/// Naive `EXPOSE`/`VOLUME` scan: line-based, no `ARG`/`ENV`
 /// expansion. Good enough to make a freshly installed Dockerfile app
 /// reachable — the user can always refine the result from the settings form
 /// afterward — and, like [`detect`], a directive this doesn't understand is

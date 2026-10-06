@@ -1,5 +1,5 @@
 //! Shared attach sessions: one output source per app, many WebSocket
-//! subscribers (DMN-007).
+//! subscribers.
 //!
 //! Modeled after the wings sink-pool design: the daemon keeps a single
 //! attach to the app and fans its output out to every connected client
@@ -36,7 +36,7 @@ pub const COALESCE_LIMIT_BYTES: usize = 16 * 1024;
 
 /// Packs many small chunks into few, up to [`COALESCE_LIMIT_BYTES`] each
 /// (a single larger chunk is kept whole). A source that opens with a
-/// backlog (DMN-116) publishes it all at once, faster than any socket
+/// backlog publishes it all at once, faster than any socket
 /// drains: one chunk per log line would overrun [`BROADCAST_CAPACITY`] and
 /// cost the first client the start of its own backlog.
 pub fn coalesce(chunks: Vec<Chunk>) -> Vec<Chunk> {

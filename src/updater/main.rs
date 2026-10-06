@@ -1,4 +1,4 @@
-//! `asc-updater` — installer and update manager for the asc daemon (DMN-014).
+//! `asc-updater` — installer and update manager for the asc daemon.
 //!
 //! Deliberately a separate binary: it can replace and restart a broken
 //! daemon without depending on it. `install.sh` bootstraps this updater,

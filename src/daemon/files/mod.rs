@@ -1,4 +1,4 @@
-//! Node filesystem access (DMN-070): list, stat, create, move, copy, delete,
+//! Node filesystem access: list, stat, create, move, copy, delete,
 //! archive and stream any path from `/`. See docs/files.md.
 //!
 //! The daemon runs as root, so this service sees the whole filesystem — the
@@ -68,7 +68,7 @@ pub enum FileError {
     /// without a root context.
     Protected(PathBuf),
     /// Resolved outside every root of the [`AppScope`] the request was
-    /// confined to (DMN-086) — the app-scoped counterpart of `Protected`.
+    /// confined to — the app-scoped counterpart of `Protected`.
     OutsideScope(PathBuf),
     /// `chown`'s target user name has no `/etc/passwd` entry.
     UnknownUser(String),
@@ -346,7 +346,7 @@ fn describe_with_cache(path: &Path, cache: &mut NameCache) -> Result<FileEntry> 
     })
 }
 
-/// Resolve `safe` against an optional confinement scope (DMN-086): with a
+/// Resolve `safe` against an optional confinement scope: with a
 /// scope, the real (symlink-resolved) path, checked to fall inside it;
 /// without one, `safe` itself, unchanged — the unscoped node-wide policy
 /// (see [`path`]) of showing a symlink rather than walking through it.
@@ -466,7 +466,7 @@ pub fn move_path(
     describe(&dst_target)
 }
 
-/// What [`create_link`] makes (DMN-146).
+/// What [`create_link`] makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkKind {
     /// `symlink(2)`: the target is stored exactly as given and need not exist.
@@ -1290,7 +1290,7 @@ mod tests {
         assert!(groups.windows(2).all(|w| w[0].gid <= w[1].gid));
     }
 
-    // ── app-scoped confinement (DMN-086): every entry point rejects a path
+    // ── app-scoped confinement: every entry point rejects a path
     // outside its `AppScope`, mirroring the `AppScope::resolve` unit tests
     // in `scope.rs` but through the public functions those tests never call
     // directly. ──

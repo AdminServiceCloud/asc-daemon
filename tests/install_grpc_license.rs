@@ -1,4 +1,4 @@
-//! DMN-091: the gRPC install RPCs must not fail with a bare error when the
+//! the gRPC install RPCs must not fail with a bare error when the
 //! package repository ships a LICENSE — the platform's install dialog has no
 //! way to render an opaque error string as a consent screen. Runs as its own
 //! test binary (like install.rs) so the ASC_SOURCES/ASC_USER_SOURCES env vars

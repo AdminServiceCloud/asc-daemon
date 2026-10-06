@@ -61,7 +61,7 @@ pub struct Config {
     pub platform: PlatformConfig,
 }
 
-/// `[platform]` — binding to AdminService.Cloud (DMN-058).
+/// `[platform]` — binding to AdminService.Cloud.
 ///
 /// Non-secret values only: the registration token lives in `platform.token`
 /// next to this file, root-readable at 0600, because config.toml is
@@ -78,7 +78,7 @@ pub struct PlatformConfig {
     /// When registration succeeded, RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registered_at: Option<String>,
-    /// What was last reported to the platform (DMN-068). Not a secret and not
+    /// What was last reported to the platform. Not a secret and not
     /// a setting — a cache, so a daemon that restarts with nothing changed
     /// does not call the platform on every boot.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,19 +106,19 @@ pub enum UserInstall {
     Docker,
 }
 
-/// `[monitor]` — system metrics sampling (DMN-006, DMN-072, DMN-075).
+/// `[monitor]` — system metrics sampling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorConfig {
     /// Milliseconds between samples while someone watches the live stream.
     /// `None` means the 100ms default — see [`MonitorConfig::interval_ms`].
     pub interval_ms: Option<u64>,
-    /// Milliseconds between samples while nobody is subscribed (DMN-135).
+    /// Milliseconds between samples while nobody is subscribed.
     /// `None` means the 5s default — see [`MonitorConfig::idle_interval_ms`].
     pub idle_interval_ms: Option<u64>,
-    /// Deprecated and ignored (DMN-075): seconds between samples, written by
+    /// Deprecated and ignored: seconds between samples, written by
     /// daemons that predate millisecond sampling. Every install older than
-    /// DMN-072 carries `interval_secs = 10` here, and honouring it kept those
+    /// carries `interval_secs = 10` here, and honouring it kept those
     /// nodes on one sample per 10 seconds long after the daemon learned to
     /// stream — the panel looked frozen on an up-to-date daemon. Still parsed
     /// so an old config loads, never serialized: the key leaves the file on
@@ -140,7 +140,7 @@ impl MonitorConfig {
         self.interval_ms.unwrap_or(100).max(10)
     }
 
-    /// The idle cadence (DMN-135): an explicit `idle_interval_ms`, otherwise
+    /// The idle cadence: an explicit `idle_interval_ms`, otherwise
     /// 5s — never faster than the live cadence, which would make "idle" the
     /// busier of the two.
     pub fn idle_interval_ms(&self) -> u64 {
@@ -155,7 +155,7 @@ impl MonitorConfig {
 /// enough to run around the clock on a node nobody is looking at.
 pub const DEFAULT_IDLE_INTERVAL_MS: u64 = 5_000;
 
-/// Bounds `SetMonitorSettings` accepts (DMN-135). The live floor keeps a
+/// Bounds `SetMonitorSettings` accepts. The live floor keeps a
 /// misclick from turning the sampler into a busy loop; the ceilings keep a
 /// panel from looking frozen.
 pub const MONITOR_INTERVAL_MS_RANGE: std::ops::RangeInclusive<u64> = 100..=60_000;
@@ -201,14 +201,14 @@ pub struct ApiConfig {
     /// instead of the bearer token: the CLI talks to the daemon here, and
     /// the daemon enforces per-user app ownership from the kernel-reported
     /// peer uid. The default is the system daemon's socket for everyone —
-    /// a private non-root daemon (DMN-041) overrides it in its own config.
+    /// a private non-root daemon overrides it in its own config.
     pub socket: PathBuf,
     /// Legacy field: the token now lives in `api.token` next to config.toml
     /// (root-only 0600, see `api::api_token_path`). Kept for migration —
     /// a value found here is moved out on the next daemon start.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// TLS for the API listener (DMN-061). Off is correct while the port is
+    /// TLS for the API listener. Off is correct while the port is
     /// on loopback; a node reached directly must encrypt, because the bearer
     /// token grants full control of the machine.
     pub tls: TlsMode,
@@ -221,7 +221,7 @@ pub struct ApiConfig {
     /// node's public IP, so the platform can dial it by address.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tls_sans: Vec<String>,
-    /// The DNS name this node is reached by (DMN-067). Required for `acme`,
+    /// The DNS name this node is reached by. Required for `acme`,
     /// added as a SAN for `self_signed`, and advertised to the platform in
     /// place of the address — so the node survives an IP change.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,7 +297,7 @@ impl ApiConfig {
             // The mode exists end to end everywhere else — the platform
             // stores it, verifies the chain instead of pinning a fingerprint,
             // and dials the domain — but the daemon does not obtain the
-            // certificate itself yet (DMN-067). An operator reaches the same
+            // certificate itself yet. An operator reaches the same
             // result today with certbot and `files`, so this refuses at
             // startup rather than binding a listener with nothing behind it.
             TlsMode::Acme => bail!(
@@ -493,7 +493,7 @@ impl Config {
                     .with_context(|| format!("invalid config file {}", path.display()))?;
                 if config.monitor.interval_secs.is_some() {
                     // Loud on purpose: this key is why an updated daemon could
-                    // still feel a sample behind (DMN-075). It stops mattering
+                    // still feel a sample behind. It stops mattering
                     // the moment anything saves the config back.
                     tracing::warn!(
                         path = %path.display(),
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn monitor_interval_ignores_legacy_seconds() {
-        // The regression this guards: an install that predates DMN-072 has
+        // The regression this guards: an install from before millisecond sampling has
         // `interval_secs = 10` in its config, and honouring it left the panel
         // ten seconds behind on a daemon that can stream every 100ms.
         let cfg = MonitorConfig {
@@ -706,7 +706,7 @@ tls = \"self_signed\"
     #[test]
     fn acme_is_refused_until_the_daemon_can_issue_certificates() {
         // Better a clear refusal at startup than a listener with nothing
-        // behind it (DMN-067).
+        // behind it.
         let mut config = direct();
         config.tls = TlsMode::Acme;
         config.domain = Some("node.example.com".into());

@@ -1,4 +1,4 @@
-//! End-to-end resource shortfall / force / CPU-quota-clamp (DMN-099): the
+//! End-to-end resource shortfall / force / CPU-quota-clamp: the
 //! cs2-on-a-1-core-node failure this feature fixes was a raw Docker 400
 //! (`range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs
 //! available`) with no chance to intervene. These use `requirements.cpu:

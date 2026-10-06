@@ -1,4 +1,4 @@
-//! On-disk layout of one app directory (DMN-139).
+//! On-disk layout of one app directory.
 //!
 //! ```text
 //! /asc/apps/<id>/
@@ -9,7 +9,7 @@
 //! └── data/
 //! ```
 //!
-//! Before DMN-139 `meta.json` sat at the app directory root and the setting
+//! Previously `meta.json` sat at the app directory root and the setting
 //! values in `config/settings.json`. [`migrate`] moves an app laid out that
 //! way into `.asc/` the first time the store reads it; until that succeeds
 //! (a regular user's CLI reading a tree it cannot write) the readers fall
@@ -27,7 +27,7 @@ use crate::daemon::pkg::settings::SettingValues;
 /// Hidden directory with the daemon's own files inside an app directory.
 pub const STATE_DIR: &str = ".asc";
 
-/// Pre-DMN-139 home of `settings.json`.
+/// Legacy home of `settings.json`.
 const LEGACY_CONFIG_DIR: &str = "config";
 
 /// `<app_dir>/.asc`.
@@ -35,7 +35,7 @@ pub fn state_dir(app_dir: &Path) -> PathBuf {
     app_dir.join(STATE_DIR)
 }
 
-/// Pre-DMN-139 `meta.json` at the app directory root.
+/// Legacy `meta.json` at the app directory root.
 pub fn legacy_meta_path(app_dir: &Path) -> PathBuf {
     app_dir.join(AppMeta::FILE)
 }
@@ -75,7 +75,7 @@ pub fn ensure_state_dir(app_dir: &Path) -> Result<PathBuf> {
     Ok(state)
 }
 
-/// Move a pre-DMN-139 app (`meta.json` at the root, `config/settings.json`)
+/// Move a legacy app (`meta.json` at the root, `config/settings.json`)
 /// into `.asc/`. Idempotent; `Ok(false)` when there was nothing to move.
 ///
 /// Settings go first and meta last: meta at its legacy path is what marks

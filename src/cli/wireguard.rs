@@ -1,4 +1,4 @@
-//! `asc wireguard` (DMN-152): the node's WireGuard through the running daemon.
+//! `asc wireguard`: the node's WireGuard through the running daemon.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;

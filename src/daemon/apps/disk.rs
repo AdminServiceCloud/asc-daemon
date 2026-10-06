@@ -1,4 +1,4 @@
-//! Per-app disk usage (DMN-035): what an installed app occupies on disk —
+//! Per-app disk usage: what an installed app occupies on disk —
 //! image, repository checkout, private data and custom volumes — against
 //! its quota (`asc.settings.yaml` `quota.max_disk`) when one is set.
 
@@ -46,7 +46,7 @@ pub struct VolumeUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskUsage {
     /// Absolute path of the app's own directory on this node
-    /// (`<apps_dir>/<id>`). Additive field for DMN-086: the platform cannot
+    /// (`<apps_dir>/<id>`). Additive field: the platform cannot
     /// compute this itself (the daemon's apps-root is never published), and
     /// an app-scoped file manager needs it as a confinement root.
     pub app_dir: String,
@@ -108,7 +108,7 @@ pub fn usage(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<DiskUs
 
 fn image_bytes_of(config: &Config, meta: &AppMeta, manifest: &Manifest) -> Option<u64> {
     // `manifest.runtime.image` alone misses every image-build-only manifest
-    // (DMN-050) — including every Dockerfile install (DMN-107), which never
+    // — including every Dockerfile install, which never
     // has one at all — so disk usage would silently omit the image size for
     // exactly the apps most likely to have a sizeable locally built image.
     let image_source = match &meta.runtime {
@@ -200,11 +200,11 @@ fn volume_usages(
     out
 }
 
-/// Non-shared volume roots of one app (DMN-086): every volume entry that is
+/// Non-shared volume roots of one app: every volume entry that is
 /// not a Docker named volume, i.e. private to this app rather than
 /// potentially mounted into others too. Used by
 /// [`crate::daemon::files::AppScope`] to confine an app-scoped file manager
-/// to exactly the paths [`app-file-manager.md`](../../../../asc-platform/docs/features/app-file-manager.md)
+/// to exactly the paths `app-file-manager.md`
 /// documents: the app directory and its private volumes.
 ///
 /// Deliberately skips Docker entirely, unlike [`volume_usages`]: a named
@@ -239,13 +239,13 @@ pub fn private_volume_roots(
     roots
 }
 
-/// How long [`cached_dir_size`] trusts a measured directory size (DMN-136).
+/// How long [`cached_dir_size`] trusts a measured directory size.
 pub const DIR_SIZE_TTL: Duration = Duration::from_secs(60);
 
 /// Directory sizes measured recently, keyed by path.
 static DIR_SIZES: OnceLock<Mutex<HashMap<PathBuf, (Instant, u64)>>> = OnceLock::new();
 
-/// [`dir_size`] behind a [`DIR_SIZE_TTL`] cache (DMN-136), for figures that
+/// [`dir_size`] behind a [`DIR_SIZE_TTL`] cache, for figures that
 /// are refreshed on a timer — `asc stats`/`StreamAppStats` and the `asc disk`
 /// summary. A game server with tens of thousands of files costs hundreds of
 /// milliseconds per walk, and the live stats on the app page used to repeat
@@ -297,7 +297,7 @@ pub fn forget_dir_size(dir: &Path) {
 /// (`cli::disk_summary_cmd`, the `asc` binary) — unlike [`usage`], it skips
 /// the Docker image query and settings/volume resolution. Still a full tree
 /// walk, though: anything refreshed on a timer goes through
-/// [`cached_dir_size`] instead (DMN-136).
+/// [`cached_dir_size`] instead.
 pub fn dir_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     let mut stack = vec![dir.to_path_buf()];

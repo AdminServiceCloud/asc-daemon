@@ -3,7 +3,7 @@
 //! Deliberate design choice for the bootstrap path: the updater and the
 //! registry client must stay dependency-light and keep working even when the
 //! daemon is broken; `curl` is guaranteed by install.sh on every supported
-//! distribution. The daemon API server (DMN-005) brings a real HTTP stack
+//! distribution. The daemon API server brings a real HTTP stack
 //! (hyper/rustls) when it lands — this helper is for outbound fetches only.
 
 use std::io::Write;

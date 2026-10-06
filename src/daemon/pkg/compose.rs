@@ -1,4 +1,4 @@
-//! Installing from a bare `docker-compose.yml`/`compose.yml` (DMN-108): no
+//! Installing from a bare `docker-compose.yml`/`compose.yml`: no
 //! `asc.yaml`, no settings, no quota — the app is a `docker compose` project,
 //! managed entirely through [`crate::daemon::compose`] rather than the usual
 //! manifest-driven `provision()` path every other runtime kind goes through.

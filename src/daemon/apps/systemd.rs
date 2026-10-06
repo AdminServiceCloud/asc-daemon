@@ -1,7 +1,7 @@
 //! systemd driver for native apps: one unit per app (`asc-app-<id>.service`).
 //!
-//! The unit file itself is created by the package manager at install time
-//! (DMN-003); this driver only drives its lifecycle.
+//! The unit file itself is created by the package manager at install time;
+//! this driver only drives its lifecycle.
 
 use std::path::Path;
 use std::process::Command;
@@ -63,7 +63,7 @@ fn cgroup_usage(unit: &str) -> Option<ResourceUsage> {
     })
 }
 
-/// Unix time the unit entered its current active run (DMN-089): reads
+/// Unix time the unit entered its current active run: reads
 /// `ActiveEnterTimestampMonotonic` (microseconds since boot, `%llu` —
 /// unlike `ActiveEnterTimestamp`, this needs no locale-dependent date
 /// parsing) and anchors it to `/proc/stat`'s `btime`, the same reference
@@ -146,7 +146,7 @@ impl AppDriver for SystemdAppDriver {
         // -o cat prints the bare message; -o short-iso prefixes an ISO-8601
         // timestamp (plus host/unit/pid) the same way the live stream does
         // (console/mod.rs) — kept consistent so one frontend parser covers
-        // both (DMN-088).
+        // both.
         let format = if timestamps { "short-iso" } else { "cat" };
         let out = Command::new("journalctl")
             .args(["-u", unit(meta)?, "-n", &tail, "--no-pager", "-o", format])

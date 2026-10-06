@@ -1,4 +1,4 @@
-//! The node's fail2ban (DMN-150): install it, own one file of its
+//! The node's fail2ban: install it, own one file of its
 //! configuration (`/etc/fail2ban/jail.d/asc.local`), switch the known jails
 //! on and off, and list, add and release bans through `fail2ban-client`. Bans
 //! are enforced in fail2ban's own nftables table, next to the firewall

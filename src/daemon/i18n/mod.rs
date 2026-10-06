@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// `ValueEnum` is what lets `asc config lang <TAB>` and `--help` enumerate the
 /// languages instead of only [`FromStr`] rejecting the wrong ones after the
-/// fact (DMN-055); the two parse the same spellings.
+/// fact; the two parse the same spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Lang {

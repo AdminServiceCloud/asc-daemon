@@ -1,6 +1,6 @@
 //! `meta.json` — per-app metadata, the source of truth for recovery.
 //!
-//! Lives at `/asc/apps/<id>/.asc/meta.json` (DMN-139; `/asc/apps/<id>/meta.json`
+//! Lives at `/asc/apps/<id>/.asc/meta.json` (`/asc/apps/<id>/meta.json`
 //! before that, still read as a fallback). The index of installed apps is
 //! rebuilt by scanning these files, so they must always be written atomically.
 
@@ -15,17 +15,17 @@ use serde::{Deserialize, Serialize};
 pub struct AppMeta {
     /// Unique id — the directory name under the apps root.
     pub id: String,
-    /// Stable identity of this instance, generated at install (DMN-044).
+    /// Stable identity of this instance, generated at install.
     /// Unlike `id`, it is never reused: removing `helloworld-2` frees that id
-    /// for the next install (DMN-033), while the UUID stays retired — so
+    /// for the next install, while the UUID stays retired — so
     /// credentials and platform records bind to it safely. `None` for apps
-    /// installed before DMN-044.
+    /// installed by an older version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
     /// Human-readable name (defaults to the id). Refreshed from the package
     /// manifest on upgrade — user renames go to `custom_name` instead.
     pub name: String,
-    /// Name chosen by the user at install time (DMN-024). Survives upgrades;
+    /// Name chosen by the user at install time. Survives upgrades;
     /// commands accept it interchangeably with the id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_name: Option<String>,
@@ -35,7 +35,7 @@ pub struct AppMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Package source: `"<registry>:<git url>"` for a registry install,
-    /// `"git:<git url>"` for a direct repository install (DMN-040) — which is
+    /// `"git:<git url>"` for a direct repository install — which is
     /// then the only origin the app has, and the one `asc app upgrade`
     /// re-resolves it from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,7 +47,7 @@ pub struct AppMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// In-repository subdirectory of the manifest, for a direct install of a
-    /// monorepo package (DMN-096) — the equivalent of a registry entry's
+    /// monorepo package — the equivalent of a registry entry's
     /// `source.path`, recorded here because a direct install has no entry to
     /// carry it. `asc app upgrade` re-clones and re-resolves the manifest at
     /// this same path. `None` for a root-manifest direct install and for
@@ -59,7 +59,7 @@ pub struct AppMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     /// How the app was installed, when it wasn't the package's own
-    /// `asc.yaml` (DMN-107): `None` for every ordinary manifest install
+    /// `asc.yaml`: `None` for every ordinary manifest install
     /// (including every app installed before this field existed). Every
     /// later reader of this app's manifest — refresh, upgrade, disk usage,
     /// ports, `asc app clone` — goes through
@@ -71,7 +71,7 @@ pub struct AppMeta {
     /// What the app should be doing; enforced after daemon restart/reboot.
     #[serde(default)]
     pub desired_state: DesiredState,
-    /// Resource quota from asc.settings.yaml (DMN-021), normalized at
+    /// Resource quota from asc.settings.yaml, normalized at
     /// install/upgrade time. `None` = unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<Quota>,
@@ -107,7 +107,7 @@ pub enum DesiredState {
 }
 
 /// Which image a Docker app's container was created from when the manifest
-/// offers both a prebuilt `image` and a local `image-build` (DMN-050). Stored
+/// offers both a prebuilt `image` and a local `image-build`. Stored
 /// in `meta.json` so a settings-drift recreate (and an upgrade) reuse the same
 /// source instead of asking again; absent when the manifest offers only one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,10 +120,10 @@ pub enum ImageSource {
 }
 
 /// A non-`asc.yaml` install method a running app was installed with
-/// (DMN-107) — the manifest that describes it was synthesized, not read from
+/// — the manifest that describes it was synthesized, not read from
 /// the package repository, and has to be re-synthesized identically on every
-/// later read. `#[serde(tag = "kind")]` so a second variant (compose,
-/// DMN-108) is additive on read: an old meta.json with no `install_method` at
+/// later read. `#[serde(tag = "kind")]` so a second variant (compose)
+/// is additive on read: an old meta.json with no `install_method` at
 /// all already deserializes as `None` via the field's own `#[serde(default)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -145,7 +145,7 @@ pub enum Runtime {
     Docker {
         container: String,
         /// Which image source the container was built from — set only when
-        /// the manifest offered both `image` and `image-build` (DMN-050).
+        /// the manifest offered both `image` and `image-build`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         image_source: Option<ImageSource>,
     },
@@ -157,7 +157,7 @@ pub enum Runtime {
         #[serde(default)]
         args: Vec<String>,
     },
-    /// A `docker compose` project (DMN-108) — an entirely different
+    /// A `docker compose` project — an entirely different
     /// provisioning path from `Docker` above: there is no single container
     /// to create, only a project orchestrated through the `docker compose`
     /// CLI plugin (see [`crate::daemon::compose`]).
@@ -206,7 +206,7 @@ impl AppMeta {
     }
 
     /// Load metadata from an app directory: `.asc/meta.json`, or the legacy
-    /// root `meta.json` of an app not migrated yet (DMN-139).
+    /// root `meta.json` of an app not migrated yet.
     pub fn load(dir: &Path) -> Result<Self> {
         let mut path = Self::path(dir);
         if !path.exists() {
@@ -386,7 +386,7 @@ mod tests {
     fn repo_path_roundtrip_and_absent_by_default() {
         // A registry install (the sample) never sets it, and it must not
         // clutter meta.json for the overwhelming majority of apps that have
-        // no monorepo subdirectory (DMN-096).
+        // no monorepo subdirectory.
         let json = serde_json::to_string(&sample()).unwrap();
         assert!(!json.contains("repo_path"));
 
@@ -397,7 +397,7 @@ mod tests {
         let loaded = AppMeta::load(dir.path()).unwrap();
         assert_eq!(loaded.repo_path.as_deref(), Some("web/helloworld"));
 
-        // Meta.json written before DMN-096 (no repo_path key) still loads.
+        // Meta.json written by an older version (no repo_path key) still loads.
         let old_json = serde_json::to_string(&sample()).unwrap();
         let loaded_old: AppMeta = serde_json::from_str(&old_json).unwrap();
         assert_eq!(loaded_old.repo_path, None);
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn uuid_is_optional_for_legacy_meta() {
-        // meta.json written before DMN-044 has no "uuid" key and must still load.
+        // meta.json written by an older version has no "uuid" key and must still load.
         let dir = tempfile::tempdir().unwrap();
         let mut legacy: serde_json::Value = serde_json::to_value(sample()).unwrap();
         legacy.as_object_mut().unwrap().remove("uuid");

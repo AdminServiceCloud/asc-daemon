@@ -1,4 +1,4 @@
-//! S3-compatible backup storage (DMN-115): AWS S3, MinIO, Backblaze B2,
+//! S3-compatible backup storage: AWS S3, MinIO, Backblaze B2,
 //! Wasabi, Yandex Object Storage and anything else that speaks the S3 REST
 //! API with Signature Version 4.
 //!

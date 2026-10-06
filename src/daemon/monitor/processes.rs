@@ -1,4 +1,4 @@
-//! Host process inventory and signals (DMN-119): what `ps`/`top` would show,
+//! Host process inventory and signals: what `ps`/`top` would show,
 //! parsed straight from `/proc/<pid>/{stat,status,cmdline,cgroup}`, plus the
 //! one control a process manager needs — delivering a signal.
 //!

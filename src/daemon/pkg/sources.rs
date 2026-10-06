@@ -1,6 +1,6 @@
 //! Source lists — which registries the daemon installs from (apt-style).
 //!
-//! Two levels (DMN-003): the **system** list `/etc/asc/sources.toml`,
+//! Two levels: the **system** list `/etc/asc/sources.toml`,
 //! managed by root and visible to every user, and a **per-user** list
 //! `~/.config/asc/sources.toml` that supplements it. The effective list is
 //! system sources first (higher priority on name conflicts), then the
@@ -170,7 +170,7 @@ impl SourceList {
         };
         // `git` is reserved: an app records its origin as "<source>:<git url>"
         // in meta.json, and "git:<url>" is what marks an app installed
-        // straight from a repository URL (DMN-040/DMN-053) — a source by that
+        // straight from a repository URL — a source by that
         // name would make the two indistinguishable at upgrade time.
         if name == "git" {
             bail!("'git' is a reserved source name; pass --name with another one");
@@ -189,7 +189,7 @@ impl SourceList {
         Ok(target.last().expect("just pushed"))
     }
 
-    /// Idempotent full replace of the editable list (DMN-083): `sources`
+    /// Idempotent full replace of the editable list: `sources`
     /// becomes the entire system-scope list in one atomic swap — deletions
     /// included — so a platform retry after a dropped connection can never
     /// double- or partially apply a desired state. Per-entry validation
@@ -357,7 +357,7 @@ mod tests {
         l.add("file:///tmp/reg", Some("local")).unwrap();
         l.remove("local").unwrap();
         assert!(l.remove("local").is_err());
-        // "git" marks a direct repository install in meta.source (DMN-053).
+        // "git" marks a direct repository install in meta.source.
         let err = l
             .add("https://registry.example.org", Some("git"))
             .unwrap_err()

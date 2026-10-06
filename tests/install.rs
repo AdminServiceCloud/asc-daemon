@@ -228,7 +228,7 @@ fn install_from_file_registry() {
     assert!(!app_dir.join("config").exists());
     assert!(app_dir.join("data").is_dir());
 
-    // A second install of the same package becomes a new instance (DMN-033):
+    // A second install of the same package becomes a new instance:
     // the id gets the first free '-N' suffix, the id doubles as the display
     // name, and the registry package is recorded for upgrades.
     let pkg::InstallOutcome::App(second) = pkg::install(
@@ -332,7 +332,7 @@ fn install_from_file_registry() {
     // Upgrading an unknown app fails cleanly.
     assert!(pkg::upgrade(&config, &ctx, "ghost", None).is_err());
 
-    // ── DMN-047: no @version installs the repository's newest tag ────────
+    // ── no @version installs the repository's newest tag ────────
     // The repo now has v1.0.0 and v2.0.0; `demo` (no version) must resolve
     // v2.0.0 from the tags, not any registry field.
     let pkg::InstallOutcome::App(latest) =
@@ -347,7 +347,7 @@ fn install_from_file_registry() {
     );
     store.remove(&latest.id).unwrap();
 
-    // ── DMN-048: `demo@` asks which version, listing tags and branches ───
+    // ── `demo@` asks which version, listing tags and branches ───
     let err =
         pkg::install(&config, &ctx, "demo@", None, None, true, None, false, None).unwrap_err();
     let choice = err

@@ -1,4 +1,4 @@
-//! DMN-098: `InspectPackage` over gRPC — what the platform's install dialog
+//! `InspectPackage` over gRPC — what the platform's install dialog
 //! calls before installing anything, so it can tell the operator that a
 //! package is a stack and which apps it is about to put on the node. Runs as
 //! its own test binary; no registry sources are involved.
@@ -149,7 +149,7 @@ async fn grpc_inspect_package_reads_a_stack_and_an_app() {
     assert!(!ws.path().join("apps/solo").exists());
 }
 
-/// DMN-106: a repository with no `asc.yaml`/`asc.stack.yaml` used to fail the
+/// a repository with no `asc.yaml`/`asc.stack.yaml` used to fail the
 /// whole inspect (`Manifest::load` errors out); it must now come back as
 /// `PACKAGE_KIND_UNSPECIFIED` with whatever install methods were detected,
 /// so the install dialog can offer "found, not supported" instead of
@@ -198,7 +198,7 @@ async fn grpc_inspect_package_without_a_manifest_reports_unknown_and_detected_me
     let kinds: Vec<i32> = response.methods.iter().map(|m| m.kind).collect();
     assert!(kinds.contains(&(pb::InstallMethodKind::Dockerfile as i32)));
     assert!(kinds.contains(&(pb::InstallMethodKind::DockerCompose as i32)));
-    // Dockerfile is installable since DMN-107 — unlike the docker-compose
+    // Dockerfile is installable in newer versions — unlike the docker-compose
     // project sitting right next to it in the same repository, which is not.
     let dockerfile = response
         .methods
@@ -209,7 +209,7 @@ async fn grpc_inspect_package_without_a_manifest_reports_unknown_and_detected_me
     assert!(dockerfile.unsupported_reason.is_empty());
     assert_eq!(dockerfile.files, vec!["Dockerfile"]);
     // Whether docker_compose itself is supported depends on whether this
-    // test host actually has the `docker compose` plugin (DMN-109) — outside
+    // test host actually has the `docker compose` plugin — outside
     // this test's control, so it only checks that `supported` and
     // `unsupported_reason` agree with each other, not which way.
     let compose = response
@@ -220,7 +220,7 @@ async fn grpc_inspect_package_without_a_manifest_reports_unknown_and_detected_me
     assert_eq!(compose.supported, compose.unsupported_reason.is_empty());
 }
 
-/// DMN-131: the inspect answers the two questions an install used to find
+/// the inspect answers the two questions an install used to find
 /// out only by failing — the license to accept and whether the host can
 /// cover the requirements — so the installer asks both up front and runs
 /// the one real install with the answers.

@@ -1,6 +1,6 @@
 //! asc-daemon library crate, shared by the `asc` and `asc-updater` binaries.
 
-// The daemon ships for Linux only (macOS is on the roadmap). There are no
+// The daemon ships for Linux only (macOS is planned). There are no
 // Windows code paths on purpose — develop with WSL or a Linux target.
 #[cfg(not(unix))]
 compile_error!(

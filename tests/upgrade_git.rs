@@ -1,5 +1,5 @@
-//! Upgrading an app that was installed straight from a repository URL
-//! (DMN-053): there is no registry entry to resolve, so the upgrade has to
+//! Upgrading an app that was installed straight from a repository URL:
+//! there is no registry entry to resolve, so the upgrade has to
 //! come back to the URL recorded in `meta.source` — and follow the branch the
 //! app tracks when it tracks one, instead of jumping to a tag.
 
@@ -26,7 +26,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// The commit `dir` is checked out at — what an upgrade reports as the old
-/// and the new commit (DMN-056).
+/// and the new commit.
 fn head(dir: &Path) -> String {
     let out = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -123,7 +123,7 @@ fn upgrade_follows_the_recorded_repository_url() {
             assert_eq!(id, "demo");
             assert_eq!(from.as_deref(), Some("v1.0.0"));
             assert_eq!(to, "v1.1.0");
-            // DMN-056: the tags map onto the repository's actual commits.
+            // the tags map onto the repository's actual commits.
             assert_eq!(from_commit.as_deref(), Some(old_commit.as_str()));
             assert_eq!(to_commit.as_deref(), Some(new_commit.as_str()));
         }
@@ -216,7 +216,7 @@ fn branch_installs_follow_their_branch() {
             assert_eq!(from.as_deref(), Some("dev"));
             assert_eq!(to, "dev", "still on the branch, not on a tag");
             // Both versions read 'dev' — the commits are the only thing that
-            // says what actually changed (DMN-056).
+            // says what actually changed.
             assert_eq!(from_commit.as_deref(), Some(old_commit.as_str()));
             assert_eq!(to_commit.as_deref(), Some(new_commit.as_str()));
             assert_ne!(from_commit, to_commit);
@@ -288,7 +288,7 @@ fn untagged_repositories_track_their_default_branch() {
     );
 }
 
-/// DMN-096: a direct git install of a monorepo package records its manifest
+/// a direct git install of a monorepo package records its manifest
 /// subdirectory (`meta.repo_path`) — an upgrade has no registry entry to
 /// re-resolve that path from, so it must carry it forward from meta.json,
 /// same as it already does for a tracked branch.
@@ -364,7 +364,7 @@ fn upgrade_of_a_monorepo_direct_install_keeps_the_manifest_path() {
     assert!(app_dir.join("repository/web/helloworld/asc.yaml").exists());
 }
 
-/// DMN-140: the platform's GitOps picker moves an app onto a branch (which it
+/// the platform's GitOps picker moves an app onto a branch (which it
 /// then follows) or pins it to a tag (which stops it following one) — and a
 /// switch onto the ref the app already sits on still records the choice.
 #[test]

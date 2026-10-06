@@ -71,7 +71,7 @@ impl PortProtocol {
 
 /// One published port: the `host` port the user picked and the `container`
 /// port the package author fixed (the `container:` field of a `type: ports`
-/// setting, DMN-052). A package that declares no container port publishes
+/// setting). A package that declares no container port publishes
 /// host == container, which is what every package did before the field
 /// existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,7 +210,7 @@ pub fn stop(cfg: &DockerConfig, container: &str) -> Result<()> {
     })
 }
 
-/// Kill a container outright (SIGKILL, DMN-134) — no grace period. 409 = not
+/// Kill a container outright (SIGKILL) — no grace period. 409 = not
 /// running, 404 = gone: either way there is nothing left to kill.
 pub fn kill(cfg: &DockerConfig, container: &str) -> Result<()> {
     block_on(async {
@@ -271,7 +271,7 @@ pub fn running(cfg: &DockerConfig, container: &str) -> Result<bool> {
     })
 }
 
-/// Unix timestamp of the container's current run, for app uptime (DMN-089).
+/// Unix timestamp of the container's current run, for app uptime.
 /// `None` when the container is missing, stopped, or has never started —
 /// the Engine reports `"0001-01-01T00:00:00Z"` (Go's zero `time.Time`) for
 /// the last case rather than omitting the field.
@@ -321,10 +321,10 @@ pub struct AppliedConfig {
     /// `Config.Cmd` — a `start_command` override lands here.
     pub cmd: Option<Vec<String>>,
     /// `Image` — the id (`sha256:…`) of the image the container was
-    /// created from. A re-pulled tag (DMN-120) moves the tag to a new id
+    /// created from. A re-pulled tag moves the tag to a new id
     /// while the container keeps the old one: that difference is drift.
     pub image: Option<String>,
-    /// NVIDIA card ids from `HostConfig.DeviceRequests` (DMN-143), sorted.
+    /// NVIDIA card ids from `HostConfig.DeviceRequests`, sorted.
     pub gpu_ids: Vec<String>,
     /// `HostConfig.Devices` host paths (AMD/Intel GPU nodes), sorted.
     pub gpu_devices: Vec<String>,
@@ -416,7 +416,7 @@ pub fn remove(cfg: &DockerConfig, container: &str) -> Result<()> {
     })
 }
 
-// ── Host inventory (DMN-102) ────────────────────────────────────────────────
+// ── Host inventory ────────────────────────────────────────────────
 
 /// Compose writes the project and service names of every container it
 /// creates into these labels. Lifting them out of the raw label map here
@@ -579,7 +579,7 @@ fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
     }
 }
 
-// ── Images, volumes, networks, disk usage (DMN-104) ─────────────────────────
+// ── Images, volumes, networks, disk usage ─────────────────────────
 
 /// One image on the host.
 pub struct ImageInfo {
@@ -1024,7 +1024,7 @@ pub fn ensure_pulled(
     })
 }
 
-/// What the host knows about one local image (DMN-120).
+/// What the host knows about one local image.
 #[derive(Debug, Clone)]
 pub struct LocalImage {
     /// `sha256:…` image id.
@@ -1090,8 +1090,8 @@ pub fn registry_digest(
 
 /// Pull `image` unconditionally — unlike [`ensure_pulled`], an image already
 /// on the host is refreshed from its registry (`docker pull`). Used by the
-/// repull of a mutable tag (DMN-120); `report` gets the pull's progress lines
-/// for the streamed repull (DMN-132).
+/// repull of a mutable tag; `report` gets the pull's progress lines
+/// for the streamed repull.
 pub fn pull_image(
     cfg: &DockerConfig,
     image: &str,
@@ -1132,7 +1132,7 @@ pub fn split_image_ref(image: &str) -> (&str, Option<&str>) {
 /// or a bare uid with no explicit group. Bind-mounted volumes are chowned to
 /// this when known, so an image that `chown`s its own data directory on
 /// first start does not hit EPERM against a root-owned bind mount — a
-/// non-root process may only chown a path it already owns (DMN-038).
+/// non-root process may only chown a path it already owns.
 pub fn image_uid_gid(cfg: &DockerConfig, image: &str) -> Result<Option<(u32, u32)>> {
     block_on(async {
         let docker = connect(cfg)?;
@@ -1214,27 +1214,27 @@ pub struct CreateSpec<'a> {
     pub open_stdin: bool,
     /// Allocate a pseudo-TTY (Engine `Tty`, like `docker run -t`).
     pub tty: bool,
-    /// Credentials for the image's registry (DMN-046); `None` = anonymous.
+    /// Credentials for the image's registry; `None` = anonymous.
     pub registry_auth: Option<RegistryAuth>,
-    /// Container labels (DMN-105): `asc.managed`/`asc.app.id`/`asc.app.uuid`,
+    /// Container labels: `asc.managed`/`asc.app.id`/`asc.app.uuid`,
     /// see the constants below. Purely informational — [`AppliedConfig`]
     /// deliberately does not read labels back, so adding or changing one here
     /// never trips the settings-drift recreate.
     pub labels: HashMap<String, String>,
-    /// NVIDIA card UUIDs to attach (DMN-143): one `DeviceRequest` with the
+    /// NVIDIA card UUIDs to attach: one `DeviceRequest` with the
     /// `gpu` capability, which the NVIDIA Container Toolkit fulfils.
     pub gpu_ids: Vec<String>,
     /// Device nodes mapped into the container one-to-one (AMD/Intel GPUs).
     pub gpu_devices: Vec<String>,
 }
 
-/// Set to `"true"` on every container ASC creates (DMN-105): lets a future
+/// Set to `"true"` on every container ASC creates: lets a future
 /// caller recognize an ASC-managed container without guessing from its name.
 pub const LABEL_MANAGED: &str = "asc.managed";
-/// The installed app's `id` (DMN-105) — a cheaper cross-reference than
+/// The installed app's `id` — a cheaper cross-reference than
 /// matching on container name, kept alongside it rather than instead of it.
 pub const LABEL_APP_ID: &str = "asc.app.id";
-/// The installed app's `uuid` (DMN-105), when it has one (DMN-044+).
+/// The installed app's `uuid`, when it has one.
 pub const LABEL_APP_UUID: &str = "asc.app.uuid";
 
 /// Credentials for one image registry, resolved from the `asc auth` store.
@@ -1297,7 +1297,7 @@ async fn pull(
     }
     let mut stream = docker.create_image(Some(opts), None, auth.map(RegistryAuth::to_credentials));
     while let Some(step) = stream.next().await {
-        // DMN-137: the caller gave up — drop the stream (the Engine aborts a
+        // the caller gave up — drop the stream (the Engine aborts a
         // pull whose client went away); the caller's own checkpoint right
         // after turns this into a `Cancelled` error.
         if report.is_some_and(|report| report.cancelled()) {
@@ -1347,7 +1347,7 @@ async fn pull(
     Ok(())
 }
 
-/// A local image build (DMN-050): the Engine builds `tag` from a Dockerfile
+/// A local image build: the Engine builds `tag` from a Dockerfile
 /// in the package repository, so a package can ship its own image instead of
 /// (or beside) a prebuilt one on a registry.
 pub struct BuildSpec<'a> {
@@ -1361,7 +1361,7 @@ pub struct BuildSpec<'a> {
     pub args: &'a std::collections::BTreeMap<String, String>,
 }
 
-/// Build a Docker image from a Dockerfile shipped in the package (DMN-050).
+/// Build a Docker image from a Dockerfile shipped in the package.
 /// The build context directory is streamed to the Engine as an in-memory tar;
 /// the Engine builds `tag` and the daemon reuses it exactly like a pulled
 /// image. The build always runs through the Engine's BuildKit backend
@@ -1413,7 +1413,7 @@ pub fn build_image(
             // Remove intermediate containers on success, like `docker build`.
             .rm(true)
             // Legacy builder doesn't understand `COPY --chmod`/`--chown`
-            // extensions some package Dockerfiles rely on (DMN-050). The
+            // extensions some package Dockerfiles rely on. The
             // session id just correlates this build with its side-channel
             // callback (auth), so any per-build id does.
             .version(BuilderVersion::BuilderBuildKit)
@@ -1437,7 +1437,7 @@ pub fn build_image(
         let mut frames = 0usize;
         let mut traced = 0usize;
         while let Some(step) = stream.next().await {
-            // DMN-137: dropping the stream closes the build session; the
+            // dropping the stream closes the build session; the
             // Engine cancels a BuildKit solve whose client went away.
             progress::ensure_not_cancelled(report)?;
             let info = match step {
@@ -1677,7 +1677,7 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
 
         // The Engine names a port by its **container** side; the host side
         // lives in the binding. They are equal unless the package fixed a
-        // container port of its own (`container:`, DMN-052).
+        // container port of its own (`container:`).
         let mut exposed_ports: Vec<String> = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         for port in &spec.ports {
@@ -1762,7 +1762,7 @@ pub fn create(cfg: &DockerConfig, spec: CreateSpec<'_>) -> Result<()> {
 
 /// When the container's current run began — or, once it stopped, its most
 /// recent one. The console's cut-off between this run's output and every
-/// earlier run's (DMN-116): a `docker start` of an existing container
+/// earlier run's: a `docker start` of an existing container
 /// appends to the same log the Engine has kept since the container was
 /// created, so neither `tail` nor attach's `logs` replay can tell the runs
 /// apart on their own. `None` when the container is missing or has never
@@ -1857,7 +1857,7 @@ pub async fn logs_follow(
 /// What the container printed in `[since, until)`, oldest first, capped to
 /// the last `tail` messages, with the Engine's timestamps stripped again —
 /// the raw bytes an attach would have carried. This is the attach console's
-/// backlog (DMN-116): `until` is the moment the live attach went up, so the
+/// backlog: `until` is the moment the live attach went up, so the
 /// backlog and the live stream meet there instead of overlapping.
 pub async fn run_backlog(
     cfg: &DockerConfig,
@@ -1959,7 +1959,7 @@ impl ExecResizer {
     }
 }
 
-/// A live `docker exec` session (DMN-082): bidirectional stdin/stdout over a
+/// A live `docker exec` session: bidirectional stdin/stdout over a
 /// PTY, plus resize via `resizer`. Kept open for the life of the shell.
 pub struct ExecSession {
     pub resizer: ExecResizer,
@@ -2100,7 +2100,7 @@ async fn start_exec(
     }
 }
 
-// ── Daemon-owned service containers (DMN-122) ───────────────────────────────
+// ── Daemon-owned service containers ───────────────────────────────
 
 /// A container the daemon runs for itself rather than for an app — the web
 /// server. Host network, restarted unless stopped, no port bindings.

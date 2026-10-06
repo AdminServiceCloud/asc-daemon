@@ -1,4 +1,4 @@
-//! Local stdio Model Context Protocol server (DMN-013).
+//! Local stdio Model Context Protocol server.
 //!
 //! `asc mcp serve` is not part of the daemon process. It talks to the daemon
 //! through the existing Unix socket, so the kernel supplies the MCP process's
@@ -175,17 +175,17 @@ struct InstallInput {
     name: Option<String>,
     branch: Option<String>,
     tag: Option<String>,
-    /// In-repository subdirectory of the manifest (DMN-096) — direct
+    /// In-repository subdirectory of the manifest — direct
     /// repository installs only, for a monorepo package.
     path: Option<String>,
-    /// One app of a stack instead of every non-optional one (DMN-097) —
+    /// One app of a stack instead of every non-optional one —
     /// direct repository installs only; a registry spec uses `<stack>/<app>`.
     stack_app: Option<String>,
     #[serde(default)]
     license_ack: bool,
     /// `prebuilt` or `build` when the package offers both image sources.
     image_choice: Option<String>,
-    /// Skip the resource shortfall check (DMN-099); without it, a host that
+    /// Skip the resource shortfall check; without it, a host that
     /// cannot currently cover the package's requirements or runtime quota
     /// fails the call instead of a raw container-create error.
     #[serde(default)]

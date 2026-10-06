@@ -64,8 +64,7 @@
 | `POST /v1/users/{name}/authorized-keys {"public_key"}` | `UserService.AddAuthorizedKey` | Идемпотентное добавление |
 | `DELETE /v1/users/{name}/authorized-keys {"fingerprint"}` | `UserService.RemoveAuthorizedKey` | Удаление по фингерпринту (в теле, не в пути — чтобы не URL-кодировать `/`) |
 
-## 🔗 Связанные задачи
+## 🔗 См. также
 
-- DMN-100 — реализация `UserService` в демоне.
 - Флаг возможностей `users` (см. `ApiState::CAPABILITIES`) включает вкладку «Users» на платформе — тот же приём, что у `sources`/`credentials`.
 - [📁 files](files.md) — соседний общеузловой файловый API; `UserService` следует той же дисциплине root-доступа, но без области видимости `app_id`.

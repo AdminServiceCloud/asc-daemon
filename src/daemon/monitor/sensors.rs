@@ -1,4 +1,4 @@
-//! Temperature and fan sensors from every device that exposes them (DMN-144).
+//! Temperature and fan sensors from every device that exposes them.
 //!
 //! The kernel publishes sensors through `hwmon` (`/sys/class/hwmon/hwmonN`):
 //! CPU packages and cores (`coretemp`, `k10temp`), GPUs (`amdgpu`), NVMe and

@@ -1,4 +1,4 @@
-//! The node's firewall (DMN-148, DMN-149): nftables through one table the
+//! The node's firewall: nftables through one table the
 //! daemon owns, `inet asc`, built from a small model (settings, rules, IP
 //! sets), applied with an automatic rollback, plus an expert RAW mode where
 //! the operator's text is the whole ruleset. See docs/english/firewall.md.

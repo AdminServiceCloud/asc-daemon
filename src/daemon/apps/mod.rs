@@ -1,4 +1,4 @@
-//! App management core (DMN-002): storage, drivers, ownership, recovery.
+//! App management core: storage, drivers, ownership, recovery.
 //!
 //! Ownership model: every app belongs to the Linux user who installed it.
 //! A regular user sees and controls only their own apps; root (incl. sudo)
@@ -24,7 +24,7 @@ use crate::daemon::i18n::{Msg, tf, tf2};
 pub use driver::{ResourceUsage, RuntimeState};
 
 /// Starting an app whose `required` setup questions (asc.settings.yaml
-/// `setup:`, DMN-138) are still unanswered. Typed so both transports report
+/// `setup:`) are still unanswered. Typed so both transports report
 /// it as a precondition to fix, not an internal error.
 #[derive(Debug)]
 pub struct SetupIncomplete {
@@ -103,7 +103,7 @@ fn username_for_uid(uid: u32) -> Option<String> {
     passwd_for_uid(uid).map(|(name, _home)| name)
 }
 
-/// Home directory of a uid from the user database (DMN-062): the daemon runs
+/// Home directory of a uid from the user database: the daemon runs
 /// as root but acts on behalf of the calling user, so it has to find that
 /// user's `~/.asc` tree without their `$HOME` in its own environment.
 /// `None` when the uid has no passwd entry or an empty `pw_dir`.
@@ -163,7 +163,7 @@ pub struct AppStatus {
     pub commit: Option<String>,
 }
 
-/// One app's resource consumption for `asc stats` (DMN-006).
+/// One app's resource consumption for `asc stats`.
 pub struct AppStats {
     pub meta: AppMeta,
     /// CPU share since the previous sample; can exceed 100 on multi-core
@@ -194,7 +194,7 @@ pub struct AppStats {
     pub disk_bytes: u64,
     /// `meta.quota.disk_bytes`, if the app has a disk quota set.
     pub quota_disk_bytes: Option<u64>,
-    /// Seconds since the app's current run started (DMN-089). `None` when
+    /// Seconds since the app's current run started. `None` when
     /// stopped or the runtime cannot report a start time.
     pub uptime_secs: Option<u64>,
 }
@@ -236,7 +236,7 @@ fn byte_rate(first: Option<u64>, second: Option<u64>, elapsed_micros: u64) -> Op
 pub struct AppManager {
     store: AppStore,
     /// The full config: drivers need `[docker]`, the settings refresh on
-    /// start (DMN-017) resolves stack manifests through the registries.
+    /// start resolves stack manifests through the registries.
     config: Config,
 }
 
@@ -279,7 +279,7 @@ impl AppManager {
     }
 
     /// Load an app the user is allowed to manage. `reference` is the app id
-    /// or its custom name (DMN-024) — every command accepts both.
+    /// or its custom name — every command accepts both.
     ///
     /// Both are matched case-insensitively: ids are canonically lowercase
     /// (`HOMEBAR` installs as `homebar`), and typing the name back the way
@@ -363,7 +363,7 @@ impl AppManager {
     /// Same as [`Self::stats`], restricted to `ids` (empty means every app
     /// the caller can see). The filter is applied *before* the sampling
     /// window runs — asking for one app must not cost the sampling time of
-    /// every app on the node (DMN-080).
+    /// every app on the node.
     pub fn stats_for(&self, ctx: &UserContext, ids: &[String]) -> Result<Vec<AppStats>> {
         let mut apps = self.list(ctx)?;
         if !ids.is_empty() {
@@ -382,7 +382,7 @@ impl AppManager {
                 (Some(a), Some(b)) => Some(cpu_percent(a, b, elapsed_micros)),
                 _ => None,
             };
-            // Cached (DMN-136): this runs on every live-stats tick, and a
+            // Cached: this runs on every live-stats tick, and a
             // full tree walk per tick is what made the node's CPU jump
             // while an app page was open.
             let disk_bytes = self
@@ -447,7 +447,7 @@ impl AppManager {
         })
     }
 
-    /// Set or clear the app's custom name (DMN-095). An empty (or
+    /// Set or clear the app's custom name. An empty (or
     /// whitespace-only) name resets it to the package's own name — the same
     /// state as an app that never had a custom name.
     pub fn rename(&self, ctx: &UserContext, id: &str, name: &str) -> Result<AppStatus> {
@@ -494,7 +494,7 @@ impl AppManager {
             Outcome::AlreadyInState
         } else {
             self.ensure_setup_complete(&meta, &dir)?;
-            // Changed settings (DMN-017/030) land here: a stopped container
+            // Changed settings land here: a stopped container
             // whose configuration drifted from the settings is recreated.
             refreshed = crate::daemon::pkg::refresh::apply_settings(&self.config, &mut meta, &dir)?;
             driver::for_runtime(&meta.runtime, &self.config.docker).start(&meta, &dir)?;
@@ -509,7 +509,7 @@ impl AppManager {
     }
 
     /// Refuse to start an app whose `required` setup questions have no
-    /// answer yet (DMN-138) — a game server with no admin password is worse
+    /// answer yet — a game server with no admin password is worse
     /// than one that does not start. Best effort about everything else: a
     /// manifest or settings file that cannot be read is not this check's
     /// business, the start itself reports those.
@@ -549,7 +549,7 @@ impl AppManager {
         Ok(outcome)
     }
 
-    /// Force-stop (DMN-134): like [`Self::stop`], but SIGKILL right away.
+    /// Force-stop: like [`Self::stop`], but SIGKILL right away.
     /// Runs alongside a graceful stop that is stuck waiting on the app —
     /// there is no per-app lock, so the kill is what makes that stop return.
     pub fn kill(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
@@ -571,8 +571,8 @@ impl AppManager {
     pub fn restart(&self, ctx: &UserContext, id: &str) -> Result<()> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
-        // Docker restart runs as stop + start so changed settings (DMN-017/
-        // 030) apply through the recreate in `apply_settings` — restart is
+        // Docker restart runs as stop + start so changed settings
+        // apply through the recreate in `apply_settings` — restart is
         // the documented way to pick up new setting values.
         self.ensure_setup_complete(&meta, &dir)?;
         let mut refreshed = false;
@@ -608,7 +608,7 @@ impl AppManager {
         let dir = self.store.app_dir(&meta.id)?;
         driver::for_runtime(&meta.runtime, &self.config.docker).remove(&meta, &dir)?;
         // A new app installed under the same id must not inherit the old
-        // size from the stats cache (DMN-136).
+        // size from the stats cache.
         disk::forget_dir_size(&dir);
         self.store.remove(&meta.id)
     }

@@ -1,4 +1,4 @@
-//! Instance cloning (DMN-019): `asc app clone <id>` — a full copy of an
+//! Instance cloning: `asc app clone <id>` — a full copy of an
 //! installed app (repository, config, data) under a new id, then a runtime
 //! freshly provisioned from the copy. Docker containers, systemd units and
 //! processes cannot be copied, only recreated from the copied manifest and
@@ -45,7 +45,7 @@ fn copy_tree(
         } else if file_type.is_dir() {
             copy_tree(&from, &to, copied, on_copied, cancelled)?;
         } else {
-            // DMN-137: checked per file — copying a large data folder is
+            // checked per file — copying a large data folder is
             // exactly the kind of work a cancelled task must not finish.
             if cancelled() {
                 return Err(anyhow::Error::new(crate::daemon::progress::Cancelled));
@@ -61,7 +61,7 @@ fn copy_tree(
 
 /// Clone `source` (already authorized — the caller resolves the reference
 /// and checks ownership, e.g. via `AppManager::get_authorized`) into a new
-/// instance: the next free `<id>-N` (DMN-033 numbering, the source's own id
+/// instance: the next free `<id>-N` (the install numbering, the source's own id
 /// as the base). `on_progress(copied, total)` reports the directory copy;
 /// `total` is `0` when the source app directory could not be measured up
 /// front (the copy still proceeds, just without a percentage). The clone
@@ -85,7 +85,7 @@ pub fn clone_app(
     )
 }
 
-/// [`clone_app`] that stops once `cancelled` says so (DMN-137): between
+/// [`clone_app`] that stops once `cancelled` says so: between
 /// copied files, and once more before the runtime is provisioned. The
 /// half-made copy is removed like after any other failure.
 pub fn clone_app_cancellable(
@@ -100,7 +100,7 @@ pub fn clone_app_cancellable(
     if let Some(name) = custom_name {
         validate_custom_name(config, ctx, name)?;
     }
-    // Same reasoning as the upgrade guard (DMN-108): a compose app has no
+    // Same reasoning as the upgrade guard: a compose app has no
     // manifest to re-provision the clone from, and cloning a whole compose
     // project (a fresh project name, its own containers) is separate work.
     if matches!(source.runtime, Runtime::Compose { .. }) {
@@ -166,11 +166,11 @@ pub fn clone_app_cancellable(
     enforce_install_policy(config, ctx, &manifest, &new_id)?;
     // Recomputed from the copied .asc/settings.json rather than trusting
     // `source.quota`: a `$quota` override edited via `asc app settings`
-    // only lands in meta.json on the app's next start (DMN-017/030), so
+    // only lands in meta.json on the app's next start, so
     // meta and settings.json can disagree until then — settings.json (just
     // copied verbatim) is the authoritative one.
     // Capped to the host like at install — the Engine rejects NanoCpus
-    // above nproc (DMN-099).
+    // above nproc.
     let quota = super::resources::clamp_cpu(
         load_quota(settings.as_ref(), &layout::settings_dir(&dest_dir))?,
         super::resources::host_cores(),
@@ -179,10 +179,10 @@ pub fn clone_app_cancellable(
     );
 
     // A clone is a distinct instance, so it gets its own identity rather than
-    // inheriting the source's (DMN-044) — minted before provisioning so an
+    // inheriting the source's — minted before provisioning so an
     // app-bound credential covers its first image pull.
     let uuid = new_uuid()?;
-    // Reuse the source's image-source choice (DMN-050) so a clone of a
+    // Reuse the source's image-source choice so a clone of a
     // both-image app builds/pulls the same way instead of re-prompting.
     let image_source = match &source.runtime {
         Runtime::Docker { image_source, .. } => *image_source,
@@ -206,8 +206,8 @@ pub fn clone_app_cancellable(
         uuid: Some(uuid),
         name: manifest.title.clone().unwrap_or_else(|| new_id.clone()),
         // A clone's id is always suffixed (the source already occupies the
-        // unsuffixed one) — same convention as a repeat `asc install`
-        // (DMN-033): the id doubles as the display name unless --name wins.
+        // unsuffixed one) — same convention as a repeat `asc install`:
+        // the id doubles as the display name unless --name wins.
         custom_name: Some(
             custom_name
                 .map(str::to_string)
@@ -221,7 +221,7 @@ pub fn clone_app_cancellable(
         source: source.source.clone(),
         branch: source.branch.clone(),
         // A clone of a direct git install must re-clone at the same
-        // subdirectory as the source, if it had one (DMN-096).
+        // subdirectory as the source, if it had one.
         repo_path: source.repo_path.clone(),
         // Recorded like a suffixed install instance, so `asc app upgrade`
         // keeps resolving the clone against the same registry package.

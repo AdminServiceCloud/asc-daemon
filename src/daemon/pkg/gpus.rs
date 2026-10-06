@@ -1,4 +1,4 @@
-//! GPU passthrough for Docker apps (DMN-143).
+//! GPU passthrough for Docker apps.
 //!
 //! The user picks cards by PCI address in the app's `$gpus` setting. This
 //! module turns those addresses into what the Engine needs, using the live

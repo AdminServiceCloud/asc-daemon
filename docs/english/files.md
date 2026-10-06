@@ -4,7 +4,7 @@
 
 ## 📌 Description
 
-`FileService` is part of the daemon API (see [📡 api](api.md)) and gives a view into and control over the node's filesystem: list a directory, stat a path, create a directory, move/rename, copy, delete, archive, and stream a file up or down. By default the scope is the whole node from `/` — it is a separate service from `AppService` and does not replace the [📁 SFTP server](sftp.md), which gives an operator their own SFTP client chrooted to a single application's directory. Every method optionally takes an `app_id` (DMN-086) that confines it instead to one app's directory and private volumes — see "App scope" below. `FileService` is the API behind the platform's node-wide file manager (the "Files" tab on a node's page) and, app-scoped, the per-app file manager.
+`FileService` is part of the daemon API (see [📡 api](api.md)) and gives a view into and control over the node's filesystem: list a directory, stat a path, create a directory, move/rename, copy, delete, archive, and stream a file up or down. By default the scope is the whole node from `/` — it is a separate service from `AppService` and does not replace the [📁 SFTP server](sftp.md), which gives an operator their own SFTP client chrooted to a single application's directory. Every method optionally takes an `app_id` that confines it instead to one app's directory and private volumes — see "App scope" below. `FileService` is the API behind the platform's node-wide file manager (the "Files" tab on a node's page) and, app-scoped, the per-app file manager.
 
 ## 🎯 Scenarios
 
@@ -33,7 +33,7 @@ A path must be absolute, contain no `..`, no NUL bytes, stay within sane length 
 
 **Protected paths** (`/`, `/boot`, `/etc`, `/usr`, `/var`, `/asc`) refuse as the exact target of a destructive operation — a guard rail against a mis-click, not a security boundary: root on the machine can still do the same thing by hand.
 
-### App scope (DMN-086)
+### App scope
 
 Every method above also accepts an optional `app_id`. When set, the call is **app-scoped** instead of node-wide: the caller only needs to own the app (`AppManager::get_authorized` — the same ownership check as every other per-app method, root included) rather than hold a root context, and every path the call touches is confined to that app's own directory (`<apps_dir>/<id>`) plus its private, non-shared volumes (`AppScope`, built from the same volume classification `GetAppDisk` uses — a Docker named volume is excluded, since it may be mounted into other apps too).
 
@@ -41,7 +41,7 @@ Confinement is enforced **daemon-side**, unconditionally — not delegated to th
 
 `GetAppDisk`'s response carries the resolved `app_dir` for this purpose — the platform cannot compute `<apps_dir>/<id>` itself, since the daemon's storage root is never published on its own.
 
-See [📁 app-file-manager](../../../asc-platform/docs/features/app-file-manager.md) for the platform-side feature this unblocks.
+See 📁 app-file-manager for the platform-side feature this unblocks.
 
 ### Streaming
 
@@ -49,7 +49,7 @@ See [📁 app-file-manager](../../../asc-platform/docs/features/app-file-manager
 
 An upload is written to a temporary file next to the target (`.asc-upload-<random>.part`, mode `0600`), fsynced, then renamed into place — the same atomic-write discipline used for the stored token. An interrupted upload never leaves a truncated file where a good one used to be — the temporary `.part` file simply stays behind and is cleaned up on the next attempt or a sweep. Without `overwrite`, a name collision is checked **before** the first byte is accepted.
 
-### 🔗 Links (DMN-146)
+### 🔗 Links
 
 `CreateLink` makes a symbolic (`symlink(2)`) or hard (`link(2)`) link at `path` pointing at `target`. The target is absolute or relative to the link's directory — the way `ln` takes it. A symbolic link stores it verbatim (a relative link survives the tree being moved) and may dangle; a hard link needs an existing non-directory on the same filesystem. An existing path is never replaced. App-scoped, the target is confined too, resolved lexically against the link's directory: a link leading out of the app cannot even be created.
 
@@ -86,14 +86,6 @@ Directory listing is capped at **10,000 entries**; past the cap, the response ca
 
 `app_id` (query param on REST, field on every gRPC request above) is optional everywhere: unset means the node-wide behavior described earlier in this document; set means app-scoped (see above).
 
-## 🔗 Related tasks
+## 🔗 Related
 
-- DMN-070 — `FileService` implementation in the daemon.
-- DMN-146 — `CreateLink`: symbolic and hard links.
-- DMN-086 — app-scoped `FileService` (`app_id`/`AppScope`), the `app_dir` field on `GetAppDisk`.
-- NODE-012 / BE-011 — nodeservice file RPCs and the platform REST facade that consume this API.
-- FE-008 — the "Files" tab on the node page.
-- BE-022 — the platform-side app file manager this unblocks.
 - [📁 sftp](sftp.md) — a neighboring but separate feature: an operator's own SFTP client, chrooted per application.
-- [📁 file-manager](../../../asc-platform/docs/features/file-manager.md) — the platform-side overview of the node-wide feature.
-- [📁 app-file-manager](../../../asc-platform/docs/features/app-file-manager.md) — the platform-side overview of the app-scoped feature.

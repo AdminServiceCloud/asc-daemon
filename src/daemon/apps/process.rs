@@ -3,7 +3,7 @@
 //! Layout inside the app directory: `app.pid` (PID of the spawned process),
 //! `app.log` (combined stdout+stderr, appended across runs),
 //! `app.log.run-offset` (where the latest run starts in `app.log`, for the
-//! console — DMN-116). The process is detached into its own
+//! console). The process is detached into its own
 //! process group so it survives the CLI/daemon exiting.
 //!
 //! Known MVP limitation: a PID can be reused by the OS after a reboot, so a
@@ -24,8 +24,8 @@ use super::meta::{AppMeta, Runtime};
 
 const PID_FILE: &str = "app.pid";
 pub const LOG_FILE: &str = "app.log";
-/// Byte offset in [`LOG_FILE`] where the latest run's output begins
-/// (DMN-116), written on every start.
+/// Byte offset in [`LOG_FILE`] where the latest run's output begins,
+/// written on every start.
 pub const RUN_OFFSET_FILE: &str = "app.log.run-offset";
 /// How long to wait for graceful termination before SIGKILL.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -147,7 +147,7 @@ impl AppDriver for ProcessDriver {
             .open(dir.join(LOG_FILE))
             .context("cannot open app log file")?;
         // Every run appends to the same file; the console follows from this
-        // offset so it shows the current run only (DMN-116). A marker that
+        // offset so it shows the current run only. A marker that
         // cannot be written must not survive either — a stale one would
         // point into the previous run.
         let run_offset = log.metadata().map(|m| m.len()).unwrap_or(0);
@@ -228,7 +228,7 @@ impl AppDriver for ProcessDriver {
 
     fn logs(&self, meta: &AppMeta, dir: &Path, tail: usize, _timestamps: bool) -> Result<String> {
         // No timestamp source of our own — the file holds exactly what the
-        // app wrote to it (DMN-088).
+        // app wrote to it.
         let _ = command_of(meta)?;
         match fs::read_to_string(dir.join(LOG_FILE)) {
             Ok(text) => Ok(tail_lines(&text, tail)),

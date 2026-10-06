@@ -1,4 +1,4 @@
-//! The firewall's data model (DMN-148): settings, rules and IP sets, and the
+//! The firewall's data model: settings, rules and IP sets, and the
 //! validation that keeps anything an operator types out of the nft text
 //! unless it is a port, an address or a plain comment.
 

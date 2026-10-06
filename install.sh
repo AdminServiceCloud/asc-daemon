@@ -59,7 +59,7 @@ esac
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 
 # ── OS check: Debian/Ubuntu are supported, other distributions best-effort ──
-[ "$(uname -s)" = "Linux" ] || fail "only Linux is supported for now (macOS is on the roadmap)"
+[ "$(uname -s)" = "Linux" ] || fail "only Linux is supported for now (macOS is planned)"
 if [ -r /etc/os-release ]; then
     . /etc/os-release
     case "${ID:-}:${ID_LIKE:-}" in
@@ -74,7 +74,7 @@ export HOME="${HOME:-/root}"
 
 # A freshly created cloud VM is still busy with its first boot: cloud-init
 # itself or unattended-upgrades holds the dpkg/apt lock for the first minutes,
-# and the Docker installer would fail on it (DMN-141). Wait for the lock
+# and the Docker installer would fail on it. Wait for the lock
 # instead of failing the whole install.
 wait_for_package_manager() {
     command -v apt-get >/dev/null 2>&1 || return 0

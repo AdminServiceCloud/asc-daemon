@@ -2,7 +2,7 @@
 
 ## 📌 Описание
 
-API-сервер демона: один и тот же axum-роутер — gRPC (tonic; совместим с ConnectRPC-клиентами платформы) и REST (JSON поверх HTTP) — обслуживается на **двух листенерах**: TCP-порт для платформы (bearer-токен) и локальный unix-сокет для CLI (аутентификация по peer credentials, DMN-042). Все транспорты вызывают один сервисный слой; каждый вызов несёт **контекст пользователя**, который ограничивает видимость приложений (пользователь видит свои, root — все). Контракты — protobuf-файлы в [proto/](../../proto/asc/daemon/v1/daemon.proto), они же источник правды для клиентов платформы (buf-зависимость).
+API-сервер демона: один и тот же axum-роутер — gRPC (tonic; совместим с ConnectRPC-клиентами платформы) и REST (JSON поверх HTTP) — обслуживается на **двух листенерах**: TCP-порт для платформы (bearer-токен) и локальный unix-сокет для CLI (аутентификация по peer credentials). Все транспорты вызывают один сервисный слой; каждый вызов несёт **контекст пользователя**, который ограничивает видимость приложений (пользователь видит свои, root — все). Контракты — protobuf-файлы в [proto/](../../proto/asc/daemon/v1/daemon.proto), они же источник правды для клиентов платформы (buf-зависимость).
 
 ## 🎯 Сценарии использования
 
@@ -15,16 +15,16 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 ### Сервер
 
-- TCP-листенер на `127.0.0.1:8420` (настройка `[api] listen` в config.toml). Наружу порт не открывается — удалённый доступ идёт через туннель платформы (DMN-005 → tunnel).
+- TCP-листенер на `127.0.0.1:8420` (настройка `[api] listen` в config.toml). Наружу порт не открывается — удалённый доступ идёт через туннель платформы.
 - Unix-сокет `/run/asc/asc.sock` (настройка `[api] socket`; каталог создаёт systemd-юнит через `RuntimeDirectory=asc`). Best-effort: если сокет не удаётся открыть, демон продолжает работать с одним TCP API и пишет предупреждение в лог.
 - Один роутер: axum REST + tonic-маршруты gRPC (h2c), диспетчеризация по пути/Content-Type.
 - Все блокирующие операции (docker/systemctl/git) уходят в `spawn_blocking` — event loop не блокируется.
 
 ### 🔐 Аутентификация и контекст пользователя
 
-Каждый аутентифицированный запрос получает `UserContext` (uid, имя пользователя, признак root), который проставляет middleware транспорта; сервисный слой применяет из него правило владения приложениями — то же, что в in-process-режиме CLI (DMN-002).
+Каждый аутентифицированный запрос получает `UserContext` (uid, имя пользователя, признак root), который проставляет middleware транспорта; сервисный слой применяет из него правило владения приложениями — то же, что в in-process-режиме CLI.
 
-**TCP (платформа): bearer-токен.** Их два вида (DMN-065) — полная модель в [🔐 security-tokens](security-tokens.md).
+**TCP (платформа): bearer-токен.** Их два вида — полная модель в [🔐 security-tokens](security-tokens.md).
 
 - **Основной** токен демон генерирует при первом старте (32 байта из CSPRNG) и хранит в `api.token` рядом с config.toml (root-only, 0600). Именно его платформа сохраняет при добавлении ноды, и по сути он refresh-токен: выпускает временные токены и заменяется при ротации.
 - **Временный** токен выпускается по основному, живёт 10 минут по умолчанию и только в памяти демона. Права по всем сервисам здесь у него те же; единственное, чего он не может, — управлять токенами (`/v1/token/*` отвечает `403` с полем `token_denied`, gRPC — `PERMISSION_DENIED`).
@@ -32,15 +32,15 @@ API-сервер демона: один и тот же axum-роутер — gRP
 - Без распознанного токена: REST → `401 {"error": ...}`, gRPC → `UNAUTHENTICATED`.
 - Токен-вызовы действуют с **полной видимостью** (права пользователей платформа проверяет сама); пер-пользовательские API-токены — задача после MVP.
 
-**Unix-сокет (CLI): SO_PEERCRED.** (DMN-042)
+**Unix-сокет (CLI): SO_PEERCRED.**
 
 - Без токена. Демон запрашивает у ядра uid подключившегося процесса (`SO_PEERCRED`) и строит контекст из него — ничто внутри запроса не может повысить привилегии.
 - Файл сокета нарочно доступен всем (0666): доступ к сокету сам по себе ничего не даёт, авторизация — peer uid, на каждый запрос. Обычный пользователь видит и управляет **только своими** приложениями; root-пир — всеми.
 - Атрибуция `sudo asc ...`: CLI передаёт `SUDO_UID`/`SUDO_USER` заголовками `X-Asc-Sudo-Uid`/`X-Asc-Sudo-User`; демон учитывает их **только если сам пир — root**, зеркаля in-process-поведение: новые приложения приписываются вызвавшему пользователю, sudo сохраняет полную видимость.
-- Маршрутизация CLI: команды жизненного цикла (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`), `app attach` и `app settings` (DMN-043), а также отчётные команды и обновление (`disk`/`ports`/`stats`/`stacks`/`upgrade`, DMN-053) идут через сокет, когда он существует. Нет файла сокета — CLI работает in-process, как раньше (DMN-041: root по системным путям, пользователь в своём дереве `~/.asc`). Сокет есть, но не отвечает — ошибка для обычного пользователя и in-process-fallback с предупреждением для root (восстановление не должно зависеть от здоровья демона).
-- Известные ограничения (DMN-043): docker-контейнеры по-прежнему выполняются с привилегиями демона (root) — злонамеренный манифест может запросить опасные маунты, поэтому политика контейнеров для не-root владельцев — следующая задача; установка приватных репозиториев через демон использует git-креды демона, а не вызывающего.
+- Маршрутизация CLI: команды жизненного цикла (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`), `app attach` и `app settings`, а также отчётные команды и обновление (`disk`/`ports`/`stats`/`stacks`/`upgrade`) идут через сокет, когда он существует. Нет файла сокета — CLI работает in-process, как раньше (root по системным путям, пользователь в своём дереве `~/.asc`). Сокет есть, но не отвечает — ошибка для обычного пользователя и in-process-fallback с предупреждением для root (восстановление не должно зависеть от здоровья демона).
+- Известные ограничения: docker-контейнеры по-прежнему выполняются с привилегиями демона (root) — злонамеренный манифест может запросить опасные маунты, поэтому политика контейнеров для не-root владельцев — следующая задача; установка приватных репозиториев через демон использует git-креды демона, а не вызывающего.
 
-### 🧭 Обнаружение возможностей (DMN-076)
+### 🧭 Обнаружение возможностей
 
 `GetStatus` несёт список `capabilities` (пустой массив у демона, выпущенного до появления
 этого поля, — валидное и отличимое состояние, а не пробел в парсинге): строки вроде
@@ -56,69 +56,69 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 - `AppService.IssueConsoleToken(app_id, session)` / `POST /v1/apps/{id}/console-token {"session": "logs"|"attach"}`.
 - Токен одноразовый, TTL 30 секунд, привязан к приложению и типу сессии; хранится в памяти демона.
-- WebSocket-консоль (DMN-007) принимает подключение только по такому токену.
+- WebSocket-консоль принимает подключение только по такому токену.
 
 ### 🗺️ Маршруты REST ↔ методы gRPC
 
 | REST | gRPC | Описание |
 |---|---|---|
-| `GET /v1/status` | `DaemonService.GetStatus` | Версия, счётчики приложений, список возможностей (DMN-076) |
+| `GET /v1/status` | `DaemonService.GetStatus` | Версия, счётчики приложений, список возможностей |
 | `GET /v1/apps` | `AppService.ListApps` | Список приложений (в объёме контекста вызывающего) |
-| `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Установка из реестра или напрямую из git-URL (DMN-040); без `license_ack` репозиторий с LICENSE отвечает `409` + `license_required`, неоднозначный пакет — `409` + `ambiguous` (список кандидатов) — из них CLI строит диалог согласия / выбор источника |
+| `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Установка из реестра или напрямую из git-URL; без `license_ack` репозиторий с LICENSE отвечает `409` + `license_required`, неоднозначный пакет — `409` + `ambiguous` (список кандидатов) — из них CLI строит диалог согласия / выбор источника |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | Одно приложение |
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Дисковое пространство: образ, репозиторий, данные, кастомные тома |
-| `GET /v1/apps/{id}/image` | `AppService.GetAppImage` (DMN-120) | Ссылка на образ, версия, локальный и удалённый дайджест (`?checkRemote=true`) и свежесть образа Docker-приложения; `{}` для других типов |
-| `POST /v1/apps/{id}/repull` | `AppService.RepullApp` (DMN-120) | Заново скачать образ `latest` и перезапустить запущенное приложение, если он изменился; 409 для закреплённого тега, дайджеста или локальной сборки |
-| `GET /v1/apps/{id}/ports` | — (пока только REST) | Порты, которые публикует приложение (DMN-049), из его настроек — остановленное приложение показывает, что займёт при следующем старте |
-| `POST /v1/apps/{id}/upgrade {"version"?, "branch"?, "tag"?}` | — (пока только REST) | Обновление приложения (DMN-003); `branch` переключает его на ветку и оставляет следить за ней, `tag` закрепляет и снимает слежение за веткой (DMN-140); без `version` — до самого свежего тега репозитория или до ветки, которую отслеживает приложение, установленное по ссылке (DMN-053). Приложение должно быть остановлено. Ответ — `{"id", "up_to_date", "from", "to"}` |
-| `POST /v1/apps/{id}/clone {"name"?}` | `AppService.CloneApp`/`CloneAppStream` (DMN-113) | Полная копия приложения под новым `<id>-N`, всегда остановленная; потоковый вариант отдаёт копирование каталога строками прогресса. REST отдаёт только нестриминговую форму — диалог клонирования на платформе использует gRPC-поток, тот же приём, что у install/upgrade. Ответ — `{"id", "name", "copied_bytes"}` |
-| `GET /v1/disk` | — (пока только REST) | Сколько занимает каждое видимое приложение, по убыванию, и ёмкость файловой системы, где лежит хранилище приложений (DMN-053) |
+| `GET /v1/apps/{id}/image` | `AppService.GetAppImage` | Ссылка на образ, версия, локальный и удалённый дайджест (`?checkRemote=true`) и свежесть образа Docker-приложения; `{}` для других типов |
+| `POST /v1/apps/{id}/repull` | `AppService.RepullApp` | Заново скачать образ `latest` и перезапустить запущенное приложение, если он изменился; 409 для закреплённого тега, дайджеста или локальной сборки |
+| `GET /v1/apps/{id}/ports` | — (пока только REST) | Порты, которые публикует приложение, из его настроек — остановленное приложение показывает, что займёт при следующем старте |
+| `POST /v1/apps/{id}/upgrade {"version"?, "branch"?, "tag"?}` | — (пока только REST) | Обновление приложения; `branch` переключает его на ветку и оставляет следить за ней, `tag` закрепляет и снимает слежение за веткой; без `version` — до самого свежего тега репозитория или до ветки, которую отслеживает приложение, установленное по ссылке. Приложение должно быть остановлено. Ответ — `{"id", "up_to_date", "from", "to"}` |
+| `POST /v1/apps/{id}/clone {"name"?}` | `AppService.CloneApp`/`CloneAppStream` | Полная копия приложения под новым `<id>-N`, всегда остановленная; потоковый вариант отдаёт копирование каталога строками прогресса. REST отдаёт только нестриминговую форму — диалог клонирования на платформе использует gRPC-поток, тот же приём, что у install/upgrade. Ответ — `{"id", "name", "copied_bytes"}` |
+| `GET /v1/disk` | — (пока только REST) | Сколько занимает каждое видимое приложение, по убыванию, и ёмкость файловой системы, где лежит хранилище приложений |
 | `GET /v1/ports` | — (пока только REST) | Все видимые приложения и порты, которые они публикуют |
-| `GET /v1/stats?ids=a,b` | `AppService.GetAppStats` (DMN-080) | Потребление ресурсов по приложениям (CPU %, память, диск, сеть); `ids` фильтрует список **до** сэмплирования, а не после; пусто — все видимые приложения. Каждый вызов стоит ~500 мс интервала сэмплирования |
-| — (только gRPC) | `AppService.StreamAppStats` (DMN-081) | Те же сэмплы push-стримом; `min_interval_secs` — минимальный интервал между кадрами (сервер поднимает до ≥1с) |
+| `GET /v1/stats?ids=a,b` | `AppService.GetAppStats` | Потребление ресурсов по приложениям (CPU %, память, диск, сеть); `ids` фильтрует список **до** сэмплирования, а не после; пусто — все видимые приложения. Каждый вызов стоит ~500 мс интервала сэмплирования |
+| — (только gRPC) | `AppService.StreamAppStats` | Те же сэмплы push-стримом; `min_interval_secs` — минимальный интервал между кадрами (сервер поднимает до ≥1с) |
 | `POST /v1/apps/{id}/start\|stop\|restart` | `AppService.Start/Stop/RestartApp` | Жизненный цикл |
-| `GET /v1/apps/{id}/logs?tail=N&timestamps=bool` | `AppService.GetAppLogs` | Хвост логов, опционально с ISO-меткой на каждой строке (DMN-088) |
+| `GET /v1/apps/{id}/logs?tail=N&timestamps=bool` | `AppService.GetAppLogs` | Хвост логов, опционально с ISO-меткой на каждой строке |
 | `GET /v1/apps/{id}/settings` | — (пока только REST) | Схема настроек приложения (`asc.settings.yaml`, `null` если пакет их не объявляет) и выбранные значения с подмешанными значениями по умолчанию |
 | `PUT /v1/apps/{id}/settings {"values": {...}}` | — (пока только REST) | Заменить выбранные значения; ключи, которых нет в схеме самого приложения, отклоняются. gRPC-аналог ждёт моделирования схемы настроек в proto-контрактах |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Удаление с данными |
 | `POST /v1/apps/{id}/console-token` | `AppService.IssueConsoleToken` | Временный токен консоли |
-| `GET /v1/docker/containers?all=&size=` | `DockerService.ListContainers` (DMN-102) | Все контейнеры хоста — и ASC-овские, и чужие, — с определённым приложением-владельцем там, где оно есть. `size=1` заставляет Engine обойти writable-слой каждого контейнера, поэтому по умолчанию выключено. **Только root-контекст** |
-| `GET /v1/docker/stats?ids=a,b` | `DockerService.ListContainerStats` (DMN-112) | Живые CPU/память/сеть/диск контейнеров; `ids` фильтрует **до** окна сэмплирования, пусто — все запущенные. Стоит одного окна ~500 мс на весь набор. **Только root-контекст** |
-| `GET /v1/docker/images` | `DockerService.ListImages` (DMN-104) | Все образы хоста — и ASC-овские, и чужие, — с `ascProtected`/`protectedReason`, когда образ всё ещё запускает установленное приложение. **Только root-контекст** |
-| `GET /v1/docker/volumes` | `DockerService.ListVolumes` (DMN-104) | Все именованные тома, с `ascProtected`/`protectedReason`, когда том объявлен настройками установленного приложения. **Только root-контекст** |
-| `GET /v1/docker/networks` | `DockerService.ListNetworks` (DMN-104) | Все сети, только инвентарь — почему нет маршрута удаления, см. `PruneDocker` ниже. **Только root-контекст** |
-| `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` (DMN-104) | Четыре категории `docker system df` (образы/контейнеры/тома/build cache): счётчики и байты. Дорогой вызов — только по требованию, никогда по таймеру. **Только root-контекст** |
-| `POST /v1/docker/prune` | `DockerService.PruneDocker` (DMN-105) | Тело `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Удаляет неиспользуемое поштучно; то, что всё ещё нужно установленному приложению, возвращается в `skipped` с причиной, `dryRun` считает тот же план без удаления. **Только root-контекст** |
-| `POST /v1/docker/control` | `DockerService.ControlContainer` (DMN-111) | Тело `{container \| composeProject, action: "start"\|"stop"\|"restart"\|"pause"\|"unpause"\|"remove"}`. Жизненный цикл одного контейнера (id, однозначный префикс id или имя) или всех контейнеров compose-проекта; у стека неприменимые к члену действия пропускаются, старт идёт от старых к новым, стоп — от новых к старым. Контейнер установленного ASC-приложения (или его compose-проекта) получает отказ 409 `owned_by_app` / `FAILED_PRECONDITION` — им управляют через приложение. Capability `docker.control`. **Только root-контекст** |
-| `GET /v1/backups?app_id=&storage=` | `BackupService.ListBackups` (DMN-115) | Архивы одного или всех видимых приложений на одном или всех хранилищах: имя, хранилище, размер, время создания; недоступное хранилище — в `errors`. Capability `backups` |
+| `GET /v1/docker/containers?all=&size=` | `DockerService.ListContainers` | Все контейнеры хоста — и ASC-овские, и чужие, — с определённым приложением-владельцем там, где оно есть. `size=1` заставляет Engine обойти writable-слой каждого контейнера, поэтому по умолчанию выключено. **Только root-контекст** |
+| `GET /v1/docker/stats?ids=a,b` | `DockerService.ListContainerStats` | Живые CPU/память/сеть/диск контейнеров; `ids` фильтрует **до** окна сэмплирования, пусто — все запущенные. Стоит одного окна ~500 мс на весь набор. **Только root-контекст** |
+| `GET /v1/docker/images` | `DockerService.ListImages` | Все образы хоста — и ASC-овские, и чужие, — с `ascProtected`/`protectedReason`, когда образ всё ещё запускает установленное приложение. **Только root-контекст** |
+| `GET /v1/docker/volumes` | `DockerService.ListVolumes` | Все именованные тома, с `ascProtected`/`protectedReason`, когда том объявлен настройками установленного приложения. **Только root-контекст** |
+| `GET /v1/docker/networks` | `DockerService.ListNetworks` | Все сети, только инвентарь — почему нет маршрута удаления, см. `PruneDocker` ниже. **Только root-контекст** |
+| `GET /v1/docker/disk-usage` | `DockerService.GetDockerDiskUsage` | Четыре категории `docker system df` (образы/контейнеры/тома/build cache): счётчики и байты. Дорогой вызов — только по требованию, никогда по таймеру. **Только root-контекст** |
+| `POST /v1/docker/prune` | `DockerService.PruneDocker` | Тело `{target: "images"\|"volumes"\|"build_cache", dryRun, danglingOnly}`. Удаляет неиспользуемое поштучно; то, что всё ещё нужно установленному приложению, возвращается в `skipped` с причиной, `dryRun` считает тот же план без удаления. **Только root-контекст** |
+| `POST /v1/docker/control` | `DockerService.ControlContainer` | Тело `{container \| composeProject, action: "start"\|"stop"\|"restart"\|"pause"\|"unpause"\|"remove"}`. Жизненный цикл одного контейнера (id, однозначный префикс id или имя) или всех контейнеров compose-проекта; у стека неприменимые к члену действия пропускаются, старт идёт от старых к новым, стоп — от новых к старым. Контейнер установленного ASC-приложения (или его compose-проекта) получает отказ 409 `owned_by_app` / `FAILED_PRECONDITION` — им управляют через приложение. Capability `docker.control`. **Только root-контекст** |
+| `GET /v1/backups?app_id=&storage=` | `BackupService.ListBackups` | Архивы одного или всех видимых приложений на одном или всех хранилищах: имя, хранилище, размер, время создания; недоступное хранилище — в `errors`. Capability `backups` |
 | `GET /v1/backups/storages` | `BackupService.ListBackupStorages` | Хранилища (`local` первым) без реквизитов |
 | `PUT /v1/backups/storages/{name}` | `BackupService.UpsertBackupStorage` | Тело `{managed_by?, s3: {endpoint, region, bucket, access_key, secret_key, prefix}}` или `{local: {dir}}`; запись с другим `managed_by` не заменяется |
 | `DELETE /v1/backups/storages/{name}?managed_by=` | `BackupService.RemoveBackupStorage` | Удалить хранилище (только с этой меткой, если она передана) |
 | `POST /v1/apps/{id}/backups` | `BackupService.CreateBackup` | Тело `{storages?, keep?}` — один архив во все хранилища, результат по каждому. Долгий вызов |
 | `POST /v1/apps/{id}/backups/restore` | `BackupService.RestoreBackup` | Тело `{storage, name, stop_app}` — `stop_app` останавливает запущенное приложение, восстанавливает и запускает снова |
 | `DELETE /v1/apps/{id}/backups/{storage}/{name}` | `BackupService.DeleteBackup` | Удалить один архив |
-| `GET /v1/schedules?managed_by=` | `ScheduleService.ListSchedules` (DMN-114) | Задачи планировщика с `next_run_unix` и последним запуском. Capability `schedules` |
+| `GET /v1/schedules?managed_by=` | `ScheduleService.ListSchedules` | Задачи планировщика с `next_run_unix` и последним запуском. Capability `schedules` |
 | `PUT /v1/schedules/{id}` | `ScheduleService.UpsertSchedule` | Тело — задача (`trigger`, `utc`, `enabled`, `comment`, `action: {type, …}`) |
 | `DELETE /v1/schedules/{id}` | `ScheduleService.RemoveSchedule` | Удалить задачу и её журнал |
 | `PUT /v1/schedules/managed/{managed_by}` | `ScheduleService.ReplaceManagedSchedules` | Тело `{schedules}` — полная замена задач этого владельца; задачи оператора не трогаются |
 | `POST /v1/schedules/{id}/run` | `ScheduleService.RunSchedule` | Запустить задачу сейчас; ответ `{started, run}` без ожидания |
 | `GET /v1/schedules/{id}/runs?limit=` | `ScheduleService.ListScheduleRuns` | Запуски задачи, новые первыми (хранится до 50) |
-| `GET /v1/webserver` | `WebServerService.GetWebServer` (DMN-122) | Состояние веб-сервера: режим, версия nginx, работает ли, настройки, последняя ошибка применения. Только root; capability `webserver` |
+| `GET /v1/webserver` | `WebServerService.GetWebServer` | Состояние веб-сервера: режим, версия nginx, работает ли, настройки, последняя ошибка применения. Только root; capability `webserver` |
 | `POST /v1/webserver/install` | `WebServerService.InstallWebServerStream` | Тело `{mode: "system"\|"docker"}` — установить или подхватить nginx; ответ `{log, webserver}` |
 | `DELETE /v1/webserver?purge=` | `WebServerService.UninstallWebServer` | Удалить веб-сервер; `purge` — вместе с конфигами, сайтами и сертификатами |
 | `PUT /v1/webserver/settings` | `WebServerService.UpdateWebServerSettings` | Глобальные настройки nginx; сохраняются, только если их принимает `nginx -t` |
 | `POST /v1/webserver/test` / `POST /v1/webserver/reload` | `TestWebServerConfig` / `ReloadWebServer` | `{ok, output}` от `nginx -t` / полное применение и reload |
 | `GET /v1/webserver/files` | `WebServerService.GetWebServerFiles` | Сгенерированные файлы конфигурации |
-| `GET /v1/webserver/sites` | `WebServerService.ListSites` (DMN-123) | Сайты со статусом (`applied`/`error`/…) и состоянием TLS; ключи не возвращаются |
+| `GET /v1/webserver/sites` | `WebServerService.ListSites` | Сайты со статусом (`applied`/`error`/…) и состоянием TLS; ключи не возвращаются |
 | `PUT /v1/webserver/sites/{id}` / `DELETE …` | `UpsertSite` / `RemoveSite` | Добавить/заменить или удалить сайт; сайты платформы идут через `ReplaceSites(managed_by)` |
-| `POST /v1/webserver/sites/{id}/renew` | `WebServerService.RenewCertificate` (DMN-124) | Выпустить сертификат Let's Encrypt сейчас, игнорируя backoff |
+| `POST /v1/webserver/sites/{id}/renew` | `WebServerService.RenewCertificate` | Выпустить сертификат Let's Encrypt сейчас, игнорируя backoff |
 | `GET /v1/metrics` | `MonitorService.GetSystemMetrics` | Текущие системные метрики (503, пока нет первого сэмпла) |
 | `GET /v1/metrics/history?limit=N` | `MonitorService.GetMetricsHistory` | История метрик из кольцевого буфера, старые → новые |
-| `GET /v1/monitor/settings` | `MonitorService.GetMonitorSettings` | Частота сэмплера (DMN-135): `interval_ms` — пока кто-то смотрит поток, `idle_interval_ms` — в простое |
+| `GET /v1/monitor/settings` | `MonitorService.GetMonitorSettings` | Частота сэмплера: `interval_ms` — пока кто-то смотрит поток, `idle_interval_ms` — в простое |
 | `PUT /v1/monitor/settings` | `MonitorService.SetMonitorSettings` | Сменить частоту на лету и сохранить в `config.toml` (root; `interval_ms` 100–60000, `idle_interval_ms` 1000–300000 и не меньше `interval_ms`) |
-| `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` (DMN-103) | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |
-| `GET /v1/processes` | `ProcessService.ListProcesses` (DMN-119) | Процессы хоста (`ps`/`top`): CPU, RSS, пользователь, состояние, время старта, контейнер Docker и приложение-владелец; `?kernelThreads=true` — вместе с потоками ядра |
-| `POST /v1/processes/{pid}/signal` | `ProcessService.SignalProcess` (DMN-119) | Тело `{"signal": "term"\|"kill"\|"hup"\|"int"\|"stop"\|"cont"\|"usr1"\|"usr2", "expectedStartTicks"?: n}`; только root; 403 для pid 1/демона/потоков ядра, 404 — процесса уже нет, 409 — pid переиспользован |
+| `GET /v1/ports/listening` | `MonitorService.ListListeningPorts` | Реально занятые порты хоста из `/proc/net/*`, слитые с атрибуцией по Docker/приложениям — в отличие от `GET /v1/ports` выше, который отдаёт то, что приложения *объявляют* |
+| `GET /v1/processes` | `ProcessService.ListProcesses` | Процессы хоста (`ps`/`top`): CPU, RSS, пользователь, состояние, время старта, контейнер Docker и приложение-владелец; `?kernelThreads=true` — вместе с потоками ядра |
+| `POST /v1/processes/{pid}/signal` | `ProcessService.SignalProcess` | Тело `{"signal": "term"\|"kill"\|"hup"\|"int"\|"stop"\|"cont"\|"usr1"\|"usr2", "expectedStartTicks"?: n}`; только root; 403 для pid 1/демона/потоков ядра, 404 — процесса уже нет, 409 — pid переиспользован |
 | `GET /v1/token` | `TokenService.GetTokenStatus` | Состояние токенов: вид, число живых временных, окно ротации, усечённый дайджест основного — никогда сам токен |
 | `POST /v1/system/reboot` | `SystemService.RebootSystem` | Запрашивает полную перезагрузку хоста после подтверждения вызова; только основной токен |
 | `POST /v1/token/access {"ttl_secs"?, "label"?}` | `TokenService.IssueAccessToken` | Выпуск временного токена (только по основному) |
@@ -138,7 +138,3 @@ API-сервер демона: один и тот же axum-роутер — gRP
 
 - Rust-код генерируется из `proto/` в build.rs через **protox** (pure-Rust компилятор protobuf) + tonic-build — системный `protoc` не нужен, сборка герметична.
 - Изменения контрактов — только обратно совместимые (новые поля — optional, номера не переиспользовать).
-
-## 🔗 Связанные задачи
-
-DMN-005, DMN-007, DMN-042, DMN-043, DMN-053, DMN-065, DMN-066, DMN-070, DMN-111 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

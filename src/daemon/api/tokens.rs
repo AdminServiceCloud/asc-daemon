@@ -1,4 +1,4 @@
-//! Primary and access tokens (DMN-065, DMN-066 — see docs/security-tokens.md).
+//! Primary and access tokens (see docs/security-tokens.md).
 //!
 //! The daemon's TCP API is guarded by two kinds of bearer token. The
 //! **primary** is the long-lived one in `api.token`, the credential the
@@ -142,7 +142,7 @@ struct Primary {
 struct AccessEntry {
     expires: Instant,
     expires_at: i64,
-    #[allow(dead_code)] // Surfaced by `asc api status`; see DMN-066.
+    #[allow(dead_code)] // Surfaced by `asc api status`.
     label: String,
 }
 

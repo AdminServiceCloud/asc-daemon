@@ -1,13 +1,13 @@
-//! In-daemon task scheduler (DMN-012, DMN-114).
+//! In-daemon task scheduler.
 //!
 //! A cron-like evaluator that wakes up once a minute and runs whatever is
 //! due. Two kinds of work:
 //!
-//! - scheduled app backups (DMN-009): every app whose backup policy (`asc
+//! - scheduled app backups: every app whose backup policy (`asc
 //!   app settings`, the `backups` category) has a `schedule` gets
 //!   `create_backup` runs to its configured storages, with the policy's
 //!   `keep` rotation applied;
-//! - scheduled jobs (DMN-114, [`jobs`]): the operator's `asc schedule add`
+//! - scheduled jobs ([`jobs`]): the operator's `asc schedule add`
 //!   entries and the platform's "run on the machine" schedules — node
 //!   reboot, app lifecycle/update, backup, shell command, HTTP request —
 //!   each with a run history.

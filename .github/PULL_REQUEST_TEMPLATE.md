@@ -9,9 +9,8 @@ Keep the PR focused: one logical change per PR. See CONTRIBUTING.md.
 
 ## 🔗 Related task / issue
 
-<!-- Every change starts from a roadmap task (DMN-*) or an issue. Link it here. -->
+<!-- Link the related issue here, if there is one. -->
 
-- Roadmap task: DMN-
 - Closes #
 
 ## 🧩 Type of change
@@ -38,7 +37,7 @@ Keep the PR focused: one logical change per PR. See CONTRIBUTING.md.
 
 ## ✅ Checklist
 
-- [ ] The change starts from a roadmap task, and the relevant doc in `docs/` is updated (docs first, then code — see `AGENTS.md`).
+- [ ] The change starts from an issue, and the relevant doc in `docs/` is updated (docs first, then code — see `AGENTS.md`).
 - [ ] `task check` passes locally (clippy with `-D warnings`, `cargo fmt`, tests).
 - [ ] New logic has unit tests; bug fixes include a regression test.
 - [ ] Commits follow Conventional Commits (`feat(pkg): ...`, `fix(cli): ...`).

@@ -24,7 +24,7 @@ path = "src/updater/main.rs"
 anyhow = "1"
 # Docker Engine API over the unix socket (no TLS stack: default features off
 # keeps ring/openssl out, preserving pure-Rust cross-compilation).
-# `buildkit_providerless` is the local-image-build session client (DMN-050):
+# `buildkit_providerless` is the local-image-build session client:
 # without it, `BuildInfo.aux` only deserializes the legacy builder's shape,
 # and the Engine's BuildKit-compat translation sends other progress lines as
 # an untyped protobuf blob there instead — aborting the whole build stream.
@@ -34,10 +34,10 @@ anyhow = "1"
 # `time` is its own hard requirement for the session's OAuth code path.
 bollard = { version = "0.21", default-features = false, features = ["pipe", "buildkit_providerless", "time"] }
 # Parses the RFC3339 `StartedAt` string bollard hands back from container
-# inspect into a unix timestamp for app uptime (DMN-089); already in the
+# inspect into a unix timestamp for app uptime; already in the
 # dependency graph transitively through bollard itself.
 time = { version = "0.3", default-features = false, features = ["parsing"] }
-# Tar build context bytes for the Docker image build (DMN-050) into a bollard body.
+# Tar build context bytes for the Docker image build into a bollard body.
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
@@ -50,12 +50,12 @@ serde_json = "1"
 serde_yaml = "0.9"
 semver = "1"
 axum = { version = "0.8", features = ["ws"] }
-# CLI → daemon client over the local unix socket (DMN-042): a minimal
+# CLI → daemon client over the local unix socket: a minimal
 # HTTP/1 JSON client — one connection per request, no TLS, no pooling.
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2", "service"] }
 # TLS for the daemon API when a node is reached directly instead of through
-# the platform's SSH tunnel (DMN-061). rustls with the ring provider: release
+# the platform's SSH tunnel. rustls with the ring provider: release
 # builds go through `cross`, whose images carry the C toolchains ring needs for
 # aarch64/armv7. rcgen issues the self-signed certificate on first start.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -63,7 +63,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "process", "io-util", "io-std"] }
-# WebSocket client for `asc app attach` over the daemon socket (DMN-043):
+# WebSocket client for `asc app attach` over the daemon socket:
 # the daemon's console endpoint is a WebSocket, and this speaks it over the
 # same UnixStream the REST client uses. No TLS: the peer is a local socket.
 tokio-tungstenite = "0.30"
@@ -78,18 +78,18 @@ indicatif = "0.18.6"
 # server local: daemon authorization remains based on the UDS peer uid.
 rmcp = { version = "3", features = ["server", "transport-io"] }
 schemars = "1"
-# Blocking HTTPS client for S3 backup transfers (DMN-115) and HTTP schedule
-# jobs (DMN-114). rustls with the ring provider — the same TLS stack the API
+# Blocking HTTPS client for S3 backup transfers and HTTP schedule
+# jobs. rustls with the ring provider — the same TLS stack the API
 # listener already carries, so no OpenSSL and cross-compilation stays pure;
 # webpki roots are bundled, the host's CA store is not required.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-# ACME client for the web server's Let's Encrypt certificates (DMN-124):
+# ACME client for the web server's Let's Encrypt certificates:
 # ring provider and hyper-rustls, the TLS stack the API already carries —
 # default features would pull aws-lc-rs and its C/cmake build into the cross
 # toolchain. `rcgen` generates the certificate key and CSR on the node.
 instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
-# Certificate expiry/issuer/SAN for issued and provided certificates
-# (DMN-124); already in the graph through rcgen.
+# Certificate expiry/issuer/SAN for issued and provided certificates;
+# already in the graph through rcgen.
 x509-parser = "0.18"
 
 [build-dependencies]

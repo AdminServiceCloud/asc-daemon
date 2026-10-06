@@ -244,7 +244,7 @@ fn update_inner<F>(config: &Config, human_output: bool, on_event: &mut F) -> Res
 where
     F: FnMut(UpdateEvent),
 {
-    // TODO(DMN-005): once the daemon API exists, ask it for active tasks
+    // TODO: once the daemon API exists, ask it for active tasks
     // (install, backup) and postpone the update unless --force.
     on_event(UpdateEvent::progress(
         "checking",
@@ -326,7 +326,7 @@ pub fn rollback(config: &Config) -> Result<()> {
 }
 
 /// Where each shell looks for a system-wide completion script, in preference
-/// order (DMN-055). Only directories that already exist are written to: the
+/// order. Only directories that already exist are written to: the
 /// presence of the directory is what says the shell (and, for bash, the
 /// bash-completion package) is installed on this host. Debian/Ubuntu ship the
 /// first entry of each list; the others cover distributions and manual
@@ -359,8 +359,8 @@ const COMPLETION_TARGETS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-/// Drop the shell completion scripts next to the freshly installed binary
-/// (DMN-055). The scripts come from that binary (`asc completion <shell>`),
+/// Drop the shell completion scripts next to the freshly installed binary.
+/// The scripts come from that binary (`asc completion <shell>`),
 /// not from the updater's own copy, so an updated `asc` always ships the
 /// script version it expects.
 ///

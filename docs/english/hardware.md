@@ -18,7 +18,7 @@ Everything is read from procfs and sysfs. No new dependencies, and **no serial n
 
 ## 🏗️ Technical design
 
-### 🧱 Inventory (DMN-142)
+### 🧱 Inventory
 
 `src/daemon/monitor/hardware.rs`. API: `MonitorService.GetHardwareInfo` (gRPC), REST `GET /v1/hardware[?refresh=1]`, capability `hardware`. The answer is cached for ten minutes — hardware barely changes while the daemon runs, and gathering it spawns helper processes — unless `refresh` is set.
 
@@ -36,7 +36,7 @@ Everything is read from procfs and sysfs. No new dependencies, and **no serial n
 - GPU model: NVIDIA from `nvidia-smi --query-gpu=pci.bus_id,uuid,name,memory.total` (only run when an NVIDIA card is bound to the proprietary driver); otherwise `product_name`, then the system's `pci.ids` database, then `vendor:device`.
 - **Attachability** (`attachable` / `attach_hint`): an NVIDIA card needs the proprietary driver bound and the NVIDIA Container Toolkit installed (`driver_not_loaded`, `toolkit_missing`); AMD and Intel cards need a DRM render node (`no_render_node`); anything else is `unsupported_vendor`.
 
-### 🌡️ Sensors (DMN-144)
+### 🌡️ Sensors
 
 `src/daemon/monitor/sensors.rs`. A temperature is a metric, not an inventory item, so the readings ride in `SystemMetrics.temperatures` / `fans` — on `GetSystemMetrics`, `StreamSystemMetrics` and REST `GET /v1/metrics`, and in `asc hardware`. They are read at most once a second (capability `sensors`).
 
@@ -57,14 +57,10 @@ Everything is read from procfs and sysfs. No new dependencies, and **no serial n
 - Channels that read zero or an out-of-range value (a header with nothing wired to it) are dropped. `max_c` / `crit_c` are the driver's thresholds, absent when it has none.
 - A virtual machine normally has no sensors; an empty list is a valid answer.
 
-### 🎮 GPU passthrough (DMN-143)
+### 🎮 GPU passthrough
 
-Selecting GPUs for an app is described in [📦 package-manager](package-manager.md#-gpu-passthrough-dmn-143): the `$gpus` setting holds PCI addresses from this inventory, and the daemon translates them into a `DeviceRequest` (NVIDIA) or device mappings (AMD/Intel) when it creates the container.
+Selecting GPUs for an app is described in [📦 package-manager](package-manager.md#-gpu-passthrough): the `$gpus` setting holds PCI addresses from this inventory, and the daemon translates them into a `DeviceRequest` (NVIDIA) or device mappings (AMD/Intel) when it creates the container.
 
 ### ⌨️ CLI
 
 `asc hardware [--json]` reads everything in-process, like the metrics block of `asc status` — no running daemon needed. Output is translated (EN/RU); `--json` is language-neutral.
-
-## 🔗 Related tasks
-
-DMN-142, DMN-143, DMN-144, NODE-066, BE-082, FE-244, FE-245 in [ROADMAP.md](../../../asc-platform/ROADMAP.md). Platform side: [node-resources](../../../asc-platform/docs/features/node-resources.md).

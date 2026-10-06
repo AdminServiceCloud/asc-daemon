@@ -64,8 +64,7 @@ An account's `~/.ssh/authorized_keys` path is always derived from its **resolved
 | `POST /v1/users/{name}/authorized-keys {"public_key"}` | `UserService.AddAuthorizedKey` | Idempotent append |
 | `DELETE /v1/users/{name}/authorized-keys {"fingerprint"}` | `UserService.RemoveAuthorizedKey` | Remove by fingerprint (body, not path, to sidestep URL-encoding `/`) |
 
-## 🔗 Related tasks
+## 🔗 Related
 
-- DMN-100 — `UserService` implementation in the daemon.
 - The `users` capability flag (see `ApiState::CAPABILITIES`) gates the platform's "Users" tab client-side, the same pattern as `sources`/`credentials`.
 - [📁 files](files.md) — the neighboring, node-wide file API; `UserService` follows the same root-gating discipline but has no `app_id` scoping.

@@ -1,4 +1,4 @@
-//! Lightweight package snapshot (DMN-131): read what a package repository
+//! Lightweight package snapshot: read what a package repository
 //! declares without downloading its content.
 //!
 //! Inspecting a package — "is it an app or a stack, what does it need, does it

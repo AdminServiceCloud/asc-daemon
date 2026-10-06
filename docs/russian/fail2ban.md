@@ -6,7 +6,7 @@
 
 Модуль `fail2ban` ставит на ноду [fail2ban](https://github.com/fail2ban/fail2ban) и управляет им: банит адреса, которые подбирают пароль SSH, ломятся на веб-сервер сканерами или повторяют нарушения. Баны исполняются через **nftables** в собственной таблице fail2ban `inet f2b-table`, рядом с `inet asc` демона ([🛡️ firewall](firewall.md)), так что они не перезаписывают друг друга.
 
-Демон владеет ровно одним файлом — `/etc/fail2ban/jail.d/asc.local`. Файлы оператора `jail.local` и остальные `jail.d` не изменяются. Всё работает автономно через `asc fail2ban …`; платформа AdminService.Cloud пользуется тем же API ([🧩 node-modules](../../../asc-platform/docs/features/node-modules.md)). Команде нужен работающий демон. fail2ban управляется только системным (root) демоном.
+Демон владеет ровно одним файлом — `/etc/fail2ban/jail.d/asc.local`. Файлы оператора `jail.local` и остальные `jail.d` не изменяются. Всё работает автономно через `asc fail2ban …`; платформа AdminService.Cloud пользуется тем же API (🧩 node-modules). Команде нужен работающий демон. fail2ban управляется только системным (root) демоном.
 
 ## 🎯 Сценарии использования
 
@@ -54,11 +54,6 @@ Capability в `GetStatus`: `fail2ban`. Все вызовы — только от
 
 `asc fail2ban status | install | uninstall | settings | jails | enable | disable | tune | bans | ban | unban`. Справочник команд: <https://docs.adminservice.cloud/ru/commands/fail2ban>.
 
-## 🔗 Связанные задачи
-
-| ID | Что |
-|---|---|
-| DMN-150 | Модуль: установка, конфигурация, jail'ы, баны |
-| DMN-151 | CLI, переводы, зеркало документации |
+## 🔗 См. также
 
 См. также: [🛡️ firewall](firewall.md), [🌐 webserver](webserver.md).

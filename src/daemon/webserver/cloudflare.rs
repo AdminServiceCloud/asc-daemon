@@ -1,4 +1,4 @@
-//! Cloudflare edge ranges for `real_ip` (DMN-125).
+//! Cloudflare edge ranges for `real_ip`.
 //!
 //! A domain proxied by Cloudflare reaches nginx from Cloudflare's addresses;
 //! the visitor's address travels in `CF-Connecting-IP`. nginx may only trust

@@ -1,4 +1,4 @@
-//! Other firewall front-ends on the host (DMN-148). ufw and firewalld both
+//! Other firewall front-ends on the host. ufw and firewalld both
 //! program nftables (or iptables) themselves; a second owner with a `drop`
 //! policy silently overrides whatever the daemon accepts, so enabling the
 //! managed firewall next to an active one is refused until the operator says

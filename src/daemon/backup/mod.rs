@@ -1,4 +1,4 @@
-//! Application backups (DMN-009): create, restore and rotate archives of an
+//! Application backups: create, restore and rotate archives of an
 //! app's repository/data directories and setting values, pushed to a named storage
 //! (`local` always exists; more via `asc backup storage add`, see
 //! [`storage`]). `asc.backup.yaml` at the package repository root excludes
@@ -7,7 +7,7 @@
 //! stored under the `$backup` reserved key — see
 //! [`crate::daemon::pkg::settings::SettingValues::backup_policy`]).
 //!
-//! Scheduled backups run inside the daemon: the scheduler (DMN-012,
+//! Scheduled backups run inside the daemon: the scheduler (
 //! [`crate::daemon::scheduler`]) evaluates each app's policy `schedule`
 //! (`daily@HH:MM` or a cron expression) once a minute and calls
 //! [`create_backup`] when it fires.
@@ -34,7 +34,7 @@ use storage::{BackupObject, BackupStorage, StorageList};
 /// regenerated, not restored, same reasoning as a clone.
 const BACKED_UP_DIRS: [&str; 2] = ["repository", "data"];
 
-/// Archive path of the setting values (DMN-139). Archives made before that
+/// Archive path of the setting values. Archives made before that
 /// carry them as `config/settings.json` instead ([`LEGACY_SETTINGS_ENTRY`]).
 const SETTINGS_ENTRY: &str = ".asc/settings.json";
 const LEGACY_SETTINGS_ENTRY: &str = "config/settings.json";
@@ -66,7 +66,7 @@ impl BackupManifest {
     }
 }
 
-/// Per-run file selection chosen by the caller (DMN-118), on top of the
+/// Per-run file selection chosen by the caller, on top of the
 /// repository's own `asc.backup.yaml` exclusions. Patterns use the same
 /// [`glob`] syntax and are relative to the app directory (`data/**/*.db`,
 /// `repository/vendor`). A non-empty `include` narrows the archive to the
@@ -344,7 +344,7 @@ pub fn restore_backup(
         archive
             .unpack(&app_dir)
             .with_context(|| format!("cannot extract backup into {}", app_dir.display()))?;
-        // A pre-DMN-139 archive brings its settings back as config/; move
+        // A legacy archive brings its settings back as config/; move
         // them to where the app now reads them from.
         let legacy = app_dir.join(LEGACY_SETTINGS_ENTRY);
         if legacy.is_file() {
@@ -382,7 +382,7 @@ pub fn delete_backup(
     resolve_storage(config, storages, storage_name)?.remove(backup_name)
 }
 
-/// Delete the oldest backups of `app_id` beyond `keep` (DMN-009 rotation).
+/// Delete the oldest backups of `app_id` beyond `keep` (rotation).
 /// Best-effort per file: one failed deletion does not stop the rest.
 pub fn prune(storage: &dyn BackupStorage, app_id: &str, keep: u32) -> Result<Vec<String>> {
     let objects = storage.list(app_id)?;

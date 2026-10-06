@@ -106,7 +106,7 @@ impl std::fmt::Display for LicenseRequired {
 impl std::error::Error for LicenseRequired {}
 
 /// Typed error: the directory the install pointed at ships `asc.stack.yaml`
-/// instead of `asc.yaml` — the package is a stack, not a single app (DMN-097).
+/// instead of `asc.yaml` — the package is a stack, not a single app.
 /// A direct git install catches it and restarts as a stack install; a registry
 /// entry that mislabels a stack as `type: app` surfaces it as its message.
 #[derive(Debug)]
@@ -140,7 +140,7 @@ fn license_in(dir: &Path) -> Option<String> {
 /// License text of a cloned package: the package's own directory wins
 /// (monorepos may license packages individually), the repository root is
 /// the fallback. `None` — no license file in either place. Also read by the
-/// inspect preflight (DMN-131), so the installer can ask for consent before
+/// inspect preflight, so the installer can ask for consent before
 /// the install starts rather than after a failed first run.
 pub(super) fn repo_license(package_dir: &Path, repo_root: &Path) -> Option<String> {
     license_in(package_dir).or_else(|| {
@@ -225,15 +225,15 @@ impl Drop for RemoveOnDrop {
 /// Install from the configured registries. The spec is `name[@version]` for
 /// apps and whole stacks, `stack/app[@version]` for one app of a stack.
 /// `source` pins the registry source when several provide the package.
-/// `custom_name` is the user-chosen app name (DMN-024). For a whole-stack
+/// `custom_name` is the user-chosen app name. For a whole-stack
 /// install it acts as a prefix: every installed stack app is named
-/// `<prefix>-<app>` (DMN-034).
+/// `<prefix>-<app>`.
 /// `license_ack` — the caller has accepted the repository license; without
 /// it a repository shipping a LICENSE raises [`LicenseRequired`].
 /// `image_choice` picks the image when the manifest offers both a prebuilt
 /// `image` and an `image-build`; without it such a manifest raises
-/// [`ImageChoiceRequired`] (DMN-050).
-/// `force` skips the resource shortfall check (DMN-099); without it, a host
+/// [`ImageChoiceRequired`].
+/// `force` skips the resource shortfall check; without it, a host
 /// that cannot currently cover the manifest's `requirements` or the runtime
 /// quota raises [`super::resources::RequirementsNotMet`].
 #[allow(clippy::too_many_arguments)]
@@ -260,8 +260,8 @@ pub fn install(
 
     let candidates = RegistryClient::new(config)?.resolve_all(package)?;
     let resolved = select_source(candidates, source, package)?;
-    // The version comes from the package repository's tags, not the registry
-    // (DMN-047); `package_spec` (with any `stack/app`) re-invokes correctly.
+    // The version comes from the package repository's tags, not the registry;
+    // `package_spec` (with any `stack/app`) re-invokes correctly.
     let version = resolve_version(
         version_spec,
         package_spec,
@@ -298,7 +298,7 @@ pub fn install(
     install_one(config, ctx, origin, &id, None, opts).map(InstallOutcome::App)
 }
 
-/// Instance id for a fresh install (DMN-033): the package name itself, or
+/// Instance id for a fresh install: the package name itself, or
 /// the first free `<package>-N` when instances of it are already installed.
 /// A candidate is taken when its app directory exists **or** some app's
 /// custom name equals it — a generated id must not shadow an existing name
@@ -330,33 +330,33 @@ struct InstallOpts<'a> {
     version: Option<&'a str>,
     custom_name: Option<&'a str>,
     license_ack: bool,
-    /// Image source when the manifest offers both `image` and `image-build`
-    /// (DMN-050); `None` raises [`ImageChoiceRequired`] for such a manifest.
+    /// Image source when the manifest offers both `image` and `image-build`;
+    /// `None` raises [`ImageChoiceRequired`] for such a manifest.
     image_choice: Option<ImageSource>,
-    /// Skip the resource shortfall check (DMN-099): without it, an install
+    /// Skip the resource shortfall check: without it, an install
     /// the host cannot currently cover raises [`super::resources::RequirementsNotMet`]
     /// instead of running into a raw container-create failure. Never skips
     /// the CPU quota clamp — that one guards a hard Engine limit no consent
     /// can talk around.
     force: bool,
-    /// Where to send progress lines as the install runs (DMN-090); `None`
+    /// Where to send progress lines as the install runs; `None`
     /// for a local `asc install` (its progress is the terminal bars instead).
     report: Option<&'a dyn InstallReporter>,
     /// Install as something other than the package's own `asc.yaml`
-    /// (DMN-107) — right now, only a bare Dockerfile. `None` reads the
+    /// — right now, only a bare Dockerfile. `None` reads the
     /// manifest normally; never propagated into a stack member's own
     /// [`InstallOpts`] (a stack app always has its own `asc.yaml`, that being
     /// what makes it a member of the stack in the first place).
     install_method: Option<detect::InstallMethod>,
-    /// The stack a member is installed as part of (DMN-121) — set by
+    /// The stack a member is installed as part of — set by
     /// [`install_stack`] only, and read only for a direct git install: a
     /// registry member already names its stack through the registry entry.
     /// Recorded as `meta.package = "<stack>/<app>"`, so the platform and
     /// `asc stacks` group a git-installed stack the same way as one from a
     /// registry.
     stack: Option<&'a str>,
-    /// A clone of the package repository that already exists on disk
-    /// (DMN-131): [`install_stack`] clones once and every member copies that
+    /// A clone of the package repository that already exists on disk:
+    /// [`install_stack`] clones once and every member copies that
     /// clone instead of fetching the repository again.
     prepared: Option<PreparedClone<'a>>,
 }
@@ -377,7 +377,7 @@ fn copy_prepared(prepared: PreparedClone<'_>, dest: &Path) -> Result<()> {
         .map_err(|err| anyhow::anyhow!("cannot copy the package clone: {err}"))
 }
 
-/// Validate a user-chosen app name (DMN-024): printable, sane length, and
+/// Validate a user-chosen app name: printable, sane length, and
 /// unique among the apps this user can see — otherwise `asc app <name>`
 /// commands would be ambiguous. Uniqueness is checked against visible apps
 /// only, so the error never leaks foreign users' app names.
@@ -400,7 +400,7 @@ pub(super) fn validate_custom_name(config: &Config, ctx: &UserContext, name: &st
 }
 
 /// Where a package being installed comes from: a registry entry, or a git
-/// URL given directly (`asc install <url>`, DMN-040/097). Both clone the same
+/// URL given directly (`asc install <url>`). Both clone the same
 /// repository the same way and differ only in what an install records in
 /// meta.json — which is what `asc app upgrade` resolves the package from
 /// later — and in how the license prompt names the source.
@@ -410,7 +410,7 @@ pub(super) enum Origin<'a> {
     Git {
         url: &'a str,
         git_ref: Option<GitRef<'a>>,
-        /// Manifest subdirectory inside the repository (DMN-096).
+        /// Manifest subdirectory inside the repository.
         path: Option<&'a str>,
     },
 }
@@ -492,10 +492,10 @@ impl<'a> Origin<'a> {
 /// Install a stack: clone once to read `asc.stack.yaml`, then install the
 /// selected apps (all non-optional ones, or the requested app) together with
 /// their transitive dependencies, dependencies first. Each app installs
-/// atomically. Wanted apps that are already installed become new instances
-/// (DMN-033); dependencies pulled in alongside them are shared — installed
+/// atomically. Wanted apps that are already installed become new instances;
+/// dependencies pulled in alongside them are shared — installed
 /// ones are reused, not duplicated. On a whole-stack install the custom
-/// name is a prefix: every wanted app is named `<prefix>-<app>` (DMN-034).
+/// name is a prefix: every wanted app is named `<prefix>-<app>`.
 fn install_stack(
     config: &Config,
     ctx: &UserContext,
@@ -511,7 +511,7 @@ fn install_stack(
         path: probe_dir.clone(),
         armed: true,
     };
-    // The one clone of the whole stack install (DMN-131): every member below
+    // The one clone of the whole stack install: every member below
     // copies it rather than fetching the repository again.
     let probe_tag = origin.clone_into(&probe_dir, opts.version, ctx, opts.report)?;
     let stack_root = manifest_dir(&probe_dir, origin.path())?;
@@ -621,7 +621,7 @@ fn install_one(
         }
         None => origin.clone_into(&repo_dir, opts.version, ctx, opts.report)?,
     };
-    // DMN-137 checkpoint: the clone is done — nothing pulled or built yet,
+    // Cancellation checkpoint: the clone is done — nothing pulled or built yet,
     // so a cancelled install only leaves this directory, which the cleanup
     // guard removes.
     progress::ensure_not_cancelled(opts.report)?;
@@ -630,7 +630,7 @@ fn install_one(
     // The clone may turn out to hold a stack root rather than an app: a
     // direct git install has no registry entry to tell it apart beforehand
     // and restarts as a stack install, a registry entry that mislabels a
-    // stack as `type: app` gets the error (DMN-097).
+    // stack as `type: app` gets the error.
     if stack_app.is_none()
         && !matches!(
             opts.install_method,
@@ -647,7 +647,7 @@ fn install_one(
     }
     require_license_ack(origin, name, &manifest_dir, &repo_dir, opts.license_ack)?;
 
-    // A docker compose install (DMN-108) has no manifest at all — it is a
+    // A docker compose install has no manifest at all — it is a
     // `docker compose` project, not an app `provision()` creates — so it is
     // handled entirely on its own, before the manifest-driven path below
     // ever starts.
@@ -669,7 +669,7 @@ fn install_one(
         );
     }
 
-    // A requested method other than the package's own asc.yaml (DMN-107):
+    // A requested method other than the package's own asc.yaml:
     // right now the only one is a bare Dockerfile, synthesized into an
     // in-memory manifest + settings instead of read from the repository —
     // and recorded in `install_method` so every later reader of this app's
@@ -706,7 +706,7 @@ fn install_one(
         &crate::daemon::apps::layout::settings_dir(&app_dir),
     )?;
 
-    // Resource shortfall check (DMN-099), before anything is pulled or
+    // Resource shortfall check, before anything is pulled or
     // built. A metrics read failure must not block the install — same
     // permissive stance `asc app start`'s own check already takes — so both
     // the check and the CPU clamp below are simply skipped when it fails.
@@ -749,14 +749,14 @@ fn install_one(
         values.save(&crate::daemon::apps::layout::settings_dir(&app_dir))?;
     }
 
-    // DMN-137 checkpoint: last stop before the image pull/build and the
+    // Cancellation checkpoint: last stop before the image pull/build and the
     // container. Once provisioning succeeds the app is finished rather than
     // torn down — a cancel that arrives that late has nothing left to save.
     progress::ensure_not_cancelled(opts.report)?;
 
     // Minted before provisioning, not with the rest of the metadata below, so
     // a credential bound to this app's uuid already applies to its first
-    // image pull (DMN-044/046).
+    // image pull.
     let uuid = new_uuid()?;
     let runtime = provision(
         &manifest,
@@ -774,7 +774,7 @@ fn install_one(
     let effective_version = cloned_tag
         .clone()
         .unwrap_or_else(|| manifest.version.clone());
-    // A suffixed instance id (second install of the same package, DMN-033)
+    // A suffixed instance id (second install of the same package)
     // records its package for upgrades and gets the id as its display name —
     // otherwise several instances would list under one identical title.
     let base = match (origin, stack_app) {
@@ -825,7 +825,7 @@ fn install_one(
         // Registry installs are pinned to a tag, never to a branch; a direct
         // install follows the branch it was given (`--branch`).
         branch: origin.branch(),
-        // The registry entry itself carries the path (DMN-096); only a direct
+        // The registry entry itself carries the path; only a direct
         // git install needs its own copy.
         repo_path,
         package: match origin {
@@ -836,7 +836,7 @@ fn install_one(
             },
             // Nothing to re-resolve in a registry: `source` and `repo_path`
             // are all an upgrade of a direct install reads. A stack member
-            // still records its stack (DMN-121) — only for grouping, since
+            // still records its stack — only for grouping, since
             // upgrade and settings check `source`/`repo_path` first.
             Origin::Git { .. } => match (stack_app, opts.stack) {
                 (Some(app), Some(stack)) => Some(format!("{stack}/{app}")),
@@ -857,7 +857,7 @@ fn install_one(
     })
 }
 
-/// Install a `docker compose` project (DMN-108) — entirely separate from
+/// Install a `docker compose` project — entirely separate from
 /// [`install_one`]'s manifest-driven path above: there is no `asc.yaml` to
 /// read, no settings, no quota, and provisioning is `docker compose create`
 /// (containers exist but are not started, matching `provision()`'s own
@@ -1001,7 +1001,7 @@ pub fn repo_name(url: &str) -> Result<String> {
 }
 
 /// The default app id for a direct git install: for a monorepo package
-/// (`path` set — DMN-096), the manifest's own subdirectory name
+/// (`path` set), the manifest's own subdirectory name
 /// (`web/helloworld` → `helloworld`), matching how a registry install names
 /// the app after `entry.name` rather than the repository; otherwise the
 /// repository's own name at the root ([`repo_name`]).
@@ -1020,17 +1020,17 @@ fn install_from_git_app_base(url: &str, path: Option<&str>) -> Result<String> {
 /// Install directly from a git repository URL, bypassing the registry: for
 /// one-off installs and private forks that were never published anywhere.
 /// `asc.yaml` is at the repository root unless `path` names a monorepo
-/// subdirectory (DMN-096) — the direct-install equivalent of a registry
+/// subdirectory — the direct-install equivalent of a registry
 /// entry's `source.path`, since there is no registry entry to carry one here.
 /// `git_ref` pins the branch or tag to check out; `None` clones the default
 /// branch HEAD. Private repositories reuse the same `asc auth` credentials
 /// as registry installs (host/prefix matching in [`super::auth`]).
 ///
-/// The package may be a stack (`asc.stack.yaml`) just as well as a single app
-/// (DMN-097): without a registry entry to declare the type, the clone decides.
+/// The package may be a stack (`asc.stack.yaml`) just as well as a single app:
+/// without a registry entry to declare the type, the clone decides.
 /// `stack_app` installs one named app of the stack; `None` installs every
 /// non-optional one, exactly like the registry stack install.
-/// `force` skips the resource shortfall check (DMN-099) the same way it does
+/// `force` skips the resource shortfall check the same way it does
 /// for [`install`].
 #[allow(clippy::too_many_arguments)]
 pub fn install_from_git(
@@ -1067,7 +1067,7 @@ pub fn install_from_git(
     let base = install_from_git_app_base(url, path)?;
 
     // Whether the repository holds an app or a stack is not known up front.
-    // A lightweight snapshot (DMN-131: trees plus the manifests, no content)
+    // A lightweight snapshot (trees plus the manifests, no content)
     // answers it before the one full clone, so a stack goes straight to the
     // stack install instead of cloning as an app first and restarting.
     // Naming an app of the stack says it is a stack already.
@@ -1097,7 +1097,7 @@ pub fn install_from_git(
 }
 
 /// Whether the package at `path` is a stack root (`asc.stack.yaml` without an
-/// `asc.yaml` of its own), read from a sparse snapshot (DMN-131). A probe that
+/// `asc.yaml` of its own), read from a sparse snapshot. A probe that
 /// fails for any reason answers "not a stack": the app install that follows
 /// clones for real, reports the actual error, and still falls back to the
 /// stack install on [`StackPackage`].
@@ -1142,7 +1142,7 @@ fn probe_is_stack(
     }
 }
 
-/// Root policy (DMN-003): regular users may be limited to Docker apps.
+/// Root policy: regular users may be limited to Docker apps.
 pub(super) fn enforce_install_policy(
     config: &Config,
     ctx: &UserContext,
@@ -1164,8 +1164,7 @@ pub(super) enum VersionSpec<'a> {
     /// No `@` — resolve the repository's newest tag (or its HEAD if it has
     /// none), the everyday `asc install pkg`.
     Latest,
-    /// `pkg@` with an empty version — let the user pick a tag or branch
-    /// (DMN-048).
+    /// `pkg@` with an empty version — let the user pick a tag or branch.
     Pick,
     /// `pkg@1.2.0` — that exact ref.
     Exact(&'a str),
@@ -1183,7 +1182,7 @@ pub(super) fn parse_spec(spec: &str) -> (&str, VersionSpec<'_>) {
 }
 
 /// Typed error: `asc install pkg@` needs the user to choose a version from
-/// the repository's tags and branches (DMN-048). The CLI catches it, shows a
+/// the repository's tags and branches. The CLI catches it, shows a
 /// numbered picker, and re-runs the install as `pkg@<choice>`; a
 /// non-interactive caller gets the list in the message.
 #[derive(Debug)]
@@ -1211,7 +1210,7 @@ impl std::fmt::Display for VersionChoiceRequired {
 impl std::error::Error for VersionChoiceRequired {}
 
 /// Typed error: the manifest offers both a prebuilt `image` and a local
-/// `image-build` (DMN-050), so the installer must be told which to use. The
+/// `image-build`, so the installer must be told which to use. The
 /// CLI catches it, offers the two options (or honors `--image` / `--build`),
 /// and retries; the platform UI renders its own choice from the fields. A
 /// non-interactive caller gets the hint to pass a flag.
@@ -1289,11 +1288,11 @@ fn single_image_source(manifest: &Manifest) -> Option<ImageSource> {
 
 /// Tag of the image a `type: docker` app runs, without any pull or build:
 /// the prebuilt `image`, or the deterministic local build tag. Used by the
-/// drift-recreate path to inspect the image owner (DMN-038) without deciding
+/// drift-recreate path to inspect the image owner without deciding
 /// the source anew. `stored` is the source persisted in meta.json (set only
 /// for both-offered apps); single-option apps derive it from the manifest.
 ///
-/// `pub(crate)` rather than `pub(super)` since DMN-105 (see
+/// `pub(crate)` rather than `pub(super)` in newer versions (see
 /// [`docker_footprint`]) needs it from `daemon::api`, outside `pkg` entirely.
 pub(crate) fn effective_image_ref(
     manifest: &Manifest,
@@ -1363,7 +1362,7 @@ fn build_app_image(
 }
 
 /// Resolve the version to install/clone from the spec and the package's
-/// repository (DMN-047): the version lives in the repository's git tags, not
+/// repository: the version lives in the repository's git tags, not
 /// in the registry index.
 ///
 /// - [`VersionSpec::Exact`] is taken as-is.
@@ -1451,7 +1450,7 @@ pub(super) fn git_clone(
 }
 
 /// [`git_clone`] with extra `git clone` flags — the sparse snapshot's
-/// `--filter=blob:none --no-checkout` (DMN-131). Credentials, URL rewriting
+/// `--filter=blob:none --no-checkout`. Credentials, URL rewriting
 /// and the typed auth errors are exactly the same.
 pub(super) fn git_clone_with(
     git_url: &str,
@@ -1461,8 +1460,8 @@ pub(super) fn git_clone_with(
     report: Option<&dyn InstallReporter>,
     extra: &[&str],
 ) -> Result<()> {
-    // Credentials for private repositories (DMN-003), looked up in the
-    // stores the *calling* user can reach (DMN-062) — the daemon runs as
+    // Credentials for private repositories, looked up in the
+    // stores the *calling* user can reach — the daemon runs as
     // root, so its own store is not where `asc auth add` put them. An
     // unreadable auth file must not block installs from public repositories.
     let auth = match super::auth::GitAuth::load_for(ctx) {
@@ -1508,7 +1507,7 @@ pub(super) fn git_clone_with(
     if let Some(report) = report {
         report.line(&format!("$ git clone {}", args.join(" ")));
     }
-    // DMN-137: git prints progress several times a second, so every line is
+    // git prints progress several times a second, so every line is
     // a chance to notice a cancelled caller and kill the clone — stderr then
     // hits EOF and the read below ends on its own.
     let mut killed = false;
@@ -1610,7 +1609,7 @@ pub(super) fn safe_join(base: &Path, sub: &str) -> Result<PathBuf> {
         match component {
             // `./server` is how stack manifests spell an app directory: the
             // result is the same path, without the "." left in the middle of
-            // it — it is also recorded in meta.json (DMN-097).
+            // it — it is also recorded in meta.json.
             std::path::Component::CurDir => {}
             std::path::Component::Normal(part) => joined.push(part),
             // "..", "/abs" (not `is_absolute` on every platform) and Windows
@@ -1760,7 +1759,7 @@ pub(super) fn interpolate_env(command: &str, env: &[(String, String)]) -> Result
 }
 
 /// Start command → process runtime. Runs through `sh -c` so packages can use
-/// arguments and env references; `${VAR}` substitution arrives with DMN-018.
+/// arguments and env references; `${VAR}` substitution arrives later.
 fn process_runtime(start: &str) -> Runtime {
     Runtime::Process {
         command: "/bin/sh".into(),
@@ -1768,9 +1767,9 @@ fn process_runtime(start: &str) -> Runtime {
     }
 }
 
-/// Everything the runtime takes from the settings (DMN-017, DMN-030): env
+/// Everything the runtime takes from the settings: env
 /// pairs, published ports, volume entries and the effective start command.
-/// Values come from `<config_dir>/settings.json` (`.asc/`, DMN-139) with the package defaults
+/// Values come from `<config_dir>/settings.json` (`.asc/`) with the package defaults
 /// filled in for keys the user has not set — so the inputs are complete even
 /// before the first settings edit. The settings are the **only** source:
 /// asc.yaml has no `env:`, `ports:` or `volumes:` sections.
@@ -1785,7 +1784,7 @@ pub(crate) struct RuntimeInputs {
     pub volumes: Vec<String>,
     /// The user's `$start_command` override, else the package's.
     pub start_command: Option<String>,
-    /// PCI addresses of the GPUs chosen in the `$gpus` setting (DMN-143),
+    /// PCI addresses of the GPUs chosen in the `$gpus` setting,
     /// resolved against the live hardware when the container is created.
     pub gpus: Vec<String>,
 }
@@ -1878,7 +1877,7 @@ pub(crate) fn runtime_inputs(
         .map(str::to_string)
         .or_else(|| settings.start_command.clone());
     // A package-declared `env:` setting wins over a same-named `$env` entry
-    // from a connected Environment group (BE-010 on the platform side): the
+    // from a connected Environment group (on the platform side): the
     // user configured that value explicitly in the app's own settings UI, a
     // more specific and deliberate choice than an org/project-wide default.
     let mut env = values.env_pairs(&settings.settings);
@@ -1899,7 +1898,7 @@ pub(crate) fn runtime_inputs(
 
 /// Create (but do not start) the container via the Docker Engine API: env,
 /// published ports, volumes and quota limits all come from the settings.
-/// Registry credentials for `image`, if any are configured (DMN-046).
+/// Registry credentials for `image`, if any are configured.
 ///
 /// A missing or unreadable store is not fatal: public images must keep
 /// pulling on a host with no credentials at all, and a private one fails
@@ -1947,13 +1946,13 @@ fn docker_create(
     quota: Option<&Quota>,
     command: Option<String>,
     // Identities this app answers to (id and, once it exists, uuid) —
-    // credentials bound to either one apply (DMN-045/046).
+    // credentials bound to either one apply.
     app_ids: &[Option<&str>],
     report: Option<&dyn InstallReporter>,
 ) -> Result<()> {
     // Make the effective image present locally: pull a prebuilt one (so its
     // declared USER is known before bind-mounted volumes are created and can
-    // be chowned to match), or build one from the package Dockerfile (DMN-050).
+    // be chowned to match), or build one from the package Dockerfile.
     // A built image needs no registry auth on the create spec — it will never
     // be pull-on-404'd.
     let id = container.strip_prefix("asc-").unwrap_or(container);
@@ -1985,7 +1984,7 @@ fn docker_create(
         binds.push(volume_bind(volume, app_dir, owner)?);
     }
 
-    // DMN-105: informational labels only — never read back by
+    // informational labels only — never read back by
     // `AppliedConfig`/the drift check (see the field doc on
     // `docker::CreateSpec::labels`), so they cannot recreate the container.
     let mut labels = HashMap::new();
@@ -1995,7 +1994,7 @@ fn docker_create(
         labels.insert(docker::LABEL_APP_UUID.to_string(), uuid.to_string());
     }
 
-    // An unavailable card fails the create with its address (DMN-143): an app
+    // An unavailable card fails the create with its address: an app
     // started without the GPU it was configured for just looks slow.
     let gpus = super::gpus::grant_for(&inputs.gpus)?;
 
@@ -2117,8 +2116,8 @@ fn parse_volume(volume: &str) -> Result<Volume<'_>> {
     Ok(Volume::Named(volume))
 }
 
-/// Where a volume entry's bytes actually live, for disk usage reporting
-/// (DMN-035). Mirrors [`Volume`]/[`HostSide`] without exposing them.
+/// Where a volume entry's bytes actually live, for disk usage reporting.
+/// Mirrors [`Volume`]/[`HostSide`] without exposing them.
 pub(crate) enum VolumeKind {
     /// A folder inside the app directory — already covered when the app
     /// directory itself is measured.
@@ -2148,8 +2147,8 @@ pub(crate) fn classify_volume(volume: &str, app_dir: &Path) -> Result<VolumeKind
 /// chowned to that uid:gid so the image can also `chown` it itself. A non-root
 /// process may only chown a path it already owns, so an image that fixes up
 /// its data directory's ownership on first start (`chown -R app:app ...`)
-/// hits EPERM against a root-owned bind mount unless this pre-chown matches
-/// (DMN-038); world-writable alone only ever covered write access.
+/// hits EPERM against a root-owned bind mount unless this pre-chown matches;
+/// world-writable alone only ever covered write access.
 fn open_volume_dir(dir: &Path, owner: Option<(u32, u32)>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o777))
@@ -2196,7 +2195,7 @@ pub(super) fn volume_bind(
     Ok(format!("{}:{}", host.display(), target))
 }
 
-/// What DockerService's inventory and prune (DMN-104/DMN-105) must never
+/// What DockerService's inventory and prune must never
 /// remove for one installed app: the image it currently runs, and every
 /// named Docker volume its settings declare. `pub` (not `pub(crate)`) so both
 /// the daemon API (`daemon::api`) and the CLI's in-process fallback
@@ -2337,7 +2336,7 @@ mod tests {
 
     #[test]
     fn install_from_git_app_base_prefers_the_manifest_subdirectory() {
-        // A monorepo package (DMN-096) installs under the manifest's own
+        // A monorepo package installs under the manifest's own
         // directory name, not the repository's — same as a registry install
         // names the app after `entry.name`, never the registry repository.
         assert_eq!(

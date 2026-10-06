@@ -1,4 +1,4 @@
-//! Real host listening-port inventory (DMN-103): what is actually bound on
+//! Real host listening-port inventory: what is actually bound on
 //! this machine, parsed straight from `/proc/net/{tcp,tcp6,udp,udp6}` — not
 //! to be confused with [`crate::daemon::apps::ports::published`], which
 //! reports what an app's settings merely *declare*. Neither list is the

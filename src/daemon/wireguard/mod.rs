@@ -1,4 +1,4 @@
-//! The node's WireGuard (DMN-152): install `wireguard-tools`, manage tunnels
+//! The node's WireGuard: install `wireguard-tools`, manage tunnels
 //! as `/etc/wireguard/<name>.conf` files (the ones the daemon wrote carry a
 //! marker; other files are listed and left alone), add peers with generated
 //! keys and a client config, edit each peer's AllowedIPs, and import a

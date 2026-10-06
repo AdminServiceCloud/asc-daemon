@@ -1,6 +1,6 @@
 //! Temporary console tokens (see docs/console.md).
 //!
-//! A WebSocket console session (DMN-007) can only be opened with a one-time
+//! A WebSocket console session can only be opened with a one-time
 //! token issued through the API: short TTL, bound to one app and one session
 //! type. The platform requests a token after its own permission check; in
 //! standalone mode the CLI will do the same.
@@ -16,7 +16,7 @@ pub const TOKEN_TTL: Duration = Duration::from_secs(30);
 pub enum SessionType {
     Logs,
     Attach,
-    /// Interactive shell inside a running container (DMN-082), docker only.
+    /// Interactive shell inside a running container, docker only.
     Exec,
 }
 
@@ -67,7 +67,7 @@ impl ConsoleTokens {
     }
 
     /// Redeem a token: valid at most once, and only before its TTL.
-    /// Used by the WebSocket console handshake (DMN-007).
+    /// Used by the WebSocket console handshake.
     pub fn consume(&self, token: &str) -> Option<ConsoleGrant> {
         let mut entries = self.entries.lock().expect("console token lock poisoned");
         entries.retain(|_, e| e.expires > Instant::now());

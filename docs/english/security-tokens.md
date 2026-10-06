@@ -6,7 +6,7 @@
 
 Two kinds of bearer token guard the daemon's TCP API.
 
-The **primary token** is the one the daemon generates on first start and keeps in `api.token` next to config.toml (root-only, 0600). It never expires, it is the credential the platform stores at enrollment, and from DMN-065 on it behaves like a *refresh* token: its job is to mint other tokens and to be rotated, not to sign everyday traffic.
+The **primary token** is the one the daemon generates on first start and keeps in `api.token` next to config.toml (root-only, 0600). It never expires, it is the credential the platform stores at enrollment, and since then it behaves like a *refresh* token: its job is to mint other tokens and to be rotated, not to sign everyday traffic.
 
 An **access token** is short-lived (10 minutes by default), lives only in the daemon's memory and is minted on demand by presenting the primary. It carries the same authority as the primary for everything except token management: it cannot read or rotate the primary, cannot mint further access tokens, and cannot revoke them. That is the whole difference.
 
@@ -77,10 +77,3 @@ Rotation is two-phase:
 - `asc api token rotate [--grace <secs>]`
 - `asc api token issue [--ttl <secs>] [--label <text>]`
 - `asc api token revoke` — revoke every access token.
-
-## 🔗 Related tasks
-
-- DMN-065 — the token model, endpoints and the denied set.
-- DMN-066 — rotation: atomic write, grace window, two-phase commit, `asc api token`.
-- DMN-061 — direct access to the daemon API over TLS.
-- NODE-008 / NODE-009 — the platform side: minting, caching, rotation and revocation from the node's settings.

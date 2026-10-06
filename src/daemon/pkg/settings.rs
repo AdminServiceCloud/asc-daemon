@@ -1,5 +1,5 @@
 //! `asc.settings.yaml` — user-adjustable app settings and the resource quota
-//! (DMN-017 settings, DMN-021 quota).
+//! (settings and quota).
 //!
 //! Mirrors `registry/schema/asc.settings.schema.json` (the source of truth
 //! for the format). The manifest references the file via `settings:`; values
@@ -22,25 +22,25 @@ use crate::daemon::i18n::{Msg, t, tf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsFile {
-    /// Resource quota applied to the app instance (DMN-021).
+    /// Resource quota applied to the app instance.
     #[serde(default)]
     pub quota: Option<QuotaSpec>,
-    /// User-adjustable settings (DMN-017).
+    /// User-adjustable settings.
     #[serde(default)]
     pub settings: Vec<SettingDef>,
     /// Start command override with `${VAR}` interpolation from the package
-    /// env defaults (DMN-018). Docker: replaces the container command (runs
+    /// env defaults. Docker: replaces the container command (runs
     /// through `/bin/sh -c`); native: replaces `runtime.start`.
     #[serde(default)]
     pub start_command: Option<String>,
-    /// First-time setup questionnaire (DMN-138): questions the package
+    /// First-time setup questionnaire: questions the package
     /// author asks the operator while the app installs, each about one
     /// environment setting from `settings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<SetupSpec>,
 }
 
-/// `setup:` section (DMN-138) — the first-time setup questionnaire. The
+/// `setup:` section — the first-time setup questionnaire. The
 /// platform's install dialog shows it while the install runs; a question
 /// marked `required` must have an answer before the app's first start
 /// ([`SettingsFile::unanswered_required`]), the others can be skipped and
@@ -92,9 +92,9 @@ pub struct QuotaSpec {
     pub max_disk: Option<String>,
 }
 
-/// The `backups` editor category's value (DMN-009), stored under the
+/// The `backups` editor category's value, stored under the
 /// `$backup` reserved key: which named storages an app backs up to, how many
-/// copies each keeps, and how often — the daemon's scheduler (DMN-012,
+/// copies each keeps, and how often — the daemon's scheduler (
 /// [`crate::daemon::scheduler`]) runs `schedule` automatically.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BackupPolicy {
@@ -188,7 +188,7 @@ pub struct SettingDef {
     /// Transport(s) to publish on (kind: ports only). Defaults to `tcp`.
     #[serde(default)]
     pub protocol: Option<PortProtocol>,
-    /// Container-side ports of a `type: ports` setting (DMN-052): where the
+    /// Container-side ports of a `type: ports` setting: where the
     /// **package author** knows the app listens inside the container, while
     /// the setting's own value — what the **user** edits — picks the host
     /// ports. Paired by index, so the author also fixes how many ports the
@@ -255,7 +255,7 @@ pub enum SettingCategory {
     Quota,
     StartCommand,
     Backups,
-    /// GPU passthrough (DMN-143): the `$gpus` reserved key.
+    /// GPU passthrough: the `$gpus` reserved key.
     Gpus,
 }
 
@@ -435,7 +435,7 @@ impl SettingsFile {
         Ok(())
     }
 
-    /// `setup:` checks (DMN-138): every question points at a declared
+    /// `setup:` checks: every question points at a declared
     /// environment setting (not ports/volumes — those are lists the
     /// questionnaire does not edit), and at most once.
     fn validate_setup(&self, setup: &SetupSpec) -> Result<()> {
@@ -465,7 +465,7 @@ impl SettingsFile {
     }
 
     /// Keys of the `required` setup questions that have no answer in
-    /// `values` yet (DMN-138): missing, `null`, or an empty/blank string. A
+    /// `values` yet: missing, `null`, or an empty/blank string. A
     /// package default counts as an answer only if the author gave one — a
     /// required question normally has none, which is the point of asking.
     pub fn unanswered_required(&self, values: &SettingValues) -> Vec<String> {
@@ -758,16 +758,16 @@ impl SettingValues {
     pub const START_COMMAND_KEY: &'static str = "$start_command";
     pub const BACKUP_KEY: &'static str = "$backup";
     /// Extra environment variables delivered by the platform's connected
-    /// Environment groups (BE-010) — arbitrary `name: value` pairs the
+    /// Environment groups — arbitrary `name: value` pairs the
     /// package's own asc.settings.yaml does not declare with `env:`. Rides
     /// the same settings.json → apply_settings/reconcile pipeline as every
     /// other setting; see [`SettingValues::extra_env`].
     pub const ENV_KEY: &'static str = "$env";
-    /// PCI addresses of the GPUs attached to the app's container (DMN-143),
+    /// PCI addresses of the GPUs attached to the app's container,
     /// e.g. `["0000:01:00.0"]` — see [`SettingValues::gpus`].
     pub const GPUS_KEY: &'static str = "$gpus";
 
-    /// The GPUs chosen for this app (DMN-143, the `$gpus` key): PCI addresses
+    /// The GPUs chosen for this app (the `$gpus` key): PCI addresses
     /// as listed by `asc hardware`, sorted and de-duplicated. An address, not
     /// an index — it keeps meaning the same card after a card is added.
     pub fn gpus(&self) -> Result<Vec<String>> {
@@ -804,7 +804,7 @@ impl SettingValues {
             .context("invalid $quota override in settings.json")
     }
 
-    /// The app's backup policy (the `backups` editor category, DMN-009).
+    /// The app's backup policy (the `backups` editor category).
     pub fn backup_policy(&self) -> Result<Option<BackupPolicy>> {
         let Some(value) = self.get(Self::BACKUP_KEY) else {
             return Ok(None);
@@ -815,7 +815,7 @@ impl SettingValues {
     }
 
     /// Extra `(name, value)` pairs from connected Environment groups
-    /// (BE-010, platform-side), under the `$env` reserved key. Sorted by
+    /// (platform-side), under the `$env` reserved key. Sorted by
     /// name for deterministic output.
     pub fn extra_env(&self) -> Result<Vec<(String, String)>> {
         let Some(value) = self.get(Self::ENV_KEY) else {
@@ -832,7 +832,7 @@ impl SettingValues {
     }
 
     /// The chosen values as they are stored, for a client that edits them
-    /// out of process (the CLI over the daemon socket, DMN-043).
+    /// out of process (the CLI over the daemon socket).
     pub fn as_map(&self) -> &serde_json::Map<String, serde_json::Value> {
         &self.map
     }
@@ -1001,13 +1001,13 @@ pub fn locate_installed(
     app_dir: &Path,
 ) -> Result<(PathBuf, Option<super::manifest::StackManifest>)> {
     let repo = app_dir.join("repository");
-    // A docker compose app (DMN-108) carries its own directory directly on
+    // A docker compose app carries its own directory directly on
     // `Runtime::Compose` — no need for a separate marker the way Dockerfile
     // needs `install_method`, since `Runtime::Docker` doesn't carry one.
     if let crate::daemon::apps::meta::Runtime::Compose { working_dir, .. } = &meta.runtime {
         return Ok((app_dir.join(working_dir), None));
     }
-    // A Dockerfile install (DMN-107) never writes an asc.yaml to the clone —
+    // A Dockerfile install never writes an asc.yaml to the clone —
     // the `Manifest::FILE` check below would otherwise fall through to
     // resolving this app as a registry package, which it never was.
     if matches!(
@@ -1022,7 +1022,7 @@ pub fn locate_installed(
     if repo.join(Manifest::FILE).exists() {
         return Ok((repo, None));
     }
-    // A direct git install of a monorepo package (DMN-096) records its own
+    // A direct git install of a monorepo package records its own
     // manifest subdirectory in meta.json — there is no registry entry here
     // to resolve a path from, unlike every other case below.
     if let Some(repo_path) = meta.repo_path.as_deref() {

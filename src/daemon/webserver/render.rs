@@ -1,4 +1,4 @@
-//! nginx configuration rendering (DMN-122/DMN-123). Pure functions: the
+//! nginx configuration rendering. Pure functions: the
 //! caller resolves upstreams and certificate paths, this module only turns
 //! settings and sites into file contents. Every path a rendered file refers
 //! to is built from `base`, so the same code renders both the staging copy
@@ -22,7 +22,7 @@ pub struct Paths {
     pub state: PathBuf,
     /// HTTP-01 webroot, readable by the nginx worker user.
     pub webroot: PathBuf,
-    /// Per-site access and error logs (DMN-128), bound into the docker
+    /// Per-site access and error logs, bound into the docker
     /// container under the same path.
     pub logs: PathBuf,
 }
@@ -88,7 +88,7 @@ pub struct Resolved<'a> {
     /// Certificate and key to serve HTTPS with; `None` — HTTP only for now
     /// (no TLS, or the certificate is not issued yet).
     pub cert: Option<(PathBuf, PathBuf)>,
-    /// Per server: taken out of rotation by the health checks (DMN-126).
+    /// Per server: taken out of rotation by the health checks.
     pub down: Vec<bool>,
 }
 
@@ -556,12 +556,12 @@ pub fn render_site(
     out
 }
 
-/// The daemon's own API site (DMN-129).
+/// The daemon's own API site.
 pub fn is_api_site(site: &Site) -> bool {
     site.managed_by.as_deref() == Some(API_SITE_OWNER)
 }
 
-/// A site's own logs (DMN-128). nginx has no `error_log off`: a disabled
+/// A site's own logs. nginx has no `error_log off`: a disabled
 /// error log goes to /dev/null at the quietest level instead.
 fn log_directives(site: &Site, logs: &Path) -> String {
     let mut out = String::new();
@@ -1263,8 +1263,8 @@ mod tests {
             fail_timeout_secs: 5,
             down: false,
         });
-        // The daemon's own API site (DMN-129) on the same certificate, and a
-        // site with both logs off (DMN-128).
+        // The daemon's own API site on the same certificate, and a
+        // site with both logs off.
         let mut api = site();
         api.id = API_SITE_ID.into();
         api.managed_by = Some(API_SITE_OWNER.into());

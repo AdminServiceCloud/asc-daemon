@@ -1,6 +1,6 @@
-//! Read a package without installing it (DMN-098): snapshot the repository
+//! Read a package without installing it: snapshot the repository
 //! into a temporary directory, read `asc.yaml` or `asc.stack.yaml` and throw
-//! the snapshot away. The snapshot is sparse and blobless (DMN-131, see
+//! the snapshot away. The snapshot is sparse and blobless (see
 //! [`super::sparse`]): only the manifests, the license and the files the
 //! install-method detector reads are downloaded — never the package content.
 //!
@@ -12,7 +12,7 @@
 //! is about to put on the node, instead of finding out from the result.
 //!
 //! The same read answers the two questions an install used to discover only
-//! by failing (DMN-131): does the repository ship a license the operator has
+//! by failing: does the repository ship a license the operator has
 //! to accept, and can this host cover the package's declared requirements
 //! right now. The installer asks both before it starts the one real install.
 
@@ -36,7 +36,7 @@ pub enum PackageKind {
     App,
     /// `asc.stack.yaml` — several applications shipped together.
     Stack,
-    /// Neither manifest is present (DMN-106) — the repository may still be
+    /// Neither manifest is present — the repository may still be
     /// installable some other way, see [`PackageInfo::methods`].
     Unknown,
 }
@@ -56,19 +56,19 @@ pub struct PackageInfo {
     pub requirements: Option<Requirements>,
     /// Stacks only: the apps the stack ships, in manifest order.
     pub apps: Vec<StackAppInfo>,
-    /// Every installation method detected in the package directory (DMN-106),
+    /// Every installation method detected in the package directory,
     /// regardless of `kind` — a repository can carry `asc.yaml` next to a
     /// Dockerfile it doesn't need, and that is still worth reporting.
     pub methods: Vec<super::detect::DetectedMethod>,
-    /// The license text an install would ask consent for (DMN-131) — the
+    /// The license text an install would ask consent for — the
     /// package directory's LICENSE*, else the repository root's.
     pub license: Option<String>,
-    /// What this host falls short on for the package (DMN-131): the first
+    /// What this host falls short on for the package: the first
     /// app (the app itself, or a non-optional member of a stack) whose
     /// requirements or runtime quota the host cannot cover right now. `None`
     /// when everything fits or the metrics could not be read.
     pub shortfall: Option<RequirementsNotMet>,
-    /// The app's sc.settings.yaml (DMN-138) — apps only: what the install
+    /// The app's sc.settings.yaml — apps only: what the install
     /// dialog asks the operator up front (its `setup:` questions) before the
     /// app even exists. `None` for stacks, unknown kinds, a package without
     /// settings, or a settings file that does not parse.
@@ -186,7 +186,7 @@ fn fetch_custom_settings(repo: &Path, package_dir: &Path, url: &str, ctx: &UserC
     }
 }
 
-/// The resource preflight (DMN-131) — the same `resources::check` an install
+/// The resource preflight — the same `resources::check` an install
 /// runs after its clone, run before it instead. A stack is checked member by
 /// member (non-optional ones — what a whole-stack install puts on the node)
 /// and reports the first member that does not fit.
@@ -232,7 +232,7 @@ fn preflight_resources(
 
 /// Read whichever manifest the directory holds, stack first: a stack root may
 /// not carry an `asc.yaml` of its own, an app directory never carries an
-/// `asc.stack.yaml`. Neither present is no longer an error (DMN-106): the
+/// `asc.stack.yaml`. Neither present is no longer an error: the
 /// repository may still be installable some other way (Dockerfile, compose,
 /// …), so it comes back as `PackageKind::Unknown` with whatever
 /// [`super::detect::detect`] found, rather than failing the whole inspect.

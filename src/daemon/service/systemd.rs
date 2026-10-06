@@ -130,7 +130,7 @@ mod tests {
         let unit = Systemd::unit_file(Path::new("/usr/local/bin/asc"));
         assert!(unit.contains("ExecStart=/usr/local/bin/asc serve"));
         assert!(unit.contains("WantedBy=multi-user.target"));
-        // The local API socket directory (DMN-042).
+        // The local API socket directory.
         assert!(unit.contains("RuntimeDirectory=asc"));
     }
 }

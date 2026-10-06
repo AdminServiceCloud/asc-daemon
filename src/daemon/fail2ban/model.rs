@@ -1,4 +1,4 @@
-//! The fail2ban model (DMN-150): global defaults and per-jail overrides, the
+//! The fail2ban model: global defaults and per-jail overrides, the
 //! catalog of jails the daemon knows how to run, and the validation that keeps
 //! anything an operator types out of the generated config unless it is a time,
 //! a number, a port list, a path or an address.

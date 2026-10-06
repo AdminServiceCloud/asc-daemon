@@ -1,4 +1,4 @@
-//! TLS for the daemon API (DMN-061).
+//! TLS for the daemon API.
 //!
 //! The API listens on loopback by default and the platform reaches it through
 //! an SSH tunnel. A node can instead be reached directly, and then the port is
@@ -31,7 +31,7 @@ pub fn key_path() -> PathBuf {
     Config::path().with_file_name("api.key")
 }
 
-/// A certificate the platform handed in (DMN-127) — kept apart from the
+/// A certificate the platform handed in — kept apart from the
 /// self-signed pair and from an operator's own `tls_cert`, so neither is
 /// overwritten.
 pub fn custom_cert_path() -> PathBuf {
@@ -43,7 +43,7 @@ pub fn custom_key_path() -> PathBuf {
 }
 
 /// Where ACME material lives: the account key, and the certificate and key
-/// issued for the configured domain (DMN-067). Kept apart from the
+/// issued for the configured domain. Kept apart from the
 /// self-signed pair so switching modes never overwrites the other's files.
 pub fn acme_dir() -> PathBuf {
     Config::path().with_file_name("acme")
@@ -175,7 +175,7 @@ fn build(
     })
 }
 
-/// Serve the API with a certificate the platform handed in (DMN-127):
+/// Serve the API with a certificate the platform handed in:
 /// validate the pair, write it next to config.toml, switch `[api] tls` to
 /// `files` and save. The caller swaps the running listener over with
 /// [`Live::set`]; a listener that is not TLS picks it up on restart.
@@ -200,8 +200,8 @@ pub fn install_custom(
     Ok(materials)
 }
 
-/// The TLS configuration the running listener hands to each new connection
-/// (DMN-127). Empty while the listener is plain (loopback) — then a new
+/// The TLS configuration the running listener hands to each new connection.
+/// Empty while the listener is plain (loopback) — then a new
 /// certificate needs a restart. Connections already open keep the one they
 /// were accepted with, so swapping never cuts the call that asked for it.
 #[derive(Clone, Default)]

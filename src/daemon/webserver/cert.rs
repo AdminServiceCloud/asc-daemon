@@ -1,4 +1,4 @@
-//! Certificate facts the web server needs (DMN-124): expiry, issuer and
+//! Certificate facts the web server needs: expiry, issuer and
 //! names of a PEM chain, and whether a private key belongs to it.
 
 use anyhow::{Context, Result, bail};

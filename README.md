@@ -174,12 +174,6 @@ Documentation for the daemon's modules lives in the [docs/english/](docs/english
 | [🔄 updater](docs/english/updater.md) | The asc-updater utility: auto-updates, channels, rollback |
 | [🔗 platform](docs/english/platform.md) | Connecting the node to the platform: `--token`, `asc connect` |
 
-## 🗺️ Roadmap
-
-The roadmap for the whole project is kept in the **asc-platform** repository:
-
-- [🎯 ROADMAP](../asc-platform/ROADMAP.md) — daemon tasks use the `DMN-*` prefix
-- [🤝 Development process](../asc-platform/AGENTS.md)
 
 ## 💬 Support
 

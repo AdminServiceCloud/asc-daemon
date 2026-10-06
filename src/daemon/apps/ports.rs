@@ -1,4 +1,4 @@
-//! Published ports per installed app (DMN-049): the ports an app exposes,
+//! Published ports per installed app: the ports an app exposes,
 //! resolved the same way the runtime publishes them — from the
 //! `type: ports` settings of `asc.settings.yaml` with the app's chosen values
 //! (defaults filled in). Feeds `asc ports` / `asc ls ports`.
@@ -30,7 +30,7 @@ pub fn published(config: &Config, store: &AppStore, meta: &AppMeta) -> Result<Ve
             return Ok(Vec::new());
         }
     };
-    // A compose app (DMN-108) has no settings to read at all — its ports
+    // A compose app has no settings to read at all — its ports
     // come straight from the compose file, live or stopped alike, the same
     // property every other runtime already gets from its settings.
     if let Runtime::Compose { files, .. } = &meta.runtime {

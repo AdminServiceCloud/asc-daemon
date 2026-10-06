@@ -1,4 +1,4 @@
-//! `CloneApp`/`CloneAppStream` over gRPC (DMN-113): the platform's clone
+//! `CloneApp`/`CloneAppStream` over gRPC: the platform's clone
 //! dialog calls these to copy an installed app under a new id — see
 //! tests/clone.rs for the service-layer behavior this wraps.
 

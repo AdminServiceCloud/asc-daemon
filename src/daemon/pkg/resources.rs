@@ -1,5 +1,4 @@
-//! Resource shortfall check before an install actually provisions anything
-//! (DMN-099).
+//! Resource shortfall check before an install actually provisions anything.
 //!
 //! "Not enough resources" hides two very different failure shapes. RAM and
 //! disk running low is advisory — a human (or `--force`) can decide to

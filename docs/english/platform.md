@@ -95,7 +95,7 @@ once — and replies with the node and organization ids.
 `http://` URLs are permitted for local development, with a warning: the token
 crosses the network unencrypted.
 
-### 🔑 SSH access for the platform (DMN-145)
+### 🔑 SSH access for the platform
 
 A node added with the install command was never logged into by the platform,
 so it used to end up registered and still unreachable. Registration now hands
@@ -142,7 +142,7 @@ SSH host key. The daemon hands its API token to the platform inside the
 registration call, because without SSH there is no other way to deliver it.
 
 A node installed with the plain command and no `--direct` is reached over the
-SSH access granted at registration (DMN-145); only an older daemon, which
+SSH access granted at registration; only an older daemon, which
 grants none, stays unable to report its status.
 
 ```toml
@@ -162,7 +162,7 @@ The certificate and key live next to config.toml as `api.crt` (0644) and
 validate them before they land, so a configuration that cannot work is refused
 where it is entered rather than at the next start.
 
-### 🔐 How the certificate is trusted (DMN-067)
+### 🔐 How the certificate is trusted
 
 | `tls` | What vouches for the certificate |
 |---|---|
@@ -173,7 +173,7 @@ where it is entered rather than at the next start.
 A fingerprint is reported **only** for `self_signed`. Pinning a chain-verified
 certificate would break the node the first time it renews.
 
-### 📡 Reporting a change afterwards (DMN-068)
+### 📡 Reporting a change afterwards
 
 Registration is a one-shot token redemption, so it cannot carry the news that
 an address or certificate changed later. The daemon calls
@@ -192,14 +192,8 @@ not call the platform on every boot.
 There is no persistent channel to the platform. A registered node reports its
 facts once and stops there — it does not send heartbeats and the panel does not
 show it as online. Commands from the panel, log streaming and metrics arrive
-with the platform tunnel (NODE-002 on the platform side).
+with the platform tunnel.
 
-### 🪪 A certificate from the platform (DMN-127)
+### 🪪 A certificate from the platform
 
 `TokenService.SetApiCertificate(certificate_pem, private_key_pem, domain)` (primary token only) checks the pair, writes `api-custom.crt` / `api-custom.key` (`0600`) next to config.toml, switches `[api]` to `tls = "files"` and swaps the certificate of a running TLS listener in place — new connections get it at once. It answers with the new fingerprint and `restart_required` when the listener is not TLS yet. The daemon now reports the fingerprint for `files` too: the certificate may come from a private CA (Cloudflare Origin), where only a pin can vouch for it. Capability `api.certificate`.
-
-## 🔗 Related tasks
-
-DMN-058, DMN-145 in the [ROADMAP](../../../asc-platform/ROADMAP.md); on the platform
-side — NODE-001 (node registry and registration tokens), NODE-002 (the
-platform ↔ daemon channel) and NODE-067 (SSH access granted at registration).

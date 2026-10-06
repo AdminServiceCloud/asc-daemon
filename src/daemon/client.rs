@@ -1,4 +1,4 @@
-//! CLI-side client of the daemon's local unix-socket API (DMN-042).
+//! CLI-side client of the daemon's local unix-socket API.
 //!
 //! A blocking facade over a minimal HTTP/1 JSON client: one connection per
 //! request, no TLS, no pooling — the peer is a local daemon over a unix
@@ -41,7 +41,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, serde::Deserialize)]
 pub struct RemoteApp {
     pub id: String,
-    /// Stable instance identity (DMN-044); absent for pre-DMN-044 installs.
+    /// Stable instance identity; absent for legacy installs.
     #[serde(default)]
     pub uuid: Option<String>,
     pub name: String,
@@ -74,7 +74,7 @@ pub struct RemoteAppRef {
     pub name: String,
 }
 
-/// One app's line in the daemon's apps-wide disk report (DMN-053).
+/// One app's line in the daemon's apps-wide disk report.
 #[derive(Debug, serde::Deserialize)]
 pub struct RemoteDiskRow {
     pub id: String,
@@ -91,7 +91,7 @@ pub struct RemoteDiskSummary {
     pub apps: Vec<RemoteDiskRow>,
 }
 
-/// One app and the ports it publishes (DMN-049).
+/// One app and the ports it publishes.
 #[derive(Debug, serde::Deserialize)]
 pub struct RemotePortsRow {
     pub id: String,
@@ -101,7 +101,7 @@ pub struct RemotePortsRow {
 }
 
 /// One published or exposed port of a container, as the Engine reports it
-/// in the container list (DMN-102). Unlike [`PublishedPort`], which is what
+/// in the container list. Unlike [`PublishedPort`], which is what
 /// an app's manifest *asks for*, a merely exposed port has no host side.
 #[derive(Debug, serde::Deserialize)]
 pub struct RemoteContainerPort {
@@ -122,7 +122,7 @@ pub struct RemoteContainerMount {
     pub rw: bool,
 }
 
-/// One container on the host — ASC-managed or not (DMN-102).
+/// One container on the host — ASC-managed or not.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteContainer {
@@ -149,7 +149,7 @@ pub struct RemoteContainer {
     pub mounts: Vec<RemoteContainerMount>,
 }
 
-/// One container's live resource usage (DMN-112).
+/// One container's live resource usage.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteContainerStats {
@@ -164,7 +164,7 @@ pub struct RemoteContainerStats {
     pub block_write_bytes: Option<u64>,
 }
 
-/// One real listening port on the host (DMN-103), merged with Docker/app
+/// One real listening port on the host, merged with Docker/app
 /// attribution where the daemon could resolve it.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,7 +184,7 @@ pub struct RemoteListeningPort {
     pub is_daemon: bool,
 }
 
-/// One image on the host (DMN-104).
+/// One image on the host.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDockerImage {
@@ -199,7 +199,7 @@ pub struct RemoteDockerImage {
     pub protected_reason: Option<String>,
 }
 
-/// One named volume on the host (DMN-104).
+/// One named volume on the host.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDockerVolume {
@@ -215,7 +215,7 @@ pub struct RemoteDockerVolume {
     pub protected_reason: Option<String>,
 }
 
-/// One network on the host (DMN-104), inventory-only.
+/// One network on the host, inventory-only.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDockerNetwork {
@@ -239,7 +239,7 @@ pub struct RemoteDiskUsageGroup {
     pub reclaimable_bytes: u64,
 }
 
-/// `docker system df`'s four categories (DMN-104).
+/// `docker system df`'s four categories.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct RemoteDockerDiskUsage {
     pub images: RemoteDiskUsageGroup,
@@ -249,14 +249,14 @@ pub struct RemoteDockerDiskUsage {
     pub build_cache: RemoteDiskUsageGroup,
 }
 
-/// One item a prune (DMN-105) considered but did not remove.
+/// One item a prune considered but did not remove.
 #[derive(Debug, serde::Deserialize)]
 pub struct RemotePruneSkip {
     pub name: String,
     pub reason: String,
 }
 
-/// Result of a prune (DMN-105), real run or dry run alike.
+/// Result of a prune, real run or dry run alike.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePruneResult {
@@ -302,7 +302,7 @@ pub struct Daemon {
 impl Daemon {
     /// Connect to the daemon socket from the config: `Ok(None)` when no
     /// socket file exists (no daemon on this host — the CLI works
-    /// in-process, DMN-041), `Err` when the socket exists but the daemon
+    /// in-process), `Err` when the socket exists but the daemon
     /// does not answer (stopped or hung service, stale file).
     pub fn connect(config: &Config) -> Result<Option<Self>> {
         let socket = config.api.socket.clone();
@@ -322,7 +322,7 @@ impl Daemon {
         Ok(Some(client))
     }
 
-    /// Web server API passthrough (DMN-122): the CLI renders the JSON the
+    /// Web server API passthrough: the CLI renders the JSON the
     /// daemon returns, the same shape the in-process path serializes.
     pub fn web(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
         let method = Method::from_bytes(method.as_bytes()).context("bad HTTP method")?;
@@ -358,7 +358,7 @@ impl Daemon {
         Ok((app, usage))
     }
 
-    /// Space taken by every app the caller may see (DMN-053), largest first,
+    /// Space taken by every app the caller may see, largest first,
     /// with the capacity of the filesystem holding the app store.
     pub fn disk_summary(&self) -> Result<RemoteDiskSummary> {
         let json = self.request(Method::GET, "/v1/disk", None)?;
@@ -380,12 +380,12 @@ impl Daemon {
             .context("malformed port report from the daemon")
     }
 
-    /// Every container on the host, ASC-managed or not (DMN-102). Root
+    /// Every container on the host, ASC-managed or not. Root
     /// context only — over the unix socket a non-root peer is refused.
     pub fn list_containers(&self, all: bool, with_size: bool) -> Result<Vec<RemoteContainer>> {
         let path = format!("/v1/docker/containers?all={all}&size={with_size}");
         let json = self.request(Method::GET, &path, None)?;
-        // A daemon predating DMN-102 has no such route and answers without
+        // An older daemon has no such route and answers without
         // the key; say so plainly instead of blaming the payload shape.
         if json["containers"].is_null() {
             anyhow::bail!("{}", t(Msg::DockerUnsupportedByDaemon));
@@ -394,7 +394,7 @@ impl Daemon {
             .context("malformed container list from the daemon")
     }
 
-    /// Live container resource usage (DMN-112); empty `ids` means every
+    /// Live container resource usage; empty `ids` means every
     /// running container. The daemon samples twice ~500 ms apart once for
     /// the whole set, so this call takes about that long regardless of how
     /// many containers were asked about.
@@ -412,11 +412,11 @@ impl Daemon {
             .context("malformed container stats from the daemon")
     }
 
-    /// Real host listening-port inventory (DMN-103) — what is actually
+    /// Real host listening-port inventory — what is actually
     /// bound, not what an app's settings merely declare.
     pub fn listening_ports(&self) -> Result<Vec<RemoteListeningPort>> {
         let json = self.request(Method::GET, "/v1/ports/listening", None)?;
-        // A daemon predating DMN-103 has no such route and answers without
+        // An older daemon has no such route and answers without
         // the key; say so plainly instead of blaming the payload shape.
         if json["ports"].is_null() {
             anyhow::bail!("{}", t(Msg::PortsListeningUnsupportedByDaemon));
@@ -425,7 +425,7 @@ impl Daemon {
             .context("malformed listening-port report from the daemon")
     }
 
-    /// Every image on the host, ASC-owned or not (DMN-104). Root context only.
+    /// Every image on the host, ASC-owned or not. Root context only.
     pub fn list_images(&self) -> Result<Vec<RemoteDockerImage>> {
         let json = self.request(Method::GET, "/v1/docker/images", None)?;
         if json["images"].is_null() {
@@ -435,7 +435,7 @@ impl Daemon {
             .context("malformed image list from the daemon")
     }
 
-    /// Every named volume on the host (DMN-104). Root context only.
+    /// Every named volume on the host. Root context only.
     pub fn list_volumes(&self) -> Result<Vec<RemoteDockerVolume>> {
         let json = self.request(Method::GET, "/v1/docker/volumes", None)?;
         if json["volumes"].is_null() {
@@ -445,7 +445,7 @@ impl Daemon {
             .context("malformed volume list from the daemon")
     }
 
-    /// Every network on the host (DMN-104), inventory-only. Root context only.
+    /// Every network on the host, inventory-only. Root context only.
     pub fn list_networks(&self) -> Result<Vec<RemoteDockerNetwork>> {
         let json = self.request(Method::GET, "/v1/docker/networks", None)?;
         if json["networks"].is_null() {
@@ -455,7 +455,7 @@ impl Daemon {
             .context("malformed network list from the daemon")
     }
 
-    /// `docker system df`'s four categories (DMN-104). Root context only.
+    /// `docker system df`'s four categories. Root context only.
     pub fn docker_disk_usage(&self) -> Result<RemoteDockerDiskUsage> {
         let json = self.request(Method::GET, "/v1/docker/disk-usage", None)?;
         if json["images"].is_null() {
@@ -464,7 +464,7 @@ impl Daemon {
         serde_json::from_value(json).context("malformed disk usage from the daemon")
     }
 
-    /// Remove unused images/volumes/build cache, one item at a time (DMN-105).
+    /// Remove unused images/volumes/build cache, one item at a time.
     /// `target` is `"images"`, `"volumes"` or `"build_cache"`. Root context
     /// only.
     pub fn prune_docker(
@@ -498,7 +498,7 @@ impl Daemon {
         self.request(Method::GET, "/v1/metrics", None)
     }
 
-    /// Upgrade an app (DMN-053): `reference` is its id or custom name,
+    /// Upgrade an app: `reference` is its id or custom name,
     /// `version` an explicit tag (`None` — the newest one, or the tracked
     /// branch of a direct repository install). The daemon clones with its own
     /// git credentials, so there is no interactive auth setup on this path.
@@ -520,7 +520,7 @@ impl Daemon {
             id,
             from: json["from"].as_str().map(str::to_string),
             to: json["to"].as_str().unwrap_or_default().to_string(),
-            // Absent from an older daemon's answer (DMN-056): the CLI then
+            // Absent from an older daemon's answer: the CLI then
             // prints the versions alone, as it did before.
             from_commit: json["from_commit"].as_str().map(str::to_string),
             to_commit: json["to_commit"].as_str().map(str::to_string),
@@ -539,7 +539,7 @@ impl Daemon {
         Ok(json["already_stopped"].as_bool().unwrap_or(false))
     }
 
-    /// `true` when the app was already stopped (DMN-134).
+    /// `true` when the app was already stopped.
     pub fn kill(&self, id: &str) -> Result<bool> {
         let json = self.request(Method::POST, &format!("/v1/apps/{id}/kill"), None)?;
         Ok(json["already_stopped"].as_bool().unwrap_or(false))
@@ -647,7 +647,7 @@ impl Daemon {
         })
     }
 
-    /// An app's settings schema and current values (DMN-043). The editor
+    /// An app's settings schema and current values. The editor
     /// then runs entirely in the CLI, exactly as it does in-process — only
     /// the reading and the writing move to the daemon, which is the half a
     /// user without access to the system app tree cannot do themselves.
@@ -687,7 +687,7 @@ impl Daemon {
             .context("the daemon issued no console token")
     }
 
-    // ── API tokens (DMN-065, DMN-066) ──
+    // ── API tokens ──
     //
     // Reached over the unix socket, where the peer uid is the authorization:
     // these calls carry no bearer token and the daemon requires the peer to
@@ -740,7 +740,7 @@ impl Daemon {
         Ok((token, json["grace_until"].as_i64()))
     }
 
-    /// Attach to an app's console through the daemon (DMN-043): the daemon
+    /// Attach to an app's console through the daemon: the daemon
     /// holds the Docker connection, so this works for a user who is not in
     /// the `docker` group and cannot read the system app tree. The terminal's
     /// stdin goes to the app, the app's output to stdout — the same contract
@@ -999,7 +999,7 @@ mod tests {
         assert_eq!(not_met.shortages.len(), 1);
         assert_eq!(not_met.shortages[0].resource, "CPU");
 
-        // DMN-062: a private repository reported by the daemon must arrive
+        // a private repository reported by the daemon must arrive
         // as the same typed error the in-process clone raises, so the CLI's
         // interactive auth setup runs on both paths.
         let err = typed_error(&serde_json::json!({

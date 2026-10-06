@@ -1,4 +1,4 @@
-//! Talking to fail2ban through its own `fail2ban-client` (DMN-150). Behind a
+//! Talking to fail2ban through its own `fail2ban-client`. Behind a
 //! trait so the manager is testable without fail2ban; the parsers turn the
 //! client's human-oriented output into typed values and fail loudly on a
 //! format they do not recognise instead of reporting an empty list.

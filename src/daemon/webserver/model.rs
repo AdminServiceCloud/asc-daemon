@@ -1,4 +1,4 @@
-//! Data model of the web server module (DMN-122/DMN-123): node-wide
+//! Data model of the web server module: node-wide
 //! settings, sites and their statuses, with the validation every write goes
 //! through. Everything here is plain data — rendering lives in
 //! [`super::render`], side effects in [`super::apply`] and [`super::engine`].
@@ -445,7 +445,7 @@ pub enum HealthKind {
     Http,
 }
 
-/// Active health checks of a site's upstream servers (DMN-126). Zero values
+/// Active health checks of a site's upstream servers. Zero values
 /// mean the defaults below.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -616,7 +616,7 @@ pub struct Site {
     pub extra_location: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_config: Option<String>,
-    /// The site's own access and error logs (DMN-128).
+    /// The site's own access and error logs.
     #[serde(default, skip_serializing_if = "SiteLogs::is_default")]
     pub logs: SiteLogs,
 }
@@ -670,7 +670,7 @@ pub fn site_log_file(dir: &std::path::Path, site: &str, kind: LogKind) -> std::p
     dir.join(format!("{site}.{}.log", kind.suffix()))
 }
 
-/// `managed_by` of the daemon's own API site (DMN-129): the platform's
+/// `managed_by` of the daemon's own API site: the platform's
 /// `ReplaceSites` never touches it, and the renderer routes gRPC for it.
 pub const API_SITE_OWNER: &str = "daemon-api";
 /// Its id.
@@ -937,7 +937,7 @@ pub struct TlsStatus {
     pub names: Vec<String>,
 }
 
-/// One upstream server as the health checks see it (DMN-126).
+/// One upstream server as the health checks see it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpstreamHealth {

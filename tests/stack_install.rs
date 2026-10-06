@@ -155,7 +155,7 @@ apps:
         Some("demo-stack/master")
     );
 
-    // ── Re-install: wanted apps become new instances (DMN-033) ───────────
+    // ── Re-install: wanted apps become new instances ───────────
     let pkg::InstallOutcome::Stack {
         installed, skipped, ..
     } = pkg::install(

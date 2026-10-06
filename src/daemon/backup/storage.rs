@@ -1,4 +1,4 @@
-//! Backup storages (DMN-009): where `asc backup create` uploads archives to,
+//! Backup storages: where `asc backup create` uploads archives to,
 //! and `asc backup restore` pulls them from. One built-in **local** storage
 //! always exists (no setup needed); more can be added — S3-compatible, FTP,
 //! SFTP — with `asc backup storage add`. Configured storages persist like
@@ -27,7 +27,7 @@ const DEFAULT_SYSTEM_PATH: &str = "/etc/asc/backup-storages.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageEntry {
     pub name: String,
-    /// Who owns this entry when it was not added by hand (DMN-115): the
+    /// Who owns this entry when it was not added by hand: the
     /// platform pushes its organization storages as `managed_by =
     /// "platform"` and may replace or remove them; `None` for operator
     /// entries, which a platform push never touches.
@@ -379,7 +379,7 @@ impl StorageList {
         Ok(())
     }
 
-    /// Add or replace a storage in the editable scope (DMN-115, the
+    /// Add or replace a storage in the editable scope (the
     /// platform's push). Replacing an operator entry with a managed one (or
     /// the reverse) is refused: a push must never silently take over — or
     /// hand back — something it does not own.

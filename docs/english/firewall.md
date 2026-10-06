@@ -10,7 +10,7 @@ Every change is applied with an **automatic rollback**: the daemon keeps what un
 
 For experts there is a **RAW mode**: the whole ruleset of the server is edited as text. It is deliberately fenced off — it needs an explicit risk acknowledgement and uses the same rollback.
 
-Everything works standalone through `asc firewall …`; the AdminService.Cloud platform uses the same API ([🧩 node-modules](../../../asc-platform/docs/features/node-modules.md)). The command needs the running daemon, because the rollback timer lives inside it. Only the system (root) daemon manages the firewall.
+Everything works standalone through `asc firewall …`; the AdminService.Cloud platform uses the same API (🧩 node-modules). The command needs the running daemon, because the rollback timer lives inside it. Only the system (root) daemon manages the firewall.
 
 ## 🎯 Scenarios
 
@@ -99,12 +99,6 @@ Capabilities in `GetStatus`: `firewall`, `firewall.raw`. All calls are root-only
 
 `asc firewall status | install | enable | disable | allow | deny | rules | remove | set | settings | render | apply | confirm | rollback | ruleset | tables`. Command reference: <https://docs.adminservice.cloud/commands/firewall>.
 
-## 🔗 Related tasks
-
-| ID | What |
-|---|---|
-| DMN-148 | Module: model, rendering, persistence, conflict detection |
-| DMN-149 | Apply with automatic rollback and RAW mode |
-| DMN-151 | CLI, translations, documentation mirror |
+## 🔗 Related
 
 See also: [🚫 fail2ban](fail2ban.md) — it bans through its own nftables table next to `inet asc`; [🌐 webserver](webserver.md) — the installer only hints about the firewall and does not change it.

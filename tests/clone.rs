@@ -1,4 +1,4 @@
-//! `asc app clone` (DMN-019): a full copy of an app instance under a new id,
+//! `asc app clone`: a full copy of an app instance under a new id,
 //! with a fresh runtime reprovisioned from the copy.
 
 use std::fs;
@@ -74,7 +74,7 @@ fn clone_copies_data_and_reprovisions_under_a_new_id() {
     .unwrap();
     assert!(last.1 > 0 && last.0 == last.1, "expected 100%: {last:?}");
 
-    // DMN-033 numbering: the source occupies 'demo', so the clone is 'demo-2'
+    // Install numbering: the source occupies 'demo', so the clone is 'demo-2'
     // and its id doubles as the display name (no --name given).
     assert_eq!(clone_meta.id, "demo-2");
     assert_eq!(clone_meta.custom_name.as_deref(), Some("demo-2"));
@@ -98,7 +98,7 @@ fn clone_copies_data_and_reprovisions_under_a_new_id() {
         "progress=42"
     );
     assert!(clone_dir.join("repository/asc.yaml").exists());
-    // Setting values are copied, the source's meta is not (DMN-139 layout).
+    // Setting values are copied, the source's meta is not (`.asc/` layout).
     assert!(clone_dir.join(".asc/settings.json").is_file());
     assert!(AppMeta::path(&clone_dir).is_file());
     assert!(!clone_dir.join("config").exists());

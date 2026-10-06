@@ -1,4 +1,4 @@
-//! The node's web server (DMN-122..DMN-125): nginx installed in `system` or
+//! The node's web server: nginx installed in `system` or
 //! `docker` mode, virtual hosts ("sites") proxying to apps or addresses,
 //! Let's Encrypt certificates issued and renewed by the daemon, provided
 //! certificates, and Cloudflare real IP. See docs/english/webserver.md.
@@ -84,7 +84,7 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))
 }
 
-/// How much of a log's end `ReadSiteLog` looks at (DMN-128).
+/// How much of a log's end `ReadSiteLog` looks at.
 const LOG_WINDOW: u64 = 8 * 1024 * 1024;
 /// Lines `ReadSiteLog` returns by default and at most.
 const LOG_TAIL_DEFAULT: usize = 200;
@@ -142,7 +142,7 @@ pub fn read_log_tail(path: &Path, tail: usize, query: &str) -> Result<(Vec<Strin
     Ok((picked, size, start > 0))
 }
 
-/// Rotation for the site logs (DMN-128): nginx keeps them open, so the files
+/// Rotation for the site logs: nginx keeps them open, so the files
 /// are copied and truncated in place — no signal, which works the same for
 /// the host nginx and the container. Written once; an operator's edits stay.
 pub(crate) fn ensure_logrotate(paths: &Paths) {
@@ -155,7 +155,7 @@ pub(crate) fn ensure_logrotate(paths: &Paths) {
         return;
     }
     let body = format!(
-        "# asc-daemon: per-site nginx logs (DMN-128).\n{}/*.log {{\n    daily\n    rotate 14\n    missingok\n    notifempty\n    compress\n    delaycompress\n    copytruncate\n}}\n",
+        "# asc-daemon: per-site nginx logs.\n{}/*.log {{\n    daily\n    rotate 14\n    missingok\n    notifempty\n    compress\n    delaycompress\n    copytruncate\n}}\n",
         model::LOG_DIR
     );
     if let Err(err) = write_atomic(&file, body.as_bytes(), 0o644) {
@@ -196,7 +196,7 @@ pub struct WebServer {
     config: Config,
     lock: Mutex<()>,
     wake: tokio::sync::Notify,
-    /// Live health of upstream servers (DMN-126).
+    /// Live health of upstream servers.
     health: health::Registry,
 }
 
@@ -578,7 +578,7 @@ impl WebServer {
         Ok(true)
     }
 
-    /// The tail of a site's own access or error log (DMN-128).
+    /// The tail of a site's own access or error log.
     pub fn read_site_log(
         &self,
         id: &str,
@@ -613,7 +613,7 @@ impl WebServer {
         })
     }
 
-    /// Publishes the daemon API through nginx on `domain` (DMN-129): the
+    /// Publishes the daemon API through nginx on `domain`: the
     /// `asc-api` site, owned by [`model::API_SITE_OWNER`] so the platform's
     /// `ReplaceSites` never touches it. `certificate` — a PEM pair to serve;
     /// `None` — Let's Encrypt.
@@ -964,7 +964,7 @@ impl WebServer {
 /// server must not reload nginx every second.
 const HEALTH_REAPPLY_DEBOUNCE: Duration = Duration::from_secs(3);
 
-/// The health-check loop (DMN-126): once a second, probe what is due; when a
+/// The health-check loop: once a second, probe what is due; when a
 /// server flips in or out of rotation, re-render and reload (debounced).
 async fn health_loop(web: Arc<WebServer>) {
     let mut pending = false;

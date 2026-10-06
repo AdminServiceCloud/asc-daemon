@@ -81,7 +81,3 @@ If connection fails, first run `asc status`, then check the daemon service and
 configured socket path. If `asc` is not found, install ASC or use its absolute
 path in the client configuration. Do not grant root just to make a user's app
 visible: verify that the app was installed under that user's UID instead.
-
-## 🔗 Related tasks
-
-DMN-013, AI-001, AI-002 and AI-003 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

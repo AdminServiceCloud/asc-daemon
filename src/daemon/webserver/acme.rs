@@ -1,4 +1,4 @@
-//! Let's Encrypt for the web server's sites (DMN-124): ACME (RFC 8555)
+//! Let's Encrypt for the web server's sites: ACME (RFC 8555)
 //! with the HTTP-01 challenge answered from the nginx webroot.
 //!
 //! Before an order is placed, every name is self-checked: a probe file is

@@ -1,4 +1,4 @@
-//! Console log sources for non-Docker runtimes (DMN-007).
+//! Console log sources for non-Docker runtimes.
 //!
 //! Docker containers stream through the Engine API (see
 //! [`crate::daemon::docker`]); systemd units and plain processes stream from
@@ -23,7 +23,7 @@ use crate::daemon::{compose, docker};
 /// for: bounds the read when the current run has written a lot.
 const PROCESS_BACKLOG_WINDOW_BYTES: u64 = 256 * 1024;
 
-/// Where the app's current run begins in its log source (DMN-116). Every
+/// Where the app's current run begins in its log source. Every
 /// runtime here appends each run to one shared log — the journal, `app.log`,
 /// the containers' Engine logs — so without this the console's initial tail
 /// reaches back into earlier runs, and a restart shows the old output again.
@@ -209,7 +209,7 @@ fn build_logs_command(
             bail!("docker logs stream over the Engine API, not a subprocess")
         }
         // A compose project has no single container for exec/attach to
-        // address (DMN-108), but its logs are already multiplexed and
+        // address, but its logs are already multiplexed and
         // service-prefixed by the plugin itself — the one console feature
         // that works exactly the same as any other runtime's live log.
         Runtime::Compose {

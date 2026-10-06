@@ -1,4 +1,4 @@
-//! gRPC transport for BackupService and ScheduleService (DMN-114/DMN-115):
+//! gRPC transport for BackupService and ScheduleService:
 //! proto ↔ domain conversions around the shared [`ApiState`] methods in
 //! [`super::backups`].
 

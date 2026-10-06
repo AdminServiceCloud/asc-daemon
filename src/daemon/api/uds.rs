@@ -1,4 +1,4 @@
-//! Local unix-socket API listener (DMN-042): the same REST + gRPC router as
+//! Local unix-socket API listener: the same REST + gRPC router as
 //! the TCP listener, but authenticated by **SO_PEERCRED** instead of the
 //! bearer token — the kernel reports the connecting process's uid, and the
 //! daemon builds the per-user [`UserContext`] from it on its own side.
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(sudo_hint(&headers).0, None);
     }
 
-    /// DMN-070 regression for the F1 hazard: this socket is world-connectable
+    /// Regression for the F1 hazard: this socket is world-connectable
     /// (0666) and normally safe because every operation is scoped by the
     /// peer's own uid. `FileService` reaches the whole filesystem as root, so
     /// it must refuse a non-root peer outright rather than inherit that rule.

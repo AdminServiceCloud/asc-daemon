@@ -52,7 +52,3 @@ Implemented in `src/daemon/scheduler/` (`mod.rs` — syntax and the loop, `jobs.
 ### 📝 Next increments
 
 - One-off delayed jobs; priorities and serializing mutually exclusive operations on one app; daemon auto-update waiting for an empty queue.
-
-## 🔗 Related tasks
-
-DMN-012, DMN-114, DMN-009, TASK-001, TASK-003, NODE-050, BE-005 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

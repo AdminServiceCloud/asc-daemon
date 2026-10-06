@@ -1,4 +1,4 @@
-//! Compose driver: manages a `docker compose` project (DMN-108) through the
+//! Compose driver: manages a `docker compose` project through the
 //! CLI plugin (see [`crate::daemon::compose`]), never through bollard — a
 //! compose project is exactly what this daemon deliberately does not model
 //! on top of the Engine API itself.

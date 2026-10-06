@@ -1,4 +1,4 @@
-//! The managed model as nft text (DMN-148). A pure function of the model,
+//! The managed model as nft text. A pure function of the model,
 //! the host facts and the current time: same input, same bytes, so the
 //! "unapplied changes" check is a string comparison.
 //!

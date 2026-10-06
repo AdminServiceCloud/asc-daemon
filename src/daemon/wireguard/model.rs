@@ -1,4 +1,4 @@
-//! The WireGuard model (DMN-152): an interface with its peers, what makes
+//! The WireGuard model: an interface with its peers, what makes
 //! each part valid, and handing out addresses to new peers. The `.conf` file
 //! is the source of truth; `conf.rs` reads and writes it.
 

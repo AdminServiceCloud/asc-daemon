@@ -85,7 +85,3 @@ asc completion fish | sudo tee /usr/share/fish/vendor_completions.d/asc.fish # f
 ```
 
 A new shell picks them up; bash-completion loads its file lazily, on the first `asc<Tab>`.
-
-## 🔗 Related tasks
-
-DMN-055 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

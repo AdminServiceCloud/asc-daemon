@@ -147,7 +147,7 @@ fn ambiguous_package_requires_source_choice() {
     assert!(err.to_string().contains("ghost"), "got: {err:#}");
 
     // Explicit source pins the registry; an explicit version pins the tag
-    // (without it, install would resolve the repo's newest tag, DMN-047).
+    // (without it, install would resolve the repo's newest tag).
     let pkg::InstallOutcome::App(report) = pkg::install(
         &config,
         &ctx,

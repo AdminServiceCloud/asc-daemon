@@ -1,4 +1,4 @@
-//! Apply the current setting values to an app's runtime (DMN-017, DMN-030).
+//! Apply the current setting values to an app's runtime.
 //!
 //! A Docker container's configuration is fixed at creation, so changed
 //! settings — env, published ports, volumes, the quota override or the
@@ -77,7 +77,7 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
 
 /// Whether the current settings.json, applied to a *running* Docker app,
 /// would drift from the live container — i.e. whether a settings write
-/// (DMN-078's `SetAppSettings`) should report `restart_required`. Does not
+/// (`SetAppSettings`) should report `restart_required`. Does not
 /// touch the container; the caller is expected to only call this while the
 /// app is running (a stopped app's changes simply apply on the next start,
 /// no separate restart needed). Non-Docker runtimes and a missing container
@@ -115,11 +115,11 @@ struct Desired {
     /// The interpolated start command, when one applies.
     command: Option<String>,
     /// Local id of the image the app's reference points at now. A tag
-    /// re-pulled since the container was created (DMN-120) points at a new
+    /// re-pulled since the container was created points at a new
     /// id — the container is recreated onto it, like `docker compose up`.
     /// `None` when the image is not on the host: nothing to compare.
     image_id: Option<String>,
-    /// What the `$gpus` selection needs from the container (DMN-143). A
+    /// What the `$gpus` selection needs from the container. A
     /// changed selection is drift like any other setting; a selected card
     /// that is gone fails `load`, so the start proceeds with the container
     /// as it is and the Engine reports the missing device itself.
@@ -136,7 +136,7 @@ impl Desired {
         let (manifest_dir, _) = locate_installed(config, meta, app_dir)?;
         let (manifest, settings) = dockerfile::resolve_installed(meta, &manifest_dir)?;
         let config_dir = crate::daemon::apps::layout::settings_dir(app_dir);
-        // Capped to the host's cores exactly as at install (DMN-099): the
+        // Capped to the host's cores exactly as at install: the
         // Engine rejects NanoCpus above nproc, so an unclamped quota here
         // both read as drift against the capped container and recreated it
         // into a 400 — an app installed "anyway" could never start again.
@@ -167,9 +167,9 @@ impl Desired {
             .collect();
         ports.sort();
         ports.dedup();
-        // Owner uid/gid for the volume pre-chown (DMN-038), from the image
+        // Owner uid/gid for the volume pre-chown, from the image
         // this app runs: a prebuilt one is pulled so it can be inspected; a
-        // locally built one (DMN-050) already exists on the host from install,
+        // locally built one already exists on the host from install,
         // so it is only inspected — rebuilding just to read its USER would be
         // wasteful before the drift check even decides on a recreate.
         let image = effective_image_ref(&manifest, image_source, &meta.id);

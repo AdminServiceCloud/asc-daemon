@@ -1,5 +1,5 @@
-//! End-to-end install from a bare `docker-compose.yml` with no `asc.yaml`
-//! (DMN-108). Gated behind `ASC_DAEMON_TEST_DOCKER=1` since it needs a live
+//! End-to-end install from a bare `docker-compose.yml` with no `asc.yaml`.
+//! Gated behind `ASC_DAEMON_TEST_DOCKER=1` since it needs a live
 //! Docker daemon **and** the `docker compose` CLI plugin — mirrors
 //! `tests/install_dockerfile.rs`.
 
@@ -93,7 +93,7 @@ fn install_from_a_bare_compose_file_runs_the_project() {
         panic!("expected a compose runtime, got {:?}", meta.runtime);
     };
     assert_eq!(project.as_str(), "asc-demo");
-    // Created but not started (DMN-108's provisioning contract, matching a
+    // Created but not started (the provisioning contract, matching a
     // normal Docker app's `docker_create`).
     assert_eq!(
         manager.status(&ctx, "demo").unwrap().state,

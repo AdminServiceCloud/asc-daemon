@@ -1,4 +1,4 @@
-//! fail2ban API (DMN-150): the service layer over
+//! fail2ban API: the service layer over
 //! [`crate::daemon::fail2ban::Fail2ban`] shared by both transports, the gRPC
 //! `Fail2banService` and the REST routes the CLI uses. Every call is
 //! root-only: a non-root unix-socket peer is refused before anything runs.

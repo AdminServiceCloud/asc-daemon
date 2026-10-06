@@ -69,7 +69,3 @@ asc-updater status [--json]                     # версии: установл
 ```
 
 При ошибке утилита записывает событие с `type: "error"` и `stage: "error"`, после чего завершается с ненулевым кодом. Поля `percent` и `version` в событии ошибки отсутствуют.
-
-## 🔗 Связанные задачи
-
-DMN-001, DMN-014, DMN-064 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

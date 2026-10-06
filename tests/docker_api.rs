@@ -48,7 +48,7 @@ fn spawn_mock(socket: PathBuf) -> Hits {
                     let path = parts.next().unwrap_or("");
                     hits.lock().unwrap().push(format!("{method} {path}"));
                     // Registry credentials travel as a base64 X-Registry-Auth
-                    // header (DMN-046); record it so tests can assert on it.
+                    // header; record it so tests can assert on it.
                     if let Some(value) = head
                         .lines()
                         .find(|l| l.to_ascii_lowercase().starts_with("x-registry-auth:"))
@@ -95,7 +95,7 @@ fn spawn_mock(socket: PathBuf) -> Hits {
 /// until the image has been pulled, exercising the auto-pull retry.
 fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String) {
     let path = raw_path.split('?').next().unwrap_or(raw_path);
-    // DMN-104/DMN-105 host inventory & cleanup — matched before the
+    // Host inventory & cleanup — matched before the
     // `/containers/create` and generic `/json`/`DELETE` arms below, since
     // `/images/json` would otherwise fall through to the container-inspect
     // fallback and `DELETE /images/<id>` needs its own body shape
@@ -177,7 +177,7 @@ fn route(method: &str, raw_path: &str, seen: &[String]) -> (&'static str, String
     ("404 Not Found", r#"{"message":"unhandled"}"#.into())
 }
 
-/// Fixture for `GET /containers/json` (DMN-102): one container that belongs
+/// Fixture for `GET /containers/json`: one container that belongs
 /// to an ASC app, one raised by Compose, one stopped and unpublished.
 const CONTAINER_LIST: &str = r#"[
   {
@@ -218,7 +218,7 @@ const CONTAINER_LIST: &str = r#"[
   }
 ]"#;
 
-/// Fixture for `GET /images/json` (DMN-104): one image an installed app
+/// Fixture for `GET /images/json`: one image an installed app
 /// would run, one dangling (untagged) image.
 const IMAGE_LIST: &str = r#"[
   {
@@ -245,7 +245,7 @@ const IMAGE_LIST: &str = r#"[
   }
 ]"#;
 
-/// Fixture for `GET /volumes` (DMN-104): one volume an installed app would
+/// Fixture for `GET /volumes`: one volume an installed app would
 /// declare, one unrelated.
 const VOLUME_LIST: &str = r#"{
   "Volumes": [
@@ -270,13 +270,13 @@ const VOLUME_LIST: &str = r#"{
   ]
 }"#;
 
-/// Fixture for `GET /networks` (DMN-104).
+/// Fixture for `GET /networks`.
 const NETWORK_LIST: &str = r#"[
   {"Id": "net1", "Name": "bridge", "Driver": "bridge", "Scope": "local", "Internal": false},
   {"Id": "net2", "Name": "shop_default", "Driver": "bridge", "Scope": "local", "Internal": false}
 ]"#;
 
-/// Fixture for `GET /system/df` (DMN-104).
+/// Fixture for `GET /system/df`.
 const DISK_USAGE: &str = r#"{
   "ImageUsage": {"ActiveCount": 1, "TotalCount": 2, "Reclaimable": 52428800, "TotalSize": 157286400},
   "ContainerUsage": {"ActiveCount": 2, "TotalCount": 3, "Reclaimable": 0, "TotalSize": 0},
@@ -327,7 +327,7 @@ fn lifecycle_over_engine_api() {
     assert!(seen.iter().any(|h| h.starts_with("DELETE")));
 }
 
-/// DMN-046: a registry credential must reach the Engine as X-Registry-Auth,
+/// a registry credential must reach the Engine as X-Registry-Auth,
 /// which is what lets it pull a private image on the daemon's behalf.
 #[test]
 fn pull_sends_registry_credentials() {
@@ -455,7 +455,7 @@ fn create_sends_container_spec() {
     );
 }
 
-/// DMN-143: selected GPUs reach the Engine as a `DeviceRequest` (NVIDIA) and
+/// selected GPUs reach the Engine as a `DeviceRequest` (NVIDIA) and
 /// one-to-one device mappings (AMD/Intel).
 #[test]
 fn create_attaches_the_selected_gpus() {
@@ -540,7 +540,7 @@ fn engine_errors_are_not_reported_as_unreachable() {
     );
 }
 
-/// DMN-017/030: a stopped container whose configuration (env, ports, quota
+/// a stopped container whose configuration (env, ports, quota
 /// override…) drifted from settings.json is recreated on refresh; a
 /// matching configuration is left alone.
 #[test]
@@ -627,7 +627,7 @@ fn settings_drift_recreates_the_container() {
         "drifted env must create a fresh container, saw: {seen:?}"
     );
 
-    // Changed published ports drift too (DMN-030).
+    // Changed published ports drift too.
     std::fs::write(
         app_dir.join(".asc/settings.json"),
         r#"{"map":"de_dust2","game_port":[27016]}"#,
@@ -650,7 +650,7 @@ fn settings_drift_recreates_the_container() {
         "meta.quota must reflect the applied override"
     );
 
-    // DMN-052: the package now fixes the container side, so only the *host*
+    // the package now fixes the container side, so only the *host*
     // port moves. The Engine's own key ("27015/tcp") is identical before and
     // after — the drift check must compare the host side too, or the app
     // would keep answering on the port the user just left behind.
@@ -783,7 +783,7 @@ fn container_list_leaves_missing_sizes_unset() {
     assert!(containers.iter().all(|c| c.size_root_fs.is_none()));
 }
 
-/// DMN-104: `GET /images/json`, `GET /volumes`, `GET /networks` and
+/// `GET /images/json`, `GET /volumes`, `GET /networks` and
 /// `GET /system/df` all parse into the daemon's own forms.
 #[test]
 fn host_inventory_parses_images_volumes_networks_and_disk_usage() {
@@ -813,7 +813,7 @@ fn host_inventory_parses_images_volumes_networks_and_disk_usage() {
     assert_eq!(usage.build_cache.reclaimable_bytes, 1048576);
 }
 
-/// Installs a minimal docker-runtime app for DMN-105's protected-set scan
+/// Installs a minimal docker-runtime app for the protected-set scan
 /// (`AppManager::list` + `pkg::docker_footprint`) to find — no settings, just
 /// the manifest's `runtime.image`.
 fn install_docker_app(config: &asc_daemon::daemon::config::Config, id: &str, image: &str) {
@@ -865,7 +865,7 @@ fn root_ctx() -> asc_daemon::daemon::apps::UserContext {
     }
 }
 
-/// DMN-105: an image an installed app runs — running or not — must never be
+/// an image an installed app runs — running or not — must never be
 /// removed, dry_run or not, and the dangling one is reported as removable.
 #[tokio::test]
 async fn prune_images_dry_run_protects_installed_apps_image() {
@@ -916,7 +916,7 @@ async fn prune_images_dry_run_protects_installed_apps_image() {
     );
 }
 
-/// DMN-105: a real prune removes an unprotected image one at a time (a
+/// a real prune removes an unprotected image one at a time (a
 /// per-id DELETE) and never calls the Engine's bulk `/images/prune`.
 #[tokio::test]
 async fn prune_images_real_run_removes_one_at_a_time() {
@@ -957,7 +957,7 @@ async fn prune_images_real_run_removes_one_at_a_time() {
     );
 }
 
-/// DMN-105: a named volume an installed app declares must never be removed.
+/// a named volume an installed app declares must never be removed.
 #[tokio::test]
 async fn prune_volumes_protects_a_declared_named_volume() {
     use asc_daemon::daemon::api::{ApiState, PruneTarget};

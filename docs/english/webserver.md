@@ -4,7 +4,7 @@
 
 ## 📌 Description
 
-The `webserver` module installs a web server on the node and manages it. The first engine is **nginx**. Through it the daemon publishes apps on domains (reverse proxy), issues and renews Let's Encrypt certificates on its own, accepts ready-made certificates, and can pass visitors' real IPs through Cloudflare. Everything works standalone through `asc web …`. The AdminService.Cloud platform uses the same API and distributes sites as desired state ([🌐 web-server](../../../asc-platform/docs/features/web-server.md)).
+The `webserver` module installs a web server on the node and manages it. The first engine is **nginx**. Through it the daemon publishes apps on domains (reverse proxy), issues and renews Let's Encrypt certificates on its own, accepts ready-made certificates, and can pass visitors' real IPs through Cloudflare. Everything works standalone through `asc web …`. The AdminService.Cloud platform uses the same API and distributes sites as desired state (🌐 web-server).
 
 Only the system (root) daemon manages a web server.
 
@@ -67,13 +67,13 @@ acme_directory = ""         # empty — Let's Encrypt production
 custom_main = ""            # inserted into the main context
 custom_http = ""            # inserted into http {}
 
-[default_site]              # what :80 answers for names no site claims (DMN-130)
+[default_site]              # what :80 answers for names no site claims
 mode = "drop"               # drop (444) | page | root | redirect
 root = ""                   # root: an absolute host directory
 redirect_url = ""           # redirect: an http(s) URL (302)
 page_html = ""              # page: your HTML; empty — the built-in stub
 
-[error_pages]               # branded pages for errors nginx produces (DMN-130)
+[error_pages]               # branded pages for errors nginx produces
 enabled = true
 intercept_upstream = false  # true — also replace the apps' own errors
 [error_pages.custom]        # status → HTML; missing codes get the built-in page
@@ -86,7 +86,7 @@ pid = "/run/nginx.pid"
 
 Changed through the API (`UpdateWebServerSettings`): new settings go through `nginx -t` first and are saved only if it passes.
 
-### 🚪 Default site and error pages (DMN-130)
+### 🚪 Default site and error pages
 
 **Default site** — the `default_server` on :80 answers every name no site claims (a bare IP, a stale DNS record, a scanner). ACME challenges are answered there in every mode.
 
@@ -172,7 +172,7 @@ Header values may not contain quotes, `;`, `{`, `}`, backslashes or control char
 - The certificate key is generated on the node and never leaves it. The account is created once per ACME directory, with `acme_email` as the contact.
 - `acme_directory` can be overridden: Let's Encrypt staging for tests, or another ACME provider.
 
-### 🩺 Health checks (DMN-126)
+### 🩺 Health checks
 
 A site's upstream can carry an active check: `health_check` of kind `tcp` (a connect) or `http` (a GET of a path, an expected status or any 2xx/3xx), with an interval (5 s), a timeout (2 s), failures to leave rotation (3) and passes to return (2). The daemon probes every server directly, not through nginx, so a server taken out keeps being probed and comes back on its own. A failing server gets `down` in the upstream; changes are applied through `nginx -t` and a reload at most once every 3 seconds. When every server fails, none is taken out: an empty upstream is worse than letting nginx try. State lives in memory and is reported in the site status (`upstream_health`: healthy or not, last error, latency). HTTPS checks do not verify certificates, since servers are addressed by IP.
 
@@ -190,11 +190,11 @@ Every 10 minutes, and right after sites with Let's Encrypt change:
 
 `snippets/cloudflare-realip.conf` holds `set_real_ip_from` for every Cloudflare range, `real_ip_header CF-Connecting-IP` and `real_ip_recursive on`. The list is refreshed daily from `https://www.cloudflare.com/ips-v4` and `/ips-v6`. Every line is validated as a CIDR, and any invalid line discards the whole response, so an error page or captive portal never becomes the list of trusted proxies. A fallback list is embedded in the binary. The snippet is included in `http {}` (`cloudflare_real_ip = true`) or in one site's `server {}`.
 
-### 📜 Site logs (DMN-128)
+### 📜 Site logs
 
 Every site writes its own logs: `/var/log/asc/webserver/<id>.access.log` (`asc` format) and `<id>.error.log` (`warn`), in both `server {}` blocks. Each can be turned off (`Site.access_log_off` / `Site.error_log_off` — negated so an older client keeps them on): `access_log off;` and `error_log /dev/null crit;`. The directory is created before `nginx -t`; in docker mode it is bound into the container under the same path (a container created earlier is recreated once). Rotation: `/etc/logrotate.d/asc-webserver` (daily, 14 archives, `copytruncate`). `ReadSiteLog(id, kind, tail, query)` reads at most the last 8 MiB, filters case-insensitively and returns up to `tail` lines (default 200, max 5000). Capability `webserver.logs`.
 
-### 🔌 The daemon's own API site (DMN-129)
+### 🔌 The daemon's own API site
 
 `TokenService.SetApiProxy(domain, certificate?)` publishes the daemon API through nginx as site `asc-api` (`managed_by = "daemon-api"`, never touched by the platform's `ReplaceSites`): :80 only redirects to HTTPS, :443 always speaks HTTP/2, gRPC goes to `grpc_pass` through a named location, REST and the WebSocket console to `proxy_pass` (hour-long timeouts, no buffering). HTTPS is Let's Encrypt or the PEM passed in. `RemoveApiProxy` takes it down. Primary token only; capability `api.proxy`.
 
@@ -212,7 +212,7 @@ Every site writes its own logs: `/var/log/asc/webserver/<id>.access.log` (`asc` 
 | `ReplaceSites` / `UpsertSite` / `RemoveSite` | `PUT`/`DELETE /v1/webserver/sites/{id}` | sites desired state |
 | `RenderSite` | — | render a site without applying it (UI preview) |
 | `RenewCertificate` | `POST /v1/webserver/sites/{id}/renew` | order right away |
-| `ProbeTcp` | — | a TCP connect from the node to an address (DMN-126) |
+| `ProbeTcp` | — | a TCP connect from the node to an address |
 
 Capability in `GetStatus`: `webserver`.
 
@@ -232,7 +232,3 @@ asc web site renew <id>
 ```
 
 With no daemon running, the commands work in-process as root.
-
-## 🔗 Related tasks
-
-DMN-122, DMN-123, DMN-124, DMN-125, DMN-126 (health checks for the load balancer), DMN-130 (default site and error pages), DMN-067 (ACME for the daemon API) in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

@@ -1,4 +1,4 @@
-//! Web server API (DMN-122..DMN-125): the service layer over
+//! Web server API: the service layer over
 //! [`crate::daemon::webserver::WebServer`] shared by both transports, the
 //! gRPC `WebServerService` and the REST routes the CLI uses. Every call is
 //! root-only: a non-root unix-socket peer is refused before anything runs.
@@ -69,7 +69,7 @@ impl ApiState {
 }
 
 impl ApiState {
-    /// Publishes the API through the node's nginx (DMN-129). The upstream is
+    /// Publishes the API through the node's nginx. The upstream is
     /// the API listener on loopback; when the listener itself runs TLS, nginx
     /// talks TLS to it.
     pub(super) async fn set_api_proxy(

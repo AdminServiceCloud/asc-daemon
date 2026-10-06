@@ -1,4 +1,4 @@
-//! Daemon API (DMN-005): gRPC (tonic; wire-compatible with the platform's
+//! Daemon API: gRPC (tonic; wire-compatible with the platform's
 //! ConnectRPC clients) and REST (JSON) served **together on one listener**,
 //! both calling the same service layer and sharing bearer-token auth.
 //!
@@ -48,7 +48,7 @@ use console::ConsoleTokens;
 use tokens::TokenStore;
 
 /// Optional features this daemon build supports, reported by `GetStatus`
-/// (DMN-076) so a caller can gate UI on what actually works instead of
+/// so a caller can gate UI on what actually works instead of
 /// discovering it by hitting `UNIMPLEMENTED`. Append a value here in the same
 /// change that ships the matching capability; never remove or rename a value
 /// once released — older platform builds may still be checking for it.
@@ -77,32 +77,32 @@ pub const CAPABILITIES: &[&str] = &[
     "webserver.logs",
     "api.certificate",
     "api.proxy",
-    // DMN-135: GetMonitorSettings/SetMonitorSettings.
+    // GetMonitorSettings/SetMonitorSettings.
     "monitor.settings",
-    // DMN-137: closing an install/upgrade/repull stream cancels the work.
+    // closing an install/upgrade/repull stream cancels the work.
     "app.install.cancel",
-    // DMN-138: asc.settings.yaml `setup:`, InstallAppRequest.defer_start,
+    // asc.settings.yaml `setup:`, InstallAppRequest.defer_start,
     // InspectPackageResponse.settings_json.
     "app.setup",
-    // DMN-140: ListAppVersionsResponse.branches, UpgradeAppRequest.branch/tag.
+    // ListAppVersionsResponse.branches, UpgradeAppRequest.branch/tag.
     "app.upgrade.ref",
-    // DMN-142: MonitorService.GetHardwareInfo, GET /v1/hardware.
+    // MonitorService.GetHardwareInfo, GET /v1/hardware.
     "hardware",
-    // DMN-144: SystemMetrics.temperatures / fans.
+    // SystemMetrics.temperatures / fans.
     "sensors",
-    // DMN-143: the reserved `$gpus` app setting.
+    // the reserved `$gpus` app setting.
     "app-gpus",
-    // DMN-148/DMN-149: FirewallService (nftables, automatic rollback), RAW mode.
+    // FirewallService (nftables, automatic rollback), RAW mode.
     "firewall",
     "firewall.raw",
-    // DMN-150: Fail2banService.
+    // Fail2banService.
     "fail2ban",
-    // DMN-152: WireguardService.
+    // WireguardService.
     "wireguard",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
-/// `docker compose` plugin is actually available (DMN-109) — unlike every
+/// `docker compose` plugin is actually available — unlike every
 /// other entry in [`CAPABILITIES`], that one depends on a runtime probe, not
 /// just the daemon build, so it cannot live in the static list itself.
 pub fn capabilities(docker: &crate::daemon::config::DockerConfig) -> Vec<&'static str> {
@@ -123,18 +123,18 @@ pub struct ApiState {
     /// System metrics ring buffer, filled by the daemon's sampler task.
     pub monitor: Arc<Monitor>,
     /// The bearer tokens this daemon accepts: the long-lived primary and the
-    /// short-lived access tokens minted from it (DMN-065).
+    /// short-lived access tokens minted from it.
     pub tokens: TokenStore,
-    /// The node's web server and its sites (DMN-122).
+    /// The node's web server and its sites.
     pub webserver: Arc<crate::daemon::webserver::WebServer>,
-    /// The node's firewall (DMN-148).
+    /// The node's firewall.
     pub firewall: Arc<crate::daemon::firewall::Firewall>,
-    /// The node's fail2ban (DMN-150).
+    /// The node's fail2ban.
     pub fail2ban: Arc<crate::daemon::fail2ban::Fail2ban>,
-    /// The node's WireGuard tunnels (DMN-152).
+    /// The node's WireGuard tunnels.
     pub wireguard: Arc<crate::daemon::wireguard::Wireguard>,
-    /// The certificate the TLS listener serves, swappable at runtime
-    /// (DMN-127). Empty while the API is plain.
+    /// The certificate the TLS listener serves, swappable at runtime.
+    /// Empty while the API is plain.
     pub api_tls: tls::Live,
 }
 
@@ -173,7 +173,7 @@ pub struct ContainerRow {
     pub info: docker::ContainerInfo,
     /// Id of the installed app whose runtime is this container.
     pub app_id: Option<String>,
-    /// That app's stable uuid; absent for apps installed before DMN-044.
+    /// That app's stable uuid; absent for apps installed by an older version.
     pub app_uuid: Option<String>,
 }
 
@@ -225,7 +225,7 @@ fn cpu_percent_between(
     delta as f64 / elapsed_micros as f64 * 100.0
 }
 
-// ── Host inventory & cleanup (DMN-104/DMN-105) ──────────────────────────────
+// ── Host inventory & cleanup ──────────────────────────────
 
 /// One row of [`ApiState::list_images`].
 pub struct DockerImageRow {
@@ -305,7 +305,7 @@ pub enum PruneTarget {
     BuildCache,
 }
 
-/// What [`ApiState::control_container`] does (DMN-111) — mirrors the proto
+/// What [`ApiState::control_container`] does — mirrors the proto
 /// enum without its `UNSPECIFIED` variant, which the transports reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerAction {
@@ -457,8 +457,8 @@ pub struct PruneDockerRow {
 }
 
 /// Images and named volumes that [`ApiState::list_images`]/
-/// [`ApiState::list_volumes`]/[`ApiState::prune_docker`] must never remove
-/// (DMN-105): every installed app's currently effective image, and every
+/// [`ApiState::list_volumes`]/[`ApiState::prune_docker`] must never remove:
+/// every installed app's currently effective image, and every
 /// named volume its settings declare — regardless of whether the app is
 /// running. Protection matches on the exact reference string the app's
 /// manifest names (what [`docker::create`] actually passed to the Engine),
@@ -635,7 +635,7 @@ fn prune_build_cache_target(state: &ApiState, dry_run: bool) -> Result<PruneDock
     })
 }
 
-/// One row of [`ApiState::list_processes`] (DMN-119): the `/proc` reading
+/// One row of [`ApiState::list_processes`]: the `/proc` reading
 /// plus what only Docker and the app store can say about it.
 pub struct ProcessRow {
     pub info: crate::daemon::monitor::processes::ProcessInfo,
@@ -658,7 +658,7 @@ struct ProcessContainer {
     app_uuid: Option<String>,
 }
 
-/// One row of [`ApiState::listening_ports`] (DMN-103): a real host socket,
+/// One row of [`ApiState::listening_ports`]: a real host socket,
 /// or a declared-but-unbound port of a stopped app.
 pub struct ListeningPortRow {
     pub port: u16,
@@ -765,7 +765,7 @@ pub enum UpgradeStreamEvent {
 /// returns (the clone's meta and the bytes copied). Boxed: `AppMeta` is
 /// large enough on its own to make `Line(String)` the small variant
 /// (clippy::large_enum_variant), and this event is created once per stream.
-/// One event of [`ApiState::repull_stream`] (DMN-132): a progress line of the
+/// One event of [`ApiState::repull_stream`]: a progress line of the
 /// image pull, or the terminal result — the same `Result` the unary
 /// [`ApiState::repull_app`] returns (the outcome and whether the app was
 /// restarted onto the new image).
@@ -907,7 +907,7 @@ impl ApiState {
     }
 
     /// Map of compose project name -> (app id, app uuid) for every installed
-    /// compose app (DMN-108) the caller can see — the counterpart of
+    /// compose app the caller can see — the counterpart of
     /// [`Self::container_owners`] for apps that have no single container.
     fn compose_owners(
         &self,
@@ -958,7 +958,7 @@ impl ApiState {
         .await
     }
 
-    /// Image freshness of a Docker app (DMN-120): reference, version, local
+    /// Image freshness of a Docker app: reference, version, local
     /// vs registry digest, and whether the container runs the local image.
     /// `Ok(None)` for other runtimes.
     pub async fn app_image(
@@ -975,7 +975,7 @@ impl ApiState {
         .await
     }
 
-    /// Re-pull a Docker app's `latest` image (DMN-120) and, when the pull
+    /// Re-pull a Docker app's `latest` image and, when the pull
     /// brought a new image and the app is running, restart it — the restart
     /// recreates the container onto the new image through the settings-drift
     /// check. A stopped app picks the image up on its next start. Returns
@@ -1010,9 +1010,9 @@ impl ApiState {
         Ok((outcome, restarted))
     }
 
-    /// Streamed sibling of [`Self::repull_app`] (DMN-132), built exactly like
+    /// Streamed sibling of [`Self::repull_app`], built exactly like
     /// [`Self::upgrade_stream`]: the pull's progress lines, then the result.
-    /// A disconnect cancels the pull (DMN-137), like an install's.
+    /// A disconnect cancels the pull, like an install's.
     pub fn repull_stream(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -1025,7 +1025,7 @@ impl ApiState {
                 send_progress_line(&self.0, RepullStreamEvent::Line(text.to_string()));
             }
 
-            // DMN-137: the gRPC stream holding the receiver was dropped —
+            // the gRPC stream holding the receiver was dropped —
             // the caller cancelled (or went away); stop at the next checkpoint.
             fn cancelled(&self) -> bool {
                 self.0.is_closed()
@@ -1044,7 +1044,7 @@ impl ApiState {
     }
 
     /// Space taken by every app the caller may see, largest first, with the
-    /// capacity of the filesystem holding the app store (DMN-053). The sizes
+    /// capacity of the filesystem holding the app store. The sizes
     /// are the cheap directory walk `asc stats` uses — no image or volume
     /// breakdown, no Docker queries.
     pub async fn disk_summary(self: &Arc<Self>, ctx: UserContext) -> Result<DiskSummary> {
@@ -1077,7 +1077,7 @@ impl ApiState {
         .await
     }
 
-    /// The ports one app publishes (DMN-049), resolved from its settings —
+    /// The ports one app publishes, resolved from its settings —
     /// so a stopped app reports what it will bind on the next start.
     pub async fn app_ports(
         self: &Arc<Self>,
@@ -1124,7 +1124,7 @@ impl ApiState {
         self.blocking(move |s| s.manager.stats(&ctx)).await
     }
 
-    /// Resource consumption of `ids` only (DMN-080); empty means every app
+    /// Resource consumption of `ids` only; empty means every app
     /// the caller can see. See `AppManager::stats_for` for why the filter
     /// happens before sampling.
     pub async fn stats_for(
@@ -1136,7 +1136,7 @@ impl ApiState {
             .await
     }
 
-    /// Upgrade an app the caller owns (DMN-053): `spec` is its id or custom
+    /// Upgrade an app the caller owns: `spec` is its id or custom
     /// name, optionally `@version`. Cloning happens with the daemon's own git
     /// credentials, like an install over this API.
     pub async fn upgrade(
@@ -1153,7 +1153,7 @@ impl ApiState {
     /// [`UpgradeStreamEvent::Line`] as they happen, ending in one
     /// [`UpgradeStreamEvent::Done`] with the same result `upgrade` would
     /// have returned. Mirrors [`Self::install_stream`] exactly — dropping
-    /// the receiver cancels the upgrade at its next checkpoint (DMN-137).
+    /// the receiver cancels the upgrade at its next checkpoint.
     pub fn upgrade_stream(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -1167,7 +1167,7 @@ impl ApiState {
                 send_progress_line(&self.0, UpgradeStreamEvent::Line(text.to_string()));
             }
 
-            // DMN-137: the gRPC stream holding the receiver was dropped —
+            // the gRPC stream holding the receiver was dropped —
             // the caller cancelled (or went away); stop at the next checkpoint.
             fn cancelled(&self) -> bool {
                 self.0.is_closed()
@@ -1191,7 +1191,7 @@ impl ApiState {
 
     /// Shared by [`Self::clone_app`]/[`Self::clone_app_stream`]: resolves
     /// `reference` the caller owns and clones it under the next free
-    /// `<id>-N` (DMN-019/DMN-113), reporting the same `(copied, total)`
+    /// `<id>-N`, reporting the same `(copied, total)`
     /// progress `pkg::clone_app` does. Returns the clone's meta and the
     /// final bytes copied.
     fn clone_one(
@@ -1219,7 +1219,7 @@ impl ApiState {
         Ok((meta, copied_bytes))
     }
 
-    /// Clone an app the caller owns (DMN-019/DMN-113) into a new instance
+    /// Clone an app the caller owns into a new instance
     /// under the next free `<id>-N`, always stopped regardless of the
     /// source's state. `reference` is the source's id or custom name.
     pub async fn clone_app(
@@ -1238,7 +1238,7 @@ impl ApiState {
     /// stream), ending in one [`CloneStreamEvent::Done`] with the same
     /// result `clone_app` would have returned. Mirrors
     /// [`Self::install_stream`]/[`Self::upgrade_stream`] exactly — dropping
-    /// the receiver cancels the clone between copied files (DMN-137).
+    /// the receiver cancels the clone between copied files.
     pub fn clone_app_stream(
         self: &Arc<Self>,
         ctx: UserContext,
@@ -1299,9 +1299,9 @@ impl ApiState {
     }
 
     /// What a package repository ships — one app or a stack of them, with
-    /// the stack's apps and their declared requirements (DMN-098), the
+    /// the stack's apps and their declared requirements, the
     /// license an install would ask consent for and whether this host can
-    /// cover the requirements right now (DMN-131). A sparse, blobless
+    /// cover the requirements right now. A sparse, blobless
     /// snapshot into a temporary directory that is thrown away again: only
     /// the manifests and the license are downloaded, nothing is installed.
     /// The install dialog calls it before the one real install.
@@ -1336,12 +1336,12 @@ impl ApiState {
     /// LICENSE returns the typed [`pkg::LicenseRequired`] error — REST
     /// serializes it structurally (`license_required`) so the CLI over the
     /// unix socket can render its own consent prompt and retry; the gRPC
-    /// layer (`api::grpc::install_app`/`install_app_stream`, DMN-091) catches
+    /// layer (`api::grpc::install_app`/`install_app_stream`) catches
     /// the same error and turns it into a normal `InstallAppResponse` with
     /// `license_required` set, so the platform UI gets the same fields
     /// without it ever reaching a gRPC error status. Without `force`, a host
     /// that cannot currently cover the package's requirements or runtime
-    /// quota is caught the same way (DMN-099) — [`pkg::RequirementsNotMet`],
+    /// quota is caught the same way — [`pkg::RequirementsNotMet`],
     /// surfaced as `requirements_not_met` rather than `license_required`.
     #[allow(clippy::too_many_arguments)]
     pub async fn install(
@@ -1410,11 +1410,11 @@ impl ApiState {
         .await
     }
 
-    /// Streamed sibling of [`Self::install`] (DMN-090): the same install,
+    /// Streamed sibling of [`Self::install`]: the same install,
     /// but progress lines arrive as [`InstallStreamEvent::Line`] as they
     /// happen, ending in one [`InstallStreamEvent::Done`] with the same
     /// result `install` would have returned. Dropping the receiver cancels
-    /// the install (DMN-137): the platform's "cancel task" closes this
+    /// the install: the platform's "cancel task" closes this
     /// stream, and the work stops at its next checkpoint — the clone is
     /// killed, a pull or build abandoned, and the half-made app directory
     /// removed. Once the container exists the install finishes regardless.
@@ -1447,7 +1447,7 @@ impl ApiState {
                 send_progress_line(&self.0, InstallStreamEvent::Line(text.to_string()));
             }
 
-            // DMN-137: the gRPC stream holding the receiver was dropped —
+            // the gRPC stream holding the receiver was dropped —
             // the caller cancelled (or went away); stop at the next checkpoint.
             fn cancelled(&self) -> bool {
                 self.0.is_closed()
@@ -1646,7 +1646,7 @@ impl ApiState {
         .await
     }
 
-    /// An app's settings schema and the values chosen so far (DMN-043): what
+    /// An app's settings schema and the values chosen so far: what
     /// an editor running outside the daemon — the CLI of a user who cannot
     /// read the system app tree — needs to render the same menu it renders
     /// in-process. `None` for an app whose package defines no settings.
@@ -1672,7 +1672,7 @@ impl ApiState {
     /// The runtime picks them up on the next (re)start, exactly as it does
     /// after an in-process edit. Returns whether the app is currently
     /// running with a live configuration that would now drift from these
-    /// values — the caller (DMN-078's `SetAppSettings`) surfaces this as
+    /// values — the caller (`SetAppSettings`) surfaces this as
     /// "restart required"; a stopped app always answers `false`, since its
     /// values simply apply cleanly on the next start.
     pub async fn set_app_settings(
@@ -1685,7 +1685,7 @@ impl ApiState {
             let (file, _, config_dir) = s.settings_of(&ctx, &id)?;
             let defs = file.as_ref().map(|f| f.settings.as_slice()).unwrap_or(&[]);
             values.validate_against(defs)?;
-            // GPUs (DMN-143): only a Docker container can be handed a card,
+            // GPUs: only a Docker container can be handed a card,
             // and every address must resolve to a card this host can attach
             // — refuse here, while the caller is still looking at the form,
             // rather than at the next start.
@@ -1729,7 +1729,7 @@ impl ApiState {
         let app_dir = self.manager.store().app_dir(&meta.id)?;
         let config_dir = crate::daemon::apps::layout::settings_dir(&app_dir);
         let values = SettingValues::load(&config_dir)?;
-        // A compose app declares no settings at all (DMN-108) — an empty
+        // A compose app declares no settings at all — an empty
         // schema, not an error, same as a manifest with no `settings:`.
         if matches!(
             meta.runtime,
@@ -1757,7 +1757,7 @@ impl ApiState {
         Ok(self.console_tokens.issue(&app_id, session, command))
     }
 
-    // ── Registry sources & credentials (DMN-083/084/087) — pushed by the
+    // ── Registry sources & credentials — pushed by the
     // platform, see docs/custom-registry.md and docs/package-manager.md.
     // Every call below acts on Scope::System: the daemon process itself is
     // always root, so unlike AppManager there is no per-caller-uid
@@ -1861,13 +1861,13 @@ impl ApiState {
         Ok(())
     }
 
-    // ── Files (DMN-070): node filesystem access from "/", see docs/files.md.
+    // ── Files: node filesystem access from "/", see docs/files.md.
     // Every entry point starts with `files::require_root` — the unix socket
     // is otherwise world-connectable and authorizes purely by peer uid, a
     // rule this service must not inherit. The TCP transport (platform) is
     // unaffected: `api_context()` above already carries `is_root: true`.
     //
-    // With `app_id` set, a call is app-scoped instead (DMN-086): the caller
+    // With `app_id` set, a call is app-scoped instead: the caller
     // only needs to own the app (`AppManager::get_authorized`, the same
     // ownership check every other per-app method uses — root included), and
     // every path is confined to that app's directory and private volumes by
@@ -1875,8 +1875,7 @@ impl ApiState {
     // what rights the transport itself carries. That confinement is the
     // whole point: the TCP transport is always full-rights, so a platform
     // user with `apps.edit` but not `files.edit` must still be unable to
-    // reach anything outside their own app through this path. See
-    // `asc-platform/docs/features/app-file-manager.md`.
+    // reach anything outside their own app through this path..
 
     /// Root confinement for one call: `None` (unscoped) requires a root
     /// context, same as always; `Some(app_id)` requires only that the
@@ -2114,7 +2113,7 @@ impl ApiState {
         .await
     }
 
-    // ── Docker host inventory (DMN-102/DMN-112, see docs/app-management.md) ──
+    // ── Docker host inventory (see docs/app-management.md) ──
 
     /// Every container on the node's Docker Engine, with the ones belonging
     /// to installed ASC apps identified.
@@ -2217,7 +2216,7 @@ impl ApiState {
         .await
     }
 
-    /// Lifecycle control over containers ASC does not own (DMN-111): start,
+    /// Lifecycle control over containers ASC does not own: start,
     /// stop, restart, pause, unpause or remove one container, or every
     /// container of one compose project. Returns the names acted on.
     ///
@@ -2278,7 +2277,7 @@ impl ApiState {
         .await
     }
 
-    /// Every image on the host, ASC-owned or not (DMN-104), with the
+    /// Every image on the host, ASC-owned or not, with the
     /// protected ones (still run by an installed app) marked.
     pub async fn list_images(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<DockerImageRow>> {
         self.blocking(move |s| {
@@ -2312,7 +2311,7 @@ impl ApiState {
         .await
     }
 
-    /// Every named volume on the host (DMN-104), with the protected ones
+    /// Every named volume on the host, with the protected ones
     /// (still declared by an installed app's settings) marked.
     pub async fn list_volumes(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<DockerVolumeRow>> {
         self.blocking(move |s| {
@@ -2340,7 +2339,7 @@ impl ApiState {
         .await
     }
 
-    /// Every network on the host (DMN-104), inventory-only — see
+    /// Every network on the host, inventory-only — see
     /// [`Self::prune_docker`] for why networks are never a prune target.
     pub async fn list_networks(
         self: &Arc<Self>,
@@ -2364,7 +2363,7 @@ impl ApiState {
         .await
     }
 
-    /// Change the metrics sampler's cadences (DMN-135): validated, applied
+    /// Change the metrics sampler's cadences: validated, applied
     /// to the running sampler, then saved to `[monitor]` in config.toml.
     /// `None` keeps a value as it is. Root context only — the cadence is a
     /// host-wide setting, not a per-user one.
@@ -2393,7 +2392,7 @@ impl ApiState {
         .await
     }
 
-    /// `docker system df`'s four categories (DMN-104). Expensive — the
+    /// `docker system df`'s four categories. Expensive — the
     /// Engine walks every layer and volume to answer — so callers ask for it
     /// only when a user opens the Docker settings section, never on a poll.
     pub async fn docker_disk_usage(
@@ -2414,7 +2413,7 @@ impl ApiState {
     }
 
     /// Remove unused images/volumes/build cache, one item at a time rather
-    /// than the Engine's own bulk prune endpoints (DMN-105): an item an
+    /// than the Engine's own bulk prune endpoints: an item an
     /// installed app still needs — running or stopped — is protected and
     /// reported in `skipped` with why, never silently removed. `dry_run`
     /// computes the exact same plan without deleting anything.
@@ -2443,7 +2442,7 @@ impl ApiState {
     }
 
     /// Every real listening port on the host, merged with the two things
-    /// `/proc` cannot say (DMN-103): which Docker container owns a
+    /// `/proc` cannot say: which Docker container owns a
     /// `docker-proxy`/`dockerd` listener, and which ports a stopped app
     /// would bind on its next start.
     ///
@@ -2562,7 +2561,7 @@ impl ApiState {
         .await
     }
 
-    // ── Host processes (DMN-119, see docs/english/monitoring.md) ──
+    // ── Host processes (see docs/english/monitoring.md) ──
 
     /// Every process on the host (`ps`/`top`), with the Docker container a
     /// process runs in resolved to its name and, when that container is the
@@ -2636,7 +2635,7 @@ impl ApiState {
         .await
     }
 
-    /// Send `signal` to one host process (DMN-119). Root context only: the
+    /// Send `signal` to one host process. Root context only: the
     /// daemon itself runs as root, and a regular user on the unix socket
     /// must not borrow that to signal someone else's process. pid 1, the
     /// daemon itself and kernel threads are refused; `expected_start_ticks`
@@ -2658,7 +2657,7 @@ impl ApiState {
         .await
     }
 
-    // ── Local account management (DMN-100, see docs/user-management.md) ──
+    // ── Local account management (see docs/user-management.md) ──
 
     pub async fn list_users(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<users::ManagedUser>> {
         self.blocking(move |_| {
@@ -2995,7 +2994,7 @@ async fn serve_tls(
 ///
 /// Both token kinds authenticate the same way and get the same context; what
 /// separates them is the [`tokens::require_primary`] guard on the handful of
-/// token-management routes (DMN-065). The classification travels alongside
+/// token-management routes. The classification travels alongside
 /// the context so those handlers can consult it.
 async fn auth(state: Arc<ApiState>, mut req: Request<Body>, next: Next) -> Response {
     let resolved = req
@@ -3222,7 +3221,7 @@ mod tests {
 
     /// The token file is replaced, never truncated in place: an interrupted
     /// write must not be able to leave an empty `api.token` behind and lock
-    /// the platform out for good (DMN-066).
+    /// the platform out for good.
     #[test]
     fn the_token_file_is_replaced_atomically() {
         use std::os::unix::fs::PermissionsExt;
@@ -3239,7 +3238,7 @@ mod tests {
         assert!(!dir.path().join("api.token.tmp").exists());
     }
 
-    /// The whole point of the split (DMN-065): an access token drives the
+    /// The whole point of the split: an access token drives the
     /// daemon like the primary, right up to the routes that manage tokens.
     #[tokio::test]
     async fn an_access_token_may_work_but_may_not_manage_tokens() {

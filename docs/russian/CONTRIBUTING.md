@@ -40,8 +40,8 @@ asc-daemon/
 
 ## 🔀 Процесс изменений
 
-1. **Найди или создай задачу** в [ROADMAP](../../../asc-platform/ROADMAP.md) (префикс `DMN-*`) и/или GitHub Issue. Любая работа начинается с задачи и дока в `docs/` — см. [AGENTS.md](../../AGENTS.md).
-2. Форкни и создай ветку от `dev`: `feat/dmn-003-package-manager`, `fix/…`, `docs/…`.
+1. **Найди или создай GitHub Issue.** Любая работа начинается с issue и дока в `docs/` — см. [AGENTS.md](../../AGENTS.md).
+2. Форкни и создай ветку от `dev`: `feat/package-manager`, `fix/…`, `docs/…`.
 3. Пиши код и тесты. Перед коммитом — `task check` (clippy без warnings + fmt + тесты).
 4. Открой Pull Request **в `dev`** по шаблону. CI должен быть зелёным.
 5. Ревью → merge. Squash-merge, заголовок PR — по Conventional Commits.
@@ -63,7 +63,7 @@ git switch dev
 git reset --hard upstream/dev
 
 # 3. Создай фичевую ветку под Issue
-git switch -c fix/dmn-021-console-reconnect
+git switch -c fix/console-reconnect
 
 # 4. Код + тесты, затем локальная проверка
 task check
@@ -77,7 +77,7 @@ git fetch upstream
 git rebase upstream/dev
 
 # 7. Запушь ветку в свой форк и открой PR в dev
-git push -u origin fix/dmn-021-console-reconnect
+git push -u origin fix/console-reconnect
 # На GitHub: "Compare & pull request" → base repository: AdminServiceCloud/asc-daemon, base: dev
 # В описании PR добавь "Closes #42" — Issue закроется при merge.
 # Или через GitHub CLI:
@@ -98,7 +98,7 @@ gh pr create --base dev --fill
 ## 🐛 Issues
 
 - Баг: шаблон bug report — версия (`asc --version`), ОС, шаги воспроизведения, логи (`journalctl -u asc`).
-- Фича: сначала issue с обсуждением — возможно, она уже в roadmap.
+- Фича: сначала issue с обсуждением — возможно, она уже запланирована.
 
 ## ⚙️ CI (GitHub Actions)
 

@@ -1,7 +1,7 @@
 //! App storage: `/asc/apps/<id>/` directories with `.asc/meta.json` inside.
 //!
 //! The store is the on-disk index: listing scans the apps root and reads each
-//! meta.json, first moving a pre-DMN-139 app into `.asc/` ([`layout::migrate`]).
+//! meta.json, first moving a legacy app into `.asc/` ([`layout::migrate`]).
 //! Broken entries are skipped with a warning instead of failing
 //! the whole listing — one corrupted app must not hide the others.
 
@@ -101,7 +101,7 @@ impl AppStore {
     }
 }
 
-/// Move a pre-DMN-139 app into `.asc/`. A failure is not fatal: the readers
+/// Move a legacy app into `.asc/`. A failure is not fatal: the readers
 /// fall back to the legacy paths, so the app stays listed and usable.
 fn migrate(dir: &Path) {
     match layout::migrate(dir) {

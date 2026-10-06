@@ -1,4 +1,4 @@
-//! WireGuard API (DMN-152): the service layer over
+//! WireGuard API: the service layer over
 //! [`crate::daemon::wireguard::Wireguard`] shared by both transports, the
 //! gRPC `WireguardService` and the REST routes the CLI uses. Every call is
 //! root-only: a non-root unix-socket peer is refused before anything runs.

@@ -40,8 +40,8 @@ asc-daemon/
 
 ## 🔀 Change workflow
 
-1. **Find or create a task** in the [ROADMAP](../asc-platform/ROADMAP.md) (`DMN-*` prefix) and/or a GitHub Issue. Every piece of work starts with a task and a doc in `docs/` — see [AGENTS.md](AGENTS.md).
-2. Fork and branch off `dev`: `feat/dmn-003-package-manager`, `fix/…`, `docs/…`.
+1. **Find or create a GitHub Issue.** Every piece of work starts with an issue and a doc in `docs/` — see [AGENTS.md](AGENTS.md).
+2. Fork and branch off `dev`: `feat/package-manager`, `fix/…`, `docs/…`.
 3. Write code and tests. Before committing — `task check` (clippy with no warnings + fmt + tests).
 4. Open a Pull Request **to `dev`** using the template. CI must be green.
 5. Review → merge. Squash-merge; the PR title follows Conventional Commits.
@@ -63,7 +63,7 @@ git switch dev
 git reset --hard upstream/dev
 
 # 3. Create a feature branch for the issue
-git switch -c fix/dmn-021-console-reconnect
+git switch -c fix/console-reconnect
 
 # 4. Code + tests, then verify everything locally
 task check
@@ -77,7 +77,7 @@ git fetch upstream
 git rebase upstream/dev
 
 # 7. Push the branch to your fork and open a PR against dev
-git push -u origin fix/dmn-021-console-reconnect
+git push -u origin fix/console-reconnect
 # On GitHub: "Compare & pull request" → base repository: AdminServiceCloud/asc-daemon, base: dev
 # In the PR description add "Closes #42" so the issue closes on merge.
 # Or with the GitHub CLI:
@@ -98,7 +98,7 @@ After review feedback: push new commits to the same branch — the PR updates au
 ## 🐛 Issues
 
 - Bug: use the bug report template — version (`asc --version`), OS, reproduction steps, logs (`journalctl -u asc`).
-- Feature: open an issue for discussion first — it may already be on the roadmap.
+- Feature: open an issue for discussion first — it may already be planned.
 
 ## ⚙️ CI (GitHub Actions)
 

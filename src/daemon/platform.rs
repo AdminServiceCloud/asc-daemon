@@ -1,15 +1,15 @@
-//! Binding the node to an AdminService.Cloud platform (DMN-058).
+//! Binding the node to an AdminService.Cloud platform.
 //!
 //! The platform issues a one-time registration token; `install.sh --token`,
 //! `asc-updater install --token` and `asc connect` all funnel into
 //! [`register`], which stores the token, remembers the platform URL and calls
 //! the bootstrap endpoint once.
 //!
-//! There is no tunnel yet (that is NODE-002 on the platform side), so a
+//! There is no tunnel yet, so a
 //! registered node is exactly that — registered. It does not report health and
 //! the platform will not show it as online until the channel exists.
 //!
-//! Registration also gives the platform its way in (DMN-145): the daemon
+//! Registration also gives the platform its way in: the daemon
 //! reports how sshd is reached and which host keys it presents, and installs
 //! the public key the platform answers with into root's `authorized_keys`.
 //! Without that a node added with the install command was registered and
@@ -303,7 +303,7 @@ pub fn direct_endpoint(config: &Config) -> Advertised {
     }
 
     // Self-signed must be pinned. An operator's own certificate is reported
-    // too (DMN-127): it may come from a private CA — a Cloudflare Origin
+    // too: it may come from a private CA — a Cloudflare Origin
     // certificate is one — where the fingerprint is the only thing that can
     // vouch for it; the platform still verifies the chain when it can. ACME
     // is chain-verified only: pinning it would break at the first renewal.
@@ -331,8 +331,7 @@ pub fn direct_endpoint(config: &Config) -> Advertised {
     }
 }
 
-/// Tell the platform the address or certificate changed after registration
-/// (DMN-068).
+/// Tell the platform the address or certificate changed after registration.
 ///
 /// Registration is a one-shot token redemption, so nothing else can carry the
 /// news that a certificate was renewed or an address moved. The call

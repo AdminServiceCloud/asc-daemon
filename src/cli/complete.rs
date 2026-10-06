@@ -1,4 +1,4 @@
-//! Shell completion (DMN-055): the scripts `asc completion <shell>` prints and
+//! Shell completion: the scripts `asc completion <shell>` prints and
 //! the candidate engine `asc __complete` behind them.
 //!
 //! The split follows the cobra model (kubectl, gh, docker) rather than a
@@ -327,9 +327,9 @@ enum Dynamic {
     Storages,
     /// Saved git/registry credentials, by pattern.
     Credentials,
-    /// Scheduled jobs, by id (DMN-114).
+    /// Scheduled jobs, by id.
     Schedules,
-    /// Web server sites, by id (DMN-123).
+    /// Web server sites, by id.
     Sites,
 }
 

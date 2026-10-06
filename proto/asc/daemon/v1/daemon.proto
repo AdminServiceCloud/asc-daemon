@@ -38,7 +38,7 @@ message GetStatusResponse {
   uint32 apps_running = 3;
   // Optional features this daemon build supports, e.g. "app.upgrade",
   // "app.settings", "app.ports", "app.stats", "console.exec", "sources",
-  // "credentials" (DMN-076). Absent/empty on a daemon built before this
+  // "credentials". Absent/empty on a daemon built before this
   // field existed — a caller that needs to know falls back to trying the
   // RPC and handling UNIMPLEMENTED. Values are added here as the matching
   // capability ships; never removed once shipped.
@@ -50,9 +50,9 @@ message GetStatusResponse {
 service AppService {
   rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
-  // Disk usage breakdown (DMN-035): image, repository, data, custom volumes.
+  // Disk usage breakdown: image, repository, data, custom volumes.
   rpc GetAppDisk(GetAppDiskRequest) returns (GetAppDiskResponse);
-  // Image freshness of a Docker app (DMN-120): which image it runs, its
+  // Image freshness of a Docker app: which image it runs, its
   // version, and whether the registry serves a newer build of the tag.
   // Empty response for non-Docker apps. Capability "app.repull".
   rpc GetAppImage(GetAppImageRequest) returns (GetAppImageResponse);
@@ -61,25 +61,25 @@ service AppService {
   // image. FAILED_PRECONDITION for a pinned tag, a digest, a locally built
   // image or a non-Docker app.
   rpc RepullApp(RepullAppRequest) returns (RepullAppResponse);
-  // Same re-pull as a live progress feed (DMN-132): the image pull's layer
+  // Same re-pull as a live progress feed: the image pull's layer
   // lines, then the same RepullAppResponse. Lets the platform show a repull
   // as a background task with a log. Capability "app.repull.stream".
   rpc RepullAppStream(RepullAppRequest) returns (stream RepullAppEvent);
   // Install from the configured registries: "name" or "name@version".
   rpc InstallApp(InstallAppRequest) returns (InstallAppResponse);
   // Same install, but as a live progress feed instead of one blocking call
-  // (DMN-090): a text line per step of the package clone / image pull /
+  // — a text line per step of the package clone / image pull /
   // image build, ending with the same result InstallApp would have
   // returned — or, on failure, the stream ends with the same error status.
   // A disconnected caller does not cancel the install: it keeps running to
   // completion on the daemon regardless of whether anyone is still watching.
   rpc InstallAppStream(InstallAppRequest) returns (stream InstallAppEvent);
-  // Sets the app's custom name (DMN-095); an empty name resets it to the
+  // Sets the app's custom name; an empty name resets it to the
   // package's own name, same as an app that never had one.
   rpc RenameApp(RenameAppRequest) returns (RenameAppResponse);
   rpc StartApp(StartAppRequest) returns (StartAppResponse);
   rpc StopApp(StopAppRequest) returns (StopAppResponse);
-  // Force-stop (DMN-134): SIGKILL instead of a graceful stop — the way out of
+  // Force-stop: SIGKILL instead of a graceful stop — the way out of
   // a StopApp stuck on an app that ignores SIGTERM. Safe to call while that
   // StopApp is still in flight; it returns as soon as the app is dead.
   rpc KillApp(KillAppRequest) returns (KillAppResponse);
@@ -87,30 +87,29 @@ service AppService {
   rpc GetAppLogs(GetAppLogsRequest) returns (GetAppLogsResponse);
   // Removes the app and all its data. Irreversible.
   rpc RemoveApp(RemoveAppRequest) returns (RemoveAppResponse);
-  // Temporary one-time token required to open a WebSocket console session
-  // (DMN-007). The platform requests it automatically after checking the
+  // Temporary one-time token required to open a WebSocket console session.
+  // The platform requests it automatically after checking the
   // caller's permissions; short TTL, bound to one app and session type.
   rpc IssueConsoleToken(IssueConsoleTokenRequest) returns (IssueConsoleTokenResponse);
-  // Live resource usage of the requested apps (DMN-080), like `docker stats
+  // Live resource usage of the requested apps, like `docker stats
   // --no-stream`: two readings ~500ms apart. `ids` is applied *before* the
   // sampling window, not after — asking for one app must not cost the
   // sampling time of every app on the node.
   rpc GetAppStats(GetAppStatsRequest) returns (GetAppStatsResponse);
-  // Push stream of the same samples (DMN-081), backed by one shared sampler
+  // Push stream of the same samples, backed by one shared sampler
   // per requested app set rather than a blocking read per subscriber —
   // see AppStatsHub. A caller that falls behind the broadcast buffer misses
   // the oldest queued samples rather than stalling the sampler.
   rpc StreamAppStats(StreamAppStatsRequest) returns (stream AppStatsSample);
-  // Published ports of one app (DMN-079), including the host↔container
+  // Published ports of one app, including the host↔container
   // remap and protocol. Resolved from the app's package manifest, so it
   // works even while the app is stopped — docker-only; other runtimes
   // return an empty list.
   rpc ListAppPorts(ListAppPortsRequest) returns (ListAppPortsResponse);
-  // Settings schema and chosen values (DMN-078/DMN-043): what a settings
+  // Settings schema and chosen values: what a settings
   // editor needs to render the same form `asc app settings` does.
   // values_json is a JSON object string, not google.protobuf.Struct — Struct
   // encodes every number as double and would turn a port 8080 into 8080.0
-  // (see asc-platform/docs/features/app-settings.md).
   rpc GetAppSettings(GetAppSettingsRequest) returns (GetAppSettingsResponse);
   // Full-map replacement, same contract as PUT /v1/apps/{id}/settings: a key
   // absent from values_json resets to the package default.
@@ -122,33 +121,33 @@ service AppService {
   // and call this the same way.
   rpc ListAppVersions(ListAppVersionsRequest) returns (ListAppVersionsResponse);
   // What a package repository actually ships, read before installing
-  // anything (DMN-098): one application (asc.yaml) or a stack of them
+  // anything: one application (asc.yaml) or a stack of them
   // (asc.stack.yaml), with the stack's apps, their dependencies and their
   // declared requirements. The daemon clones the repository shallowly into a
   // temporary directory and throws it away — nothing is installed and no app
   // directory is created. An install dialog calls this to show what it is
   // about to put on the node.
   rpc InspectPackage(InspectPackageRequest) returns (InspectPackageResponse);
-  // Move an installed app to another version (DMN-053/DMN-056): `spec` is
+  // Move an installed app to another version: `spec` is
   // its id or custom name, optionally `@version` (omitted = the repository's
   // newest tag). The app must already be stopped — same precondition as the
   // CLI's `asc app upgrade`; a caller that wants to upgrade a running app
   // stops it first (StopApp) and restarts it after (StartApp).
   rpc UpgradeApp(UpgradeAppRequest) returns (UpgradeAppResponse);
   // Same upgrade, as a live progress feed instead of one blocking call
-  // (mirrors InstallAppStream/DMN-090): a text line per step of the
+  // (mirrors InstallAppStream): a text line per step of the
   // repository clone / image pull, ending with the same result UpgradeApp
   // would have returned — or, on failure, the stream ends with the same
   // error status. A disconnected caller does not cancel the upgrade.
   rpc UpgradeAppStream(UpgradeAppRequest) returns (stream UpgradeAppEvent);
-  // Full copy of an installed app under a new id (DMN-019/DMN-113): the
+  // Full copy of an installed app under a new id: the
   // repository, config and data are copied byte for byte, then a runtime is
   // freshly provisioned from the copy — a clone always starts stopped,
   // regardless of the source's state. Docker containers/systemd units
   // cannot be copied, only recreated from the copied manifest and settings.
   rpc CloneApp(CloneAppRequest) returns (CloneAppResponse);
   // Same clone, as a live progress feed instead of one blocking call
-  // (mirrors InstallAppStream/DMN-090): a text line as the directory copy
+  // (mirrors InstallAppStream): a text line as the directory copy
   // progresses, ending with the same result CloneApp would have returned —
   // or, on failure, the stream ends with the same error status. A
   // disconnected caller does not cancel the clone.
@@ -175,9 +174,9 @@ message App {
   // The package title when the app carries a custom name (then `name` is
   // the custom name); absent otherwise.
   optional string title = 8;
-  // Resource quota limits, when any are set (DMN-021).
+  // Resource quota limits, when any are set.
   optional AppQuota quota = 9;
-  // Stable instance identity generated at install (DMN-044); absent for apps
+  // Stable instance identity generated at install; absent for apps
   // installed before it. Unlike `id`, never reused after removal.
   optional string uuid = 10;
   // Full commit sha the repository is currently checked out at (DMN-0XX),
@@ -189,18 +188,18 @@ message App {
   // Recorded package reference: "<stack>/<app>" for a stack member,
   // "<package>" (with no slash) for a standalone install — see
   // AppMeta.package and `asc stacks`' own use of the same field. Absent for
-  // an app installed before DMN-033. A "/" here is what NODE-045's transfer
+  // an app installed by an older version. A "/" here is what the platform's transfer
   // checks phase uses to refuse moving a single stack member.
   optional string package = 12;
-  // In-repository subdirectory of the manifest (DMN-096) — a direct git
+  // In-repository subdirectory of the manifest — a direct git
   // install of a monorepo package only; absent for a registry install
   // (whose entry carries its own path) or a repository with the manifest at
-  // its root. NODE-045's transfer install phase needs this to reinstall a
+  // its root. the platform's transfer install phase needs this to reinstall a
   // direct monorepo install identically on the target.
   optional string repo_path = 13;
-  // The branch a direct git install tracks across upgrades (DMN-053);
+  // The branch a direct git install tracks across upgrades;
   // absent for a tag-pinned install (every registry install, and a direct
-  // install of a specific tag). NODE-045's transfer install phase passes
+  // install of a specific tag). the platform's transfer install phase passes
   // this through so the target keeps tracking the same branch instead of
   // resolving to the default branch HEAD.
   optional string branch = 14;
@@ -245,7 +244,7 @@ message GetAppDiskResponse {
   // data_bytes.
   repeated AppVolumeUsage volumes = 6;
   // Absolute path of the app's own directory on this node
-  // (`<apps_dir>/<id>`). Additive field for DMN-086: the platform's
+  // (`<apps_dir>/<id>`). Additive field: the platform's
   // apps-root is never published on its own, and an app-scoped file
   // manager needs this as a confinement root.
   string app_dir = 7;
@@ -274,7 +273,7 @@ message GetAppImageResponse {
   optional string image = 1;
   // Absent for a digest reference.
   optional string tag = 2;
-  // Built from the package's Dockerfile rather than pulled (DMN-050).
+  // Built from the package's Dockerfile rather than pulled.
   bool built_locally = 3;
   // RepullApp applies: a registry image under the `latest` tag.
   bool repullable = 4;
@@ -328,37 +327,37 @@ message AppVolumeUsage {
 message InstallAppRequest {
   // "name", "stack" or "stack/app", optionally with "@version"
   // (version = git tag of the package repo), or a direct git repository
-  // URL (https://, ssh:// or git@host:path — DMN-040).
+  // URL (https://, ssh:// or git@host:path).
   string spec = 1;
   // Registry source to install from; empty = automatic. Required when
   // several sources provide the package (the error lists them).
   string source = 2;
-  // Custom app name (DMN-024); for a stack — the per-app name prefix.
+  // Custom app name; for a stack — the per-app name prefix.
   optional string name = 3;
   // Branch or tag to check out — direct repository installs only.
   optional string branch = 4;
   optional string tag = 5;
-  // Consent to the package license (DMN-028). Without it a repository
+  // Consent to the package license. Without it a repository
   // shipping a LICENSE fails with the structured license error.
   bool license_ack = 6;
-  // In-repository subdirectory of the manifest (DMN-096) — a direct git
+  // In-repository subdirectory of the manifest — a direct git
   // install only, for monorepo packages whose asc.yaml is not at the
   // repository root (e.g. a registry entry's source.path). Ignored for a
   // registry spec, which resolves its own path from the registry entry.
   optional string path = 7;
   // One app of a stack to install instead of every non-optional one
-  // (DMN-097) — a direct git install only: a registry spec addresses the
+  // — a direct git install only: a registry spec addresses the
   // same thing as "<stack>/<app>". A direct install without it installs
   // every non-optional app of the stack the repository turns out to ship.
   optional string stack_app = 8;
-  // Skip the resource shortfall check (DMN-099): without it, an install the
+  // Skip the resource shortfall check: without it, an install the
   // host cannot currently cover fails with requirements_not_met below
   // instead of running into a raw container-create failure. Does not affect
   // the CPU quota clamp, which always applies — the Engine rejects a quota
   // above the host's total core count outright, consent or not.
   bool force = 9;
   // Install as one of InspectPackageResponse.methods instead of the
-  // package's own asc.yaml (DMN-107) — a direct git install only, since a
+  // package's own asc.yaml — a direct git install only, since a
   // registry entry is always its own asc.yaml/asc.stack.yaml. Unset,
   // ASC_MANIFEST and ASC_STACK all mean "read the manifest normally";
   // DOCKER_COMPOSE/SWARM/KUBERNETES/HELM are rejected (not installable yet —
@@ -376,19 +375,19 @@ message InstallAppResponse {
   // Stack installs: apps that were already installed and were skipped.
   repeated string skipped = 4;
   // Set instead of every field above when the repository ships a LICENSE
-  // and the caller did not pass license_ack (DMN-028/DMN-091): the caller
+  // and the caller did not pass license_ack: the caller
   // renders its own consent dialog from these fields and retries with
   // license_ack = true. Not a gRPC error — the call otherwise succeeded, it
   // just needs one more round trip.
   optional LicenseRequiredDetail license_required = 5;
   // Set instead of every field above when the host cannot currently cover
   // the package's declared requirements or runtime quota and the caller did
-  // not pass force (DMN-099): the caller renders its own "not enough
+  // not pass force: the caller renders its own "not enough
   // resources, install anyway?" screen and retries with force = true. Not a
   // gRPC error, same reasoning as license_required.
   optional RequirementsNotMetDetail requirements_not_met = 6;
   // Set instead of every field above when a direct git install's repository
-  // is private and nothing the caller configured opens it (DMN-062/DMN-106)
+  // is private and nothing the caller configured opens it
   // — same non-error shape as license_required/requirements_not_met above.
   // A registry spec never sets this: BrowseAppRegistry already requires the
   // index itself to be public.
@@ -449,7 +448,7 @@ message ListAppVersionsResponse {
   // The tag InstallApp/UpgradeApp would pick with no version given; absent
   // when the repository has no tags.
   optional string latest = 2;
-  // Branch names, in the order the remote listed them (DMN-140) — what
+  // Branch names, in the order the remote listed them — what
   // UpgradeAppRequest.branch accepts. Empty from a daemon without the
   // "app.upgrade.ref" capability.
   repeated string branches = 3;
@@ -479,27 +478,27 @@ message InspectPackageResponse {
   PackageRequirements requirements = 6;
   // Stack packages: the apps it ships, in manifest order.
   repeated StackApp apps = 7;
-  // Every installation method detected in the repository (DMN-106),
+  // Every installation method detected in the repository,
   // regardless of `kind` above — a repository can carry asc.yaml next to a
   // Dockerfile it doesn't need, and that is still worth reporting. Empty
   // when auth_required is set: nothing could be cloned to detect anything.
   repeated DetectedInstallMethod methods = 8;
   // Set instead of every field above (kind stays PACKAGE_KIND_UNSPECIFIED,
   // methods stays empty) when the repository is private and nothing the
-  // caller configured opens it (DMN-062) — the same non-error, "one more
+  // caller configured opens it — the same non-error, "one more
   // round trip" shape as license_required on InstallAppResponse. Before this
   // field existed the gRPC layer had no downcast for pkg::auth::AuthRequired
   // and this case surfaced as a bare INTERNAL status.
   optional AuthRequiredDetail auth_required = 9;
-  // The license an install of this package asks consent for (DMN-131) —
+  // The license an install of this package asks consent for —
   // the same fields InstallAppResponse.license_required carries, known before
   // the install instead of after a first failed run. Absent: no LICENSE file.
   optional LicenseRequiredDetail license = 10;
   // Whether this host can cover the package's requirements and runtime quota
-  // right now (DMN-131) — the check InstallApp runs without `force`, run
+  // right now — the check InstallApp runs without `force`, run
   // ahead of it. Absent: everything fits, or metrics were unavailable.
   optional RequirementsNotMetDetail requirements_not_met = 11;
-  // The app's asc.settings.yaml as a JSON-encoded SettingsFile (DMN-138) —
+  // The app's asc.settings.yaml as a JSON-encoded SettingsFile —
   // the same shape GetAppSettingsResponse.settings_json carries, known
   // before the app exists: the install dialog renders its `setup` questions
   // while the install runs. Absent for stacks and for packages without
@@ -508,7 +507,7 @@ message InspectPackageResponse {
 }
 
 enum PackageKind {
-  // Neither asc.yaml nor asc.stack.yaml is present (DMN-106) — the
+  // Neither asc.yaml nor asc.stack.yaml is present — the
   // repository may still be installable some other way, see
   // InspectPackageResponse.methods.
   PACKAGE_KIND_UNSPECIFIED = 0;
@@ -518,7 +517,7 @@ enum PackageKind {
   PACKAGE_KIND_STACK = 2;
 }
 
-// DMN-106: what pkg::detect can find in a repository, beyond ASC's own
+// what pkg::detect can find in a repository, beyond ASC's own
 // manifest/stack. Detection and install support are two different
 // questions — Swarm/Kubernetes/Helm are always `supported = false` today,
 // reported so the operator sees "found, not supported" instead of the
@@ -554,7 +553,7 @@ message AuthRequiredDetail {
   // The URL the caller passed, unmodified.
   string url = 1;
   // pkg::auth::normalize(url) — the host/prefix a credential must be
-  // configured for (REG-007's OrgCredential.pattern speaks the same
+  // configured for (the platform's OrgCredential.pattern speaks the same
   // language, so the platform can offer "add a credential for this pattern"
   // directly).
   string pattern = 2;
@@ -592,10 +591,10 @@ message UpgradeAppRequest {
   // App id or custom name, optionally with "@version" (a git tag); no
   // version = the repository's newest tag.
   string spec = 1;
-  // Switch to following this branch (DMN-140): it is checked out now and
+  // Switch to following this branch: it is checked out now and
   // remembered (App.branch), so later upgrades keep pulling it.
   optional string branch = 2;
-  // Pin to this tag (DMN-140): unlike "@version" in `spec`, this also stops
+  // Pin to this tag: unlike "@version" in `spec`, this also stops
   // following a branch. Exclusive with `branch`, and with an "@version" in
   // `spec`.
   optional string tag = 3;
@@ -607,7 +606,7 @@ message UpgradeAppResponse {
   // with no recorded version (a moving ref with no tags).
   optional string from = 2;
   string to = 3;
-  // Full commit shas before/after (DMN-056) — the version alone does not
+  // Full commit shas before/after — the version alone does not
   // identify what was actually installed for an app that follows a branch,
   // and a re-tagged release moves a tag onto another commit.
   optional string from_commit = 4;
@@ -628,7 +627,7 @@ message UpgradeAppEvent {
   }
 }
 
-// One event of RepullAppStream (DMN-132): a progress line or the terminal
+// One event of RepullAppStream: a progress line or the terminal
 // result. A stream that ends without `result` ended in an error — the gRPC
 // status carries it, same as RepullApp.
 message RepullAppEvent {
@@ -642,7 +641,7 @@ message CloneAppRequest {
   // The source app's id or custom name — same reference
   // AppManager::get_authorized accepts everywhere else.
   string id = 1;
-  // Custom name for the clone; absent — the new id (DMN-033 numbering,
+  // Custom name for the clone; absent — the new id (the install numbering,
   // <source>-N) doubles as the display name.
   optional string name = 2;
 }
@@ -713,7 +712,7 @@ message GetAppLogsRequest {
   // Number of trailing lines; 0 means the server default (100).
   uint32 tail = 2;
   // When set, each line is prefixed with an ISO-8601 timestamp and a space
-  // (DMN-088) — RFC3339Nano/UTC for docker apps, journalctl's short-iso for
+  // — RFC3339Nano/UTC for docker apps, journalctl's short-iso for
   // systemd ones. process apps have no timestamp source and ignore this.
   bool timestamps = 3;
 }
@@ -734,8 +733,8 @@ enum ConsoleSessionType {
   CONSOLE_SESSION_TYPE_LOGS = 1;
   // Interactive attach (stdin/stdout).
   CONSOLE_SESSION_TYPE_ATTACH = 2;
-  // Interactive shell inside a running container — docker apps only
-  // (DMN-082). Frames on this session are tagged (0x00 data, 0x01 resize:
+  // Interactive shell inside a running container — docker apps only.
+  // Frames on this session are tagged (0x00 data, 0x01 resize:
   // big-endian u16 cols then u16 rows), unlike LOGS/ATTACH which are not.
   CONSOLE_SESSION_TYPE_EXEC = 3;
 }
@@ -798,7 +797,7 @@ message AppStatsSample {
   // reports, computed without its image/volume breakdown so it stays cheap.
   uint64 disk_bytes = 12;
   optional uint64 quota_disk_bytes = 13;
-  // Seconds since the app's current run started (DMN-089). Unset when
+  // Seconds since the app's current run started. Unset when
   // stopped or the runtime cannot report a start time.
   optional uint64 uptime_secs = 14;
 }
@@ -854,7 +853,7 @@ message SetAppSettingsResponse {
   bool restart_required = 1;
 }
 
-// Registry sources pushed by the platform (DMN-083, REG-005): the
+// Registry sources pushed by the platform: the
 // organization-level source of truth for an org's registries lives on the
 // platform; this service is how it lands in this node's own system-scope
 // sources.toml. Every RPC here operates on Scope::System only — the
@@ -893,13 +892,13 @@ message ReplaceSourcesResponse {
   repeated Source sources = 1;
 }
 
-// Credential management (DMN-084/DMN-087). Unlike SourceService, this is
+// Credential management. Unlike SourceService, this is
 // targeted upsert/remove, not a full replace: /etc/asc/auth.json can carry
 // Kind::Registry (docker image pull) credentials an operator added by hand
 // for reasons unrelated to marketplace registries, and a bulk replace would
 // stomp them.
 //
-// Two secret shapes: a token, or (DMN-087) raw PEM private-key bytes — the
+// Two secret shapes: a token, or raw PEM private-key bytes — the
 // daemon writes the key to a 0600 file it owns under /etc/asc/ssh-keys and
 // registers a Method::SshKey pointing at it, the same shape `asc auth add
 // --ssh-key` produces by hand. The file is created with 0600 from the
@@ -935,8 +934,8 @@ message CredentialSummary {
   string method_label = 5;
   bool has_secret = 6;
   // Absent for anything the operator configured by hand (`asc auth add`).
-  // Set to "platform" for entries a platform push (REG-008) owns — see
-  // UpsertCredentialRequest.managed_by (DMN-110).
+  // Set to "platform" for entries a platform push owns — see
+  // UpsertCredentialRequest.managed_by.
   optional string managed_by = 7;
 }
 
@@ -952,14 +951,14 @@ message UpsertCredentialRequest {
   string target = 2;
   oneof secret {
     string token = 3;
-    // PEM-encoded (OpenSSH or PKCS8) private key bytes (DMN-087). The
+    // PEM-encoded (OpenSSH or PKCS8) private key bytes. The
     // daemon owns the file it ends up in — see the CredentialService
     // comment above.
     string ssh_private_key_pem = 6;
   }
   optional string username = 4;
   optional string app = 5;
-  // Ownership marker (DMN-110): a platform push sets this to "platform" so a
+  // Ownership marker: a platform push sets this to "platform" so a
   // later push can tell its own entries apart from ones the operator added
   // by hand and harvest only the former when they stop being sent. Absent —
   // the default for `asc auth add` — means "nobody manages this but the
@@ -976,7 +975,7 @@ message RemoveCredentialRequest {
   optional CredentialKind kind = 1;
   string target = 2;
   // When set, only removes entries whose managed_by equals this value —
-  // used by a platform harvest (DMN-110) so it can never delete an entry the
+  // used by a platform harvest so it can never delete an entry the
   // operator added by hand at the same (kind, pattern), even one the
   // operator bound to a different app than the platform's own entry.
   // Absent removes every matching entry regardless of ownership, same as
@@ -986,8 +985,8 @@ message RemoveCredentialRequest {
 
 message RemoveCredentialResponse {}
 
-// System monitoring (DMN-006). The daemon samples metrics in the background
-// (config `[monitor]`, default every 100ms — DMN-072) into an in-memory ring
+// System monitoring. The daemon samples metrics in the background
+// (config `[monitor]`, default every 100ms) into an in-memory ring
 // buffer; GetSystemMetrics/GetMetricsHistory read from that buffer, while
 // StreamSystemMetrics subscribes to the live sampler directly. REST mirror:
 // GET /v1/metrics, GET /v1/metrics/history?limit=N, GET /v1/network/interfaces.
@@ -999,26 +998,25 @@ service MonitorService {
   rpc GetMetricsHistory(GetMetricsHistoryRequest) returns (GetMetricsHistoryResponse);
   // Every sample as it is taken, pushed for as long as the caller keeps the
   // stream open. Callers that fall behind the sampler's broadcast buffer
-  // just miss the oldest queued frames rather than stalling it (DMN-072).
+  // just miss the oldest queued frames rather than stalling it.
   rpc StreamSystemMetrics(StreamSystemMetricsRequest) returns (stream SystemMetrics);
   // Every network interface on the machine, loopback included — an
-  // inventory, not a metric: MAC, MTU, state and every IPv4/IPv6 address
-  // (DMN-074).
+  // inventory, not a metric: MAC, MTU, state and every IPv4/IPv6 address.
   rpc ListNetworkInterfaces(ListNetworkInterfacesRequest) returns (ListNetworkInterfacesResponse);
-  // What the machine is made of (DMN-142): machine type and virtualization,
+  // What the machine is made of: machine type and virtualization,
   // CPU, board and firmware, memory modules, disks and GPUs — an inventory,
   // not a metric. Hardware barely changes, so the answer is cached for ten
   // minutes unless `refresh` is set. Capability: "hardware". REST mirror:
   // GET /v1/hardware[?refresh=1].
   rpc GetHardwareInfo(GetHardwareInfoRequest) returns (HardwareInfo);
-  // Real host listening-port inventory (DMN-103) — what is actually bound,
+  // Real host listening-port inventory — what is actually bound,
   // parsed from /proc/net/{tcp,tcp6,udp,udp6}, not what an app's settings
   // merely declare (see AppService.ListAppPorts for that). Attribution to a
   // process is best-effort: a non-root caller over the unix socket simply
   // cannot read most other processes' fd tables, and the affected rows come
   // back with pid/process/command absent rather than the call failing.
   rpc ListListeningPorts(ListListeningPortsRequest) returns (ListListeningPortsResponse);
-  // Sampling cadences (DMN-135): `interval_ms` while StreamSystemMetrics has
+  // Sampling cadences: `interval_ms` while StreamSystemMetrics has
   // subscribers, `idle_interval_ms` otherwise. Read by anyone; changing them
   // needs a root context. Applied to the running sampler at once and saved
   // to `[monitor]` in config.toml. REST mirror: GET/PUT /v1/monitor/settings.
@@ -1082,7 +1080,7 @@ message ListeningPort {
   bool is_daemon = 13;
 }
 
-// Host processes (DMN-119): the inventory `ps`/`top` would show, read from
+// Host processes: the inventory `ps`/`top` would show, read from
 // /proc/<pid>/{stat,status,cmdline,cgroup}, and signal delivery. Advertised
 // as the "processes" capability. REST mirror: GET /v1/processes,
 // POST /v1/processes/{pid}/signal.
@@ -1197,17 +1195,17 @@ message SystemMetrics {
   repeated NetworkMetrics network = 14;
   // Every GPU found on the machine; empty on a server without one.
   repeated GpuMetrics gpus = 15;
-  // Per-device disk read/write throughput (DMN-073); empty when
+  // Per-device disk read/write throughput; empty when
   // /proc/diskstats cannot be read.
   repeated DiskIoMetrics disk_io = 16;
-  // Temperatures from every device that has a sensor (DMN-144): CPU, GPU,
+  // Temperatures from every device that has a sensor: CPU, GPU,
   // disks, board, DIMMs, network cards. Empty on a virtual machine.
   repeated SensorReading temperatures = 17;
   // Fan tachometers from the same hwmon chips.
   repeated FanReading fans = 18;
 }
 
-// One temperature sensor, attached to the device it sits on (DMN-144).
+// One temperature sensor, attached to the device it sits on.
 // NVIDIA GPUs have no hwmon node; their temperature stays in GpuMetrics.
 message SensorReading {
   // "cpu", "gpu", "disk", "board", "memory", "network" or "other".
@@ -1292,7 +1290,7 @@ message GetHardwareInfoRequest {
   bool refresh = 1;
 }
 
-// Hardware inventory (DMN-142). Fields a machine hides stay absent (typical
+// Hardware inventory. Fields a machine hides stay absent (typical
 // on a VPS: no DMI, no SMBIOS memory table) rather than being faked.
 message HardwareInfo {
   MachineInfo machine = 1;
@@ -1435,7 +1433,7 @@ message InterfaceAddress {
   string scope = 4;
 }
 
-// API tokens (DMN-065, DMN-066). Two kinds of bearer token guard this API:
+// API tokens. Two kinds of bearer token guard this API:
 // the long-lived **primary** in api.token — the credential the platform
 // stores at enrollment, and from here on a refresh token — and short-lived
 // **access** tokens minted from it, kept only in the daemon's memory.
@@ -1458,12 +1456,12 @@ service TokenService {
   rpc CommitPrimaryTokenRotation(CommitPrimaryTokenRotationRequest) returns (CommitPrimaryTokenRotationResponse);
   // Token state without any token material.
   rpc GetTokenStatus(GetTokenStatusRequest) returns (GetTokenStatusResponse);
-  // Serve the API with a certificate the caller hands in (DMN-127): the pair
+  // Serve the API with a certificate the caller hands in: the pair
   // is checked, written next to config.toml as api-custom.{crt,key}, `[api] tls`
   // becomes "files" and a running TLS listener switches to it without a
   // restart. Capability "api.certificate".
   rpc SetApiCertificate(SetApiCertificateRequest) returns (SetApiCertificateResponse);
-  // Publish the API through the node's web server on a domain (DMN-129):
+  // Publish the API through the node's web server on a domain:
   // nginx site "asc-api" proxying gRPC, REST and the console to the loopback
   // listener. Capability "api.proxy".
   rpc SetApiProxy(SetApiProxyRequest) returns (SetApiProxyResponse);
@@ -1570,18 +1568,17 @@ message GetTokenStatusResponse {
   uint32 ttl_default_secs = 7;
 }
 
-// Node filesystem access (DMN-070). The daemon runs as root and the whole
+// Node filesystem access. The daemon runs as root and the whole
 // tree from "/" is in scope: the platform performs its own per-user
 // authorization before it ever reaches here (see docs/api.md). Symlinks are
 // reported but never traversed — a recursive operation stops at the link.
 //
-// Every request below also accepts an optional app_id (DMN-086): when set,
+// Every request below also accepts an optional app_id: when set,
 // the call is app-scoped instead of node-wide — every path is confined,
 // daemon-side, to that app's directory and private volumes (with symlinks
 // canonicalized so one planted inside the app cannot point back out of it),
 // and the caller only needs to own the app rather than hold the node-wide
-// files.* domain. See docs/files.md and
-// asc-platform/docs/features/app-file-manager.md.
+// files.* domain. See docs/files.md.
 // Every method requires a root caller context; a non-root unix-socket peer is
 // refused, unlike the rest of this API (see docs/files.md).
 service FileService {
@@ -1593,7 +1590,7 @@ service FileService {
   rpc MovePath(MovePathRequest) returns (MovePathResponse);
   rpc CopyPath(CopyPathRequest) returns (CopyPathResponse);
   rpc DeletePaths(DeletePathsRequest) returns (DeletePathsResponse);
-  // A symbolic or hard link at path pointing at target (DMN-146).
+  // A symbolic or hard link at path pointing at target.
   rpc CreateLink(CreateLinkRequest) returns (CreateLinkResponse);
   rpc CreateArchive(CreateArchiveRequest) returns (CreateArchiveResponse);
   rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
@@ -1647,7 +1644,7 @@ message ListDirectoryRequest {
   string path = 1;
   // Default false: dotfiles are omitted.
   bool include_hidden = 2;
-  // App-scoped confinement (DMN-086): when set, `path` is confined to this
+  // App-scoped confinement: when set, `path` is confined to this
   // app's directory and private volumes, canonicalized and enforced
   // daemon-side — see app_id on FileService's other requests.
   optional string app_id = 3;
@@ -1995,7 +1992,7 @@ message RemoveAuthorizedKeyRequest {
 }
 
 message RemoveAuthorizedKeyResponse {}
-// Everything on the node's Docker Engine — ASC-owned or not (DMN-102). A
+// Everything on the node's Docker Engine — ASC-owned or not. A
 // separate service rather than more methods on AppService: AppService is
 // about *ASC applications*, this is host inventory, and the platform gates
 // the whole family on one capability.
@@ -2004,7 +2001,7 @@ message RemoveAuthorizedKeyResponse {}
 // AppManager::get_authorized to check against, so there is nothing to scope
 // a non-root caller to — the same reasoning FileService uses.
 //
-// Lifecycle control (ControlContainer, DMN-111) covers containers ASC does
+// Lifecycle control (ControlContainer) covers containers ASC does
 // *not* own only: an ASC app's container must not be stopped behind
 // AppManager's back (desired_state would bring it straight back after a
 // daemon restart, which reads as a bug), so those are refused with
@@ -2012,13 +2009,13 @@ message RemoveAuthorizedKeyResponse {}
 // "docker.control" capability.
 service DockerService {
   rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
-  // Live resource usage of the requested containers (DMN-112), like
+  // Live resource usage of the requested containers, like
   // `docker stats --no-stream`. Kept separate from ListContainers because a
   // CPU percentage needs two readings ~500ms apart, and the container list
   // must not pay that cost every time it is opened — the same split
   // AppService.ListApps/GetAppStats already makes.
   rpc ListContainerStats(ListContainerStatsRequest) returns (ListContainerStatsResponse);
-  // Host inventory beyond containers (DMN-104): every image, named volume
+  // Host inventory beyond containers: every image, named volume
   // and network the Engine knows about, ASC-owned or not. Each image/volume
   // row says whether an installed app (running or not) still needs it, so a
   // cleanup UI can explain *why* something is protected before the caller
@@ -2034,14 +2031,14 @@ service DockerService {
   // user opens the Docker settings section, never on a poll.
   rpc GetDockerDiskUsage(GetDockerDiskUsageRequest) returns (GetDockerDiskUsageResponse);
   // Remove unused images/volumes/build cache, one item at a time rather than
-  // the Engine's own bulk prune endpoints (DMN-105): an item an installed
+  // the Engine's own bulk prune endpoints: an item an installed
   // app still needs — running or stopped — is protected and reported in
   // `skipped` with why, never silently removed. `dry_run` computes the exact
   // same plan without deleting anything, so a caller can show it for
   // confirmation before the real call.
   rpc PruneDocker(PruneDockerRequest) returns (PruneDockerResponse);
   // Start/stop/restart/pause/unpause/remove one container, or every
-  // container of one compose project (DMN-111). A container belonging to an
+  // container of one compose project. A container belonging to an
   // installed ASC app — its own container, or any container of its compose
   // project — is refused with FAILED_PRECONDITION before anything is touched.
   // For a compose project, members the action does not apply to (stopping an
@@ -2182,7 +2179,7 @@ message ContainerStats {
   uint64 block_write_bytes = 8;
 }
 
-// ── Host inventory & cleanup (DMN-104/DMN-105) ──────────────────────────────
+// ── Host inventory & cleanup ──────────────────────────────
 
 message ListImagesRequest {}
 
@@ -2299,7 +2296,7 @@ message PruneSkip {
   string reason = 2;
 }
 
-// ── Backups (DMN-009, DMN-115) ──
+// ── Backups ──
 //
 // BackupService exposes the daemon's backup module over the API: the
 // system-scope storage list (where archives go — the built-in "local", plus
@@ -2307,7 +2304,7 @@ message PruneSkip {
 // themselves. The platform pushes its organization storages here as
 // managed_by = "platform" before a backup, so machine-run schedules keep
 // working without it (docs/backups.md). Gated behind the "backups"
-// capability (DMN-076).
+// capability.
 service BackupService {
   rpc ListBackupStorages(ListBackupStoragesRequest) returns (ListBackupStoragesResponse);
   // Adds or replaces a storage by name. Replacing an entry with a different
@@ -2424,7 +2421,7 @@ message CreateBackupRequest {
   repeated string storages = 2;
   // Rotation per storage after the upload; absent — the policy's keep.
   optional uint32 keep = 3;
-  // Optional per-run file selection (DMN-118), glob patterns relative to
+  // Optional per-run file selection, glob patterns relative to
   // the app directory (`data/**/*.db`, `repository/vendor`). Non-empty
   // include — only matching files go into the archive; exclude is applied
   // on top of it and of the repository's asc.backup.yaml. A daemon that
@@ -2465,7 +2462,7 @@ message DeleteBackupRequest {
 
 message DeleteBackupResponse {}
 
-// ── Scheduled jobs (DMN-012, DMN-114) ──
+// ── Scheduled jobs ──
 //
 // ScheduleService manages the daemon's own scheduler jobs
 // (<data_dir>/schedules.json): a trigger (hourly | daily@HH:MM | HH:MM | a
@@ -2620,7 +2617,7 @@ message ListScheduleRunsResponse {
   repeated ScheduleRunRecord runs = 1;
 }
 
-// ── Web server (DMN-122..DMN-125) ───────────────────────────────────────────
+// ── Web server ───────────────────────────────────────────
 //
 // The node's own web server (nginx) and the sites it serves: reverse proxy to
 // apps or addresses, Let's Encrypt issued by the daemon, provided certificates,
@@ -2651,10 +2648,10 @@ service WebServerService {
   // Forces a Let's Encrypt order for the site now, ignoring backoff.
   rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
   // Whether this node can open a TCP connection to an address — checks that
-  // a load balancer member on another node is reachable (DMN-126).
+  // a load balancer member on another node is reachable.
   rpc ProbeTcp(ProbeTcpRequest) returns (ProbeTcpResponse);
-  // The tail of a site's own access or error log, optionally filtered
-  // (DMN-128). Capability "webserver.logs".
+  // The tail of a site's own access or error log, optionally filtered.
+  // Capability "webserver.logs".
   rpc ReadSiteLog(ReadSiteLogRequest) returns (ReadSiteLogResponse);
 }
 
@@ -2832,7 +2829,7 @@ enum SiteHealthCheckType {
   SITE_HEALTH_CHECK_TYPE_HTTP = 3;
 }
 
-// Active health checks of the upstream servers (DMN-126): the daemon probes
+// Active health checks of the upstream servers: the daemon probes
 // every server and takes a failing one out of rotation (`down`) until it
 // passes again. Unset or OFF — nginx's passive max_fails only.
 message SiteHealthCheck {
@@ -2917,7 +2914,7 @@ message Site {
   string extra_location = 10;
   // Set — the site's whole configuration, rendered as is.
   optional string raw_config = 11;
-  // The site's own nginx logs under /var/log/asc/webserver (DMN-128). Negated
+  // The site's own nginx logs under /var/log/asc/webserver. Negated
   // on purpose: a caller that predates these fields keeps both logs on.
   bool access_log_off = 12;
   bool error_log_off = 13;
@@ -3061,7 +3058,7 @@ message ReadSiteLogResponse {
   bool truncated = 4;
 }
 
-// ── Firewall (DMN-148, DMN-149) ─────────────────────────────────────────────
+// ── Firewall ─────────────────────────────────────────────
 //
 // nftables through one table the daemon owns, `inet asc`, built from settings,
 // rules and IP sets. Changes are applied with an automatic rollback: unless
@@ -3342,7 +3339,7 @@ message ListFirewallTablesResponse {
   repeated FirewallTable tables = 1;
 }
 
-// ── fail2ban (DMN-150) ──────────────────────────────────────────────────────
+// ── fail2ban ──────────────────────────────────────────────────────
 //
 // Installs fail2ban and owns one file of its configuration,
 // `/etc/fail2ban/jail.d/asc.local`: global defaults and the known jails
@@ -3485,7 +3482,7 @@ message UnbanFail2banIpResponse {
   bool released = 1;
 }
 
-// ── WireGuard (DMN-152) ─────────────────────────────────────────────────────
+// ── WireGuard ─────────────────────────────────────────────────────
 
 // The node's WireGuard: install wireguard-tools, manage tunnels as
 // /etc/wireguard/<name>.conf files (the daemon edits only files that carry

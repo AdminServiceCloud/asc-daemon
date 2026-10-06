@@ -20,14 +20,14 @@ pub fn interactive() -> bool {
 /// Sink for plain-text install progress lines, independent of the
 /// interactive bars above: those render only on a terminal, this runs
 /// whenever a caller wants to watch an install live over the API rather than
-/// wait for the final result (the platform's install dialog, DMN-090).
+/// wait for the final result (the platform's install dialog).
 /// `Send + Sync` because git clone and docker pull/build report from
 /// whichever thread happens to run them, not always the same one (docker
 /// pull/build bridge into async code via `block_on`).
 pub trait InstallReporter: Send + Sync {
     fn line(&self, text: &str);
 
-    /// Whether whoever watches has given up on the operation (DMN-137): the
+    /// Whether whoever watches has given up on the operation: the
     /// platform cancelling a task closes its stream, and the work stops at
     /// the next checkpoint — a killed `git clone`, an abandoned image pull or
     /// build, or before the container is created — instead of running to the
@@ -37,7 +37,7 @@ pub trait InstallReporter: Send + Sync {
     }
 }
 
-/// The operation stopped because its caller cancelled it (DMN-137) — see
+/// The operation stopped because its caller cancelled it — see
 /// [`InstallReporter::cancelled`]. Typed so a cancelled install is told apart
 /// from a failed one.
 #[derive(Debug)]
@@ -174,7 +174,7 @@ impl StepState {
     }
 }
 
-/// One spinner bar per BuildKit build step (`docker build`-style, DMN-050).
+/// One spinner bar per BuildKit build step (`docker build`-style).
 ///
 /// BuildKit does not print `docker build`'s familiar `#3 [2/7] RUN …` text:
 /// that rendering is the *client's* job, and over the Engine's `/build`

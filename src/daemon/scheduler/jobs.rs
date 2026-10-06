@@ -1,4 +1,4 @@
-//! Scheduled jobs (DMN-114): the daemon's own list of "do X on schedule Y",
+//! Scheduled jobs: the daemon's own list of "do X on schedule Y",
 //! beyond the per-app backup policies the first scheduler increment ran.
 //!
 //! A job is a trigger ([`super::Schedule`] syntax, plus `hourly`) and one
@@ -110,7 +110,7 @@ pub enum JobAction {
         storages: Vec<String>,
         #[serde(default)]
         keep: Option<u32>,
-        /// Per-run file selection (DMN-118), see
+        /// Per-run file selection, see
         /// [`crate::daemon::backup::BackupFilter`].
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         include: Vec<String>,

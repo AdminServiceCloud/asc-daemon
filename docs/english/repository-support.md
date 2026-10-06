@@ -74,7 +74,3 @@ apps:
 - `depends_on` references names from the same stack. Unknown dependencies and cycles are rejected.
 
 Validate against the published [manifest schemas](https://github.com/AdminServiceCloud/registry/tree/main/schema) before publishing.
-
-## 🔗 Related tasks
-
-DMN-003, DMN-017, DMN-030, DMN-052, DMN-057 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

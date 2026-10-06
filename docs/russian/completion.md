@@ -85,7 +85,3 @@ asc completion fish | sudo tee /usr/share/fish/vendor_completions.d/asc.fish # f
 ```
 
 Новый шелл подхватит их сам; bash-completion загружает свой файл лениво, на первом `asc<Tab>`.
-
-## 🔗 Связанные задачи
-
-DMN-055 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

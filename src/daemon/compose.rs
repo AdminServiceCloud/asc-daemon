@@ -1,4 +1,4 @@
-//! `docker compose` orchestration (DMN-108/DMN-109) — the one deliberate
+//! `docker compose` orchestration — the one deliberate
 //! exception to "Docker only through bollard, never the CLI" (see
 //! `AGENTS.md`/`CLAUDE.md`). A compose *project* — variable interpolation,
 //! `env_file`, anchors, `extends`, profiles, several override files,
@@ -123,7 +123,7 @@ pub fn stop(
     run(cmd, "stop").map(|_| ())
 }
 
-/// Kills the project's containers (SIGKILL, DMN-134) — the forced
+/// Kills the project's containers (SIGKILL) — the forced
 /// counterpart of [`stop`]; the containers stay, same as after a stop.
 pub fn kill(
     docker: &DockerConfig,

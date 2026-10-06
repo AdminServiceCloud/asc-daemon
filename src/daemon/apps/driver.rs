@@ -1,6 +1,6 @@
 //! [`AppDriver`] — one lifecycle interface over Docker containers, systemd
 //! units and plain processes. Provisioning (creating the container/unit from
-//! a package manifest) belongs to the package manager (DMN-003), not here.
+//! a package manifest) belongs to the package manager, not here.
 
 use std::path::Path;
 
@@ -20,7 +20,7 @@ pub enum RuntimeState {
     Stopped,
 }
 
-/// Point-in-time resource counters of a running app (DMN-006).
+/// Point-in-time resource counters of a running app.
 ///
 /// CPU time is cumulative, so a usage percentage is a delta between two
 /// readings — the caller samples twice (see `AppManager::stats`).
@@ -42,7 +42,7 @@ pub struct ResourceUsage {
     pub net_rx_bytes: Option<u64>,
     /// Bytes sent over the network since the app started; see `net_rx_bytes`.
     pub net_tx_bytes: Option<u64>,
-    /// Unix timestamp the app's current run started (DMN-089). `None` when
+    /// Unix timestamp the app's current run started. `None` when
     /// the runtime cannot report a start time for this app.
     pub started_at: Option<i64>,
 }
@@ -52,7 +52,7 @@ pub trait AppDriver {
     fn start(&self, meta: &AppMeta, dir: &Path) -> Result<()>;
     fn stop(&self, meta: &AppMeta, dir: &Path) -> Result<()>;
 
-    /// Force-stop (DMN-134): SIGKILL, no grace period. Must be safe to call
+    /// Force-stop: SIGKILL, no grace period. Must be safe to call
     /// while a graceful [`AppDriver::stop`] of the same app is still running
     /// on another thread, and on an app that is already stopped.
     fn kill(&self, meta: &AppMeta, dir: &Path) -> Result<()>;
@@ -70,7 +70,7 @@ pub trait AppDriver {
     fn usage(&self, meta: &AppMeta, dir: &Path) -> Result<Option<ResourceUsage>>;
 
     /// Last `tail` lines of the app's logs. `timestamps` asks for an
-    /// ISO-8601 prefix on each line (DMN-088) — docker and systemd honor it,
+    /// ISO-8601 prefix on each line — docker and systemd honor it,
     /// process apps have no timestamp source of their own and ignore it.
     fn logs(&self, meta: &AppMeta, dir: &Path, tail: usize, timestamps: bool) -> Result<String>;
 
@@ -93,7 +93,7 @@ pub fn for_runtime(runtime: &Runtime, docker: &DockerConfig) -> Box<dyn AppDrive
 /// The `btime` line of `/proc/stat`: unix time the system booted. The
 /// reference point both the process driver's `starttime` (clock ticks since
 /// boot) and the systemd driver's `ActiveEnterTimestampMonotonic`
-/// (microseconds since boot) are measured against (DMN-089).
+/// (microseconds since boot) are measured against.
 pub(super) fn parse_proc_stat_btime(stat: &str) -> Option<i64> {
     stat.lines()
         .find_map(|line| line.strip_prefix("btime "))

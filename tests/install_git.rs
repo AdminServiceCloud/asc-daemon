@@ -1,4 +1,4 @@
-//! End-to-end direct git install (`asc install <url>`, DMN-040): no registry
+//! End-to-end direct git install (`asc install <url>`): no registry
 //! involved at all. Runs as a separate test binary, mirroring `install.rs`.
 
 use std::fs;
@@ -275,7 +275,7 @@ fn install_direct_from_git_requires_license_acceptance() {
     assert!(store.get("licensed").unwrap().is_some());
 }
 
-/// DMN-090: a reporter passed to `install_from_git` sees the clone's
+/// a reporter passed to `install_from_git` sees the clone's
 /// progress live, the same call the platform's streamed install RPC makes —
 /// this is the one thing a plain `pkg::install*(..., None)` call never
 /// exercises.
@@ -343,7 +343,7 @@ fn install_reports_progress_lines_when_given_a_reporter() {
     );
 }
 
-/// DMN-096: a monorepo package installed directly from a git URL (the path
+/// a monorepo package installed directly from a git URL (the path
 /// the marketplace UI takes for a registry package's `source.path`, e.g.
 /// `asc-example-apps` + `web/helloworld`) — without `path`, this used to look
 /// for `asc.yaml` at the repository root and name the app after the

@@ -1,4 +1,4 @@
-//! Keeping the confirmed ruleset across reboots (DMN-148): the script lives
+//! Keeping the confirmed ruleset across reboots: the script lives
 //! in `/etc/asc/firewall/ruleset.nft` and a oneshot systemd unit loads it
 //! before the network comes up. The distribution's `/etc/nftables.conf` and
 //! `nftables.service` are never touched.

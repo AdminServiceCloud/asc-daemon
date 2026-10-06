@@ -40,7 +40,3 @@ docker --version
 - `asc-updater` owns daemon installation, updates, channels and rollback, so it remains available if the daemon itself cannot start.
 - Docker is required only for `type: docker` packages. Native and utility packages do not require it.
 - Change the CLI language later with `sudo asc config lang en` or `sudo asc config lang ru`.
-
-## 🔗 Related tasks
-
-DMN-001, DMN-014, DMN-057 in [ROADMAP.md](../../../asc-platform/ROADMAP.md).

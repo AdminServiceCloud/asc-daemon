@@ -1,4 +1,4 @@
-//! SourceService/CredentialService integration tests (DMN-083/084) against a
+//! SourceService/CredentialService integration tests against a
 //! real in-process gRPC server. Each test here sets a different pair of
 //! `ASC_*` environment overrides (`ASC_SOURCES`/`ASC_USER_SOURCES` vs.
 //! `ASC_GIT_AUTH`/`ASC_USER_GIT_AUTH`), so unlike `tests/install.rs` and
@@ -155,7 +155,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
     // Safe: this is the only test in this binary touching ASC_GIT_AUTH.
     unsafe { std::env::set_var("ASC_GIT_AUTH", ws.path().join("auth.json")) };
     unsafe { std::env::set_var("ASC_USER_GIT_AUTH", ws.path().join("user-auth.json")) };
-    // add_ssh_key (DMN-087) would otherwise write under /etc/asc/ssh-keys,
+    // add_ssh_key would otherwise write under /etc/asc/ssh-keys,
     // which a non-root test run cannot create.
     unsafe { std::env::set_var("ASC_SSH_KEY_STORE", ws.path().join("ssh-keys")) };
 
@@ -244,7 +244,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
         .into_inner();
     assert!(listed.credentials.is_empty());
 
-    // DMN-087: an ssh-key secret writes a 0600 file this daemon owns and
+    // an ssh-key secret writes a 0600 file this daemon owns and
     // never leaks the PEM bytes back over the API either.
     let pem =
         "-----BEGIN OPENSSH PRIVATE KEY-----\nfakefakefake\n-----END OPENSSH PRIVATE KEY-----\n";
@@ -298,7 +298,7 @@ async fn credential_upsert_never_leaks_the_secret_and_replaces_by_triple() {
         .unwrap();
     assert!(!std::path::Path::new(key_path).exists());
 
-    // DMN-110: a platform-managed entry and an operator-added one can share
+    // a platform-managed entry and an operator-added one can share
     // a pattern (different app bindings) — a harvest scoped to managed_by
     // must remove only its own entry and never the operator's.
     client

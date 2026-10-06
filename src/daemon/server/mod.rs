@@ -47,24 +47,24 @@ pub async fn run(mut config: Config) -> anyhow::Result<()> {
 
     let state = api::ApiState::new(config, token);
 
-    // Background metrics sampler (DMN-006) feeds the API's ring buffer;
+    // Background metrics sampler feeds the API's ring buffer;
     // the task dies with the runtime on shutdown.
     state.monitor.start_sampler(&state.config.monitor);
 
-    // Cron-like scheduler (DMN-012): runs scheduled app backups (DMN-009).
+    // Cron-like scheduler: runs scheduled app backups.
     crate::daemon::scheduler::start(&state.config);
 
-    // Web server background pass (DMN-122..125): certificate renewals,
+    // Web server background pass: certificate renewals,
     // Cloudflare ranges, moved app ports.
     crate::daemon::webserver::start(std::sync::Arc::clone(&state.webserver));
 
-    // Firewall (DMN-149): roll back a change a restart left unconfirmed, or load
+    // Firewall: roll back a change a restart left unconfirmed, or load
     // the confirmed table if the kernel lost it.
     crate::daemon::firewall::start(std::sync::Arc::clone(&state.firewall));
 
     // One shutdown signal fans out to both listeners: the TCP API (bearer
     // token, for the platform) and the local unix socket (peer-cred auth,
-    // for the CLI, DMN-042). The unix socket is best-effort — a host where
+    // for the CLI). The unix socket is best-effort — a host where
     // it cannot be bound (no /run/asc for a non-root daemon) keeps the TCP
     // API instead of refusing to start; the CLI reports the socket's
     // absence with a hint when a user actually needs it.

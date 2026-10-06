@@ -1,4 +1,4 @@
-//! GPU metrics (DMN-006).
+//! GPU metrics.
 //!
 //! Two sources, both optional and both cheap to rule out:
 //!

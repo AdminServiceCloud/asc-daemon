@@ -27,7 +27,7 @@ pub struct SystemMetrics {
     pub disk_io: Vec<DiskIoMetrics>,
     /// Every GPU the machine exposes; empty on the usual headless server.
     pub gpus: Vec<GpuMetrics>,
-    /// Temperatures from every device that has a sensor (DMN-144); empty on
+    /// Temperatures from every device that has a sensor; empty on
     /// a virtual machine. `default` keeps older serialized samples readable.
     #[serde(default)]
     pub temperatures: Vec<SensorReading>,
@@ -132,13 +132,13 @@ pub struct Collector {
     /// last known reading is repeated in between.
     last_gpu_poll_ms: Option<i64>,
     cached_gpus: Vec<GpuMetrics>,
-    /// Millisecond clock and last reading of the mounted filesystems
-    /// (DMN-135): `/proc/self/mounts` on a Docker host lists every
+    /// Millisecond clock and last reading of the mounted filesystems:
+    /// `/proc/self/mounts` on a Docker host lists every
     /// container's overlay, and `statvfs` on a network filesystem can stall —
     /// neither belongs in a 100ms loop when sizes barely move.
     last_disks_poll_ms: Option<i64>,
     cached_disks: Vec<DiskMetrics>,
-    /// Millisecond clock and last reading of the hwmon sensors (DMN-144):
+    /// Millisecond clock and last reading of the hwmon sensors:
     /// a few dozen small sysfs files, cheap, but a temperature does not move
     /// in 100ms either.
     last_sensors_poll_ms: Option<i64>,
@@ -149,10 +149,10 @@ pub struct Collector {
 /// slow enough that `nvidia-smi` never overlaps itself under a 100ms sampler.
 const GPU_POLL_MIN_INTERVAL_MS: i64 = 1000;
 
-/// Minimum gap between two filesystem usage reads (DMN-135).
+/// Minimum gap between two filesystem usage reads.
 const DISKS_POLL_MIN_INTERVAL_MS: i64 = 2000;
 
-/// Minimum gap between two sensor reads (DMN-144).
+/// Minimum gap between two sensor reads.
 const SENSORS_POLL_MIN_INTERVAL_MS: i64 = 1000;
 
 impl Collector {

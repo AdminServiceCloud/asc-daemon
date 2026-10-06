@@ -1,4 +1,4 @@
-//! Direct git install of a stack (`asc install <url> --path <dir>`, DMN-097):
+//! Direct git install of a stack (`asc install <url> --path <dir>`):
 //! the repository ships `asc.stack.yaml` instead of `asc.yaml` and there is no
 //! registry entry to say so beforehand — the clone decides. Runs as its own
 //! test binary; no registry sources are involved at all.
@@ -121,7 +121,7 @@ apps:
     let meta = store.get("demo-server").unwrap().expect("meta.json");
     assert_eq!(meta.source.as_deref(), Some(format!("git:{url}").as_str()));
     assert_eq!(meta.repo_path.as_deref(), Some("gameservers/demo/server"));
-    // The stack is still recorded (DMN-121), named like the stack install
+    // The stack is still recorded, named like the stack install
     // itself — after the manifest subdirectory — so `asc stacks` and the
     // platform group it; upgrade reads `source`/`repo_path` before it.
     assert_eq!(meta.package.as_deref(), Some("demo/server"));

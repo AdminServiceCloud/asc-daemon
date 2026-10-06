@@ -1,5 +1,5 @@
 //! gRPC-level coverage for `ListAppVersions`/`UpgradeApp`/`UpgradeAppStream`
-//! (DMN-0XX/NODE-022): the platform's version picker and danger-zone
+//! — the platform's version picker and danger-zone
 //! "update" button go through these, not the CLI's local `pkg::upgrade`
 //! call, so they need their own end-to-end check against a real gRPC
 //! client. Runs as its own test binary (like install_grpc_license.rs) so

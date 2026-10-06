@@ -1,4 +1,4 @@
-//! The `wg-quick` `.conf` format (DMN-152): reading any file (the daemon's
+//! The `wg-quick` `.conf` format: reading any file (the daemon's
 //! own, or one brought in by an import) into the model, writing the model
 //! back, and building a client's config.
 //!

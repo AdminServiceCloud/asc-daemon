@@ -11,7 +11,7 @@ use asc_daemon::daemon::config::Config;
 
 const TOKEN: &str = "test-token-1234";
 
-/// The base capability list, "app.compose" optionally appended (DMN-109):
+/// The base capability list, "app.compose" optionally appended:
 /// whether the test host actually has the `docker compose` plugin is outside
 /// this test's control, so it accepts either instead of hardcoding one.
 fn assert_base_capabilities(capabilities: &[&str]) {
@@ -239,8 +239,8 @@ mod rest {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["version"], asc_daemon::VERSION);
         assert_eq!(body["apps_total"], 1);
-        // DMN-076: always present so a caller can tell "no capabilities" from
-        // "daemon predates this field"; DMN-083/084/087 are the first to ship.
+        // always present so a caller can tell "no capabilities" from
+        // "daemon predates this field".
         let capabilities: Vec<&str> = body["capabilities"]
             .as_array()
             .unwrap()
@@ -492,7 +492,7 @@ mod rest {
         assert_eq!(grant.app_id, "demo");
         assert!(state.console_tokens.consume(token).is_none());
 
-        // DMN-082: "exec" is now a valid session type, and its command
+        // "exec" is now a valid session type, and its command
         // round-trips into the issued grant.
         let (status, body) = call(
             &state,
@@ -530,7 +530,7 @@ mod rest {
     }
 }
 
-/// DMN-070: the file API's REST content route, over the same bearer-token
+/// the file API's REST content route, over the same bearer-token
 /// TCP transport the rest of this file exercises.
 mod files {
     use super::*;
@@ -844,8 +844,8 @@ mod grpc {
             .into_inner();
         assert_eq!(history.samples.len(), 1);
 
-        // The stream (DMN-072) opens with the sample already in the buffer
-        // (DMN-075) so a panel paints without waiting out a sampling
+        // The stream opens with the sample already in the buffer
+        // so a panel paints without waiting out a sampling
         // interval, then continues as a live feed off the broadcast channel.
         let mut stream = client
             .stream_system_metrics(with_auth(tonic::Request::new(

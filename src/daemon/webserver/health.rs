@@ -1,4 +1,4 @@
-//! Active health checks of upstream servers (DMN-126).
+//! Active health checks of upstream servers.
 //!
 //! Open-source nginx only has passive checks (`max_fails`): a dead server is
 //! noticed by failing real requests. For a load balancer that is not good

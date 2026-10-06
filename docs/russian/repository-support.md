@@ -74,7 +74,3 @@ apps:
 - `depends_on` ссылается на имена этого же стека; несуществующие зависимости и циклы отклоняются.
 
 Перед публикацией проверьте файлы по [схемам манифестов](https://github.com/AdminServiceCloud/registry/tree/main/schema).
-
-## 🔗 Связанные задачи
-
-DMN-003, DMN-017, DMN-030, DMN-052, DMN-057 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

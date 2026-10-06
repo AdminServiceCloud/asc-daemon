@@ -40,7 +40,3 @@ docker --version
 - `asc-updater` отвечает за установку, обновления, каналы и откат.
 - Docker нужен только пакетам `type: docker`; native и utility-пакеты обходятся без него.
 - Изменить язык позднее можно командой `sudo asc config lang en` или `sudo asc config lang ru`.
-
-## 🔗 Связанные задачи
-
-DMN-001, DMN-014, DMN-057 в [ROADMAP.md](../../../asc-platform/ROADMAP.md).

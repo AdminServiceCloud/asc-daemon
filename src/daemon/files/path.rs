@@ -1,4 +1,4 @@
-//! Path validation for [`super::FileService`] (DMN-070): the whole check
+//! Path validation for [`super::FileService`]: the whole check
 //! lives in construction, not confinement. There is no jail root — the scope
 //! is the whole filesystem from `/` — so the job here is predictability, not
 //! containment.

@@ -1,5 +1,5 @@
-//! App-scoped confinement for [`super::FileService`]-style operations
-//! (DMN-086): unlike the unscoped node file manager, whose whole policy is
+//! App-scoped confinement for [`super::FileService`]-style operations:
+//! unlike the unscoped node file manager, whose whole policy is
 //! "no jail root" (see [`super::path`]), an [`AppScope`] *is* a jail — every
 //! path a caller supplies must resolve inside one of its roots or the
 //! operation is refused, no matter what root-equivalent context the call
@@ -9,8 +9,7 @@
 //! full-rights [`crate::daemon::apps::UserContext`]: the platform checks the
 //! calling user's own permissions (`apps.edit` vs `files.edit`) before ever
 //! reaching the daemon. A user with `apps.edit` but not `files.edit` must
-//! still be unable to read `/etc/shadow` through this service — see
-//! `asc-platform/docs/features/app-file-manager.md`. Confinement therefore
+//! still be unable to read `/etc/shadow` through this service. Confinement therefore
 //! has to be enforced here, not trusted from the caller.
 
 use std::path::{Path, PathBuf};
@@ -50,7 +49,7 @@ impl AppScope {
         Ok(Self { roots: real_roots })
     }
 
-    /// The scope for one installed app (DMN-086): its own directory plus
+    /// The scope for one installed app: its own directory plus
     /// every private (non-shared) volume, mirroring what
     /// `app-file-manager.md` calls "the app directory and its non-public
     /// volumes". A manifest that cannot be located or parsed degrades to

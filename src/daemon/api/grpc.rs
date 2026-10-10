@@ -225,6 +225,7 @@ fn to_pb(status: &AppStatus) -> pb::App {
         package: status.meta.package.clone(),
         repo_path: status.meta.repo_path.clone(),
         branch: status.meta.branch.clone(),
+        compose_services: Vec::new(),
     }
 }
 
@@ -1008,6 +1009,8 @@ impl AppService for Grpc {
         Pin<Box<dyn Stream<Item = Result<pb::RepullAppEvent, Status>> + Send>>;
     type CloneAppStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::CloneAppEvent, Status>> + Send>>;
+    type RebuildAppStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::RebuildAppEvent, Status>> + Send>>;
 
     async fn list_apps(
         &self,
@@ -1649,6 +1652,58 @@ impl AppService for Grpc {
         Ok(Response::new(pb::SetAppSettingsResponse {
             restart_required,
         }))
+    }
+
+    async fn rebuild_app(
+        &self,
+        _request: Request<pb::RebuildAppRequest>,
+    ) -> Result<Response<pb::RebuildAppResponse>, Status> {
+        Err(Status::unimplemented("RebuildApp is not implemented yet"))
+    }
+
+    async fn rebuild_app_stream(
+        &self,
+        _request: Request<pb::RebuildAppRequest>,
+    ) -> Result<Response<Self::RebuildAppStreamStream>, Status> {
+        Err(Status::unimplemented(
+            "RebuildAppStream is not implemented yet",
+        ))
+    }
+
+    async fn list_app_services(
+        &self,
+        _request: Request<pb::ListAppServicesRequest>,
+    ) -> Result<Response<pb::ListAppServicesResponse>, Status> {
+        Err(Status::unimplemented(
+            "ListAppServices is not implemented yet",
+        ))
+    }
+
+    async fn control_app_service(
+        &self,
+        _request: Request<pb::ControlAppServiceRequest>,
+    ) -> Result<Response<pb::ControlAppServiceResponse>, Status> {
+        Err(Status::unimplemented(
+            "ControlAppService is not implemented yet",
+        ))
+    }
+
+    async fn get_app_service_settings(
+        &self,
+        _request: Request<pb::GetAppServiceSettingsRequest>,
+    ) -> Result<Response<pb::GetAppServiceSettingsResponse>, Status> {
+        Err(Status::unimplemented(
+            "GetAppServiceSettings is not implemented yet",
+        ))
+    }
+
+    async fn set_app_service_settings(
+        &self,
+        _request: Request<pb::SetAppServiceSettingsRequest>,
+    ) -> Result<Response<pb::SetAppServiceSettingsResponse>, Status> {
+        Err(Status::unimplemented(
+            "SetAppServiceSettings is not implemented yet",
+        ))
     }
 }
 

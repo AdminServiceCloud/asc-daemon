@@ -130,9 +130,19 @@ service AppService {
   rpc InspectPackage(InspectPackageRequest) returns (InspectPackageResponse);
   // Move an installed app to another version: `spec` is
   // its id or custom name, optionally `@version` (omitted = the repository's
-  // newest tag). The app must already be stopped — same precondition as the
-  // CLI's `asc app upgrade`; a caller that wants to upgrade a running app
-  // stops it first (StopApp) and restarts it after (StartApp).
+  // newest tag, or the head of the branch the app follows). A docker, systemd
+  // or process app must already be stopped — same precondition as the CLI's
+  // `asc app upgrade`; a caller that wants to upgrade a running one stops it
+  // first (StopApp) and restarts it after (StartApp).
+  // A docker compose app is the exception (capability "app.upgrade.compose"):
+  // it is upgraded in place — `git fetch` + checkout inside its repository,
+  // images pulled/built while the old containers keep running, then
+  // `up --force-recreate` — and must NOT be stopped first: the downtime is the
+  // recreate only, and the stack keeps the running/stopped state it had. A
+  // failure before the recreate leaves the old containers and the old commit
+  // in place; a failed recreate restores the previous commit and recreates
+  // the previous containers. FAILED_PRECONDITION while another upgrade or
+  // rebuild of the same app is in progress.
   rpc UpgradeApp(UpgradeAppRequest) returns (UpgradeAppResponse);
   // Same upgrade, as a live progress feed instead of one blocking call
   // (mirrors InstallAppStream): a text line per step of the
@@ -152,6 +162,43 @@ service AppService {
   // or, on failure, the stream ends with the same error status. A
   // disconnected caller does not cancel the clone.
   rpc CloneAppStream(CloneAppRequest) returns (stream CloneAppEvent);
+  // Rebuild an app without moving it to another version: optionally fetch
+  // the ref it already follows (`pull_source`), pull or build its images
+  // afresh (any tag, not only `latest`) and force-recreate its containers.
+  // Docker apps and docker compose apps only — a systemd or process app has
+  // nothing to rebuild and gets FAILED_PRECONDITION. A compose app can be
+  // rebuilt one service at a time (`service`). The app keeps its
+  // running/stopped state: a stopped app stays stopped, with its containers
+  // recreated. FAILED_PRECONDITION while another upgrade or rebuild of the
+  // same app is in progress. Capability "app.rebuild".
+  rpc RebuildApp(RebuildAppRequest) returns (RebuildAppResponse);
+  // Same rebuild as a live progress feed: git, pull and build output lines,
+  // then the same RebuildAppResponse. Closing the stream cancels the rebuild
+  // at its next checkpoint (before the containers are recreated; the
+  // recreate itself always runs to completion).
+  rpc RebuildAppStream(RebuildAppRequest) returns (stream RebuildAppEvent);
+  // Services of a docker compose app: every service of the project with its
+  // first container's state, health, ports and, with `with_stats`, live
+  // resource usage. Capability "app.services", like every *AppService* RPC
+  // below and the `service` fields of GetAppLogsRequest and
+  // IssueConsoleTokenRequest: INVALID_ARGUMENT for an app that is not a
+  // docker compose app, NOT_FOUND for a service the project does not have.
+  rpc ListAppServices(ListAppServicesRequest) returns (ListAppServicesResponse);
+  // Start, stop, restart or kill one service of a docker compose app. The
+  // app's desired state is left alone: stopping a service is temporary, and
+  // the next start, rebuild or upgrade of the app brings it back.
+  rpc ControlAppService(ControlAppServiceRequest) returns (ControlAppServiceResponse);
+  // Per-service overrides the daemon keeps for a docker compose app
+  // (environment, CPU/memory limits, restart policy) next to the effective
+  // values `docker compose config` resolves. The overrides live in a file of
+  // the daemon's own, outside the app's repository, so they survive upgrades.
+  rpc GetAppServiceSettings(GetAppServiceSettingsRequest) returns (GetAppServiceSettingsResponse);
+  // Replace one service's overrides (full replacement, like SetAppSettings)
+  // and, with `apply`, recreate that service right away when it is running.
+  // INVALID_ARGUMENT for an unknown service, a malformed variable name, a CPU
+  // limit above the host's cores, a memory limit below 6 MiB or an unknown
+  // restart policy.
+  rpc SetAppServiceSettings(SetAppServiceSettingsRequest) returns (SetAppServiceSettingsResponse);
 }
 
 enum AppState {
@@ -163,7 +210,7 @@ enum AppState {
 message App {
   string id = 1;
   string name = 2;
-  // Runtime kind: docker | systemd | process.
+  // Runtime kind: docker | systemd | process | compose.
   string kind = 3;
   AppState state = 4;
   string version = 5;
@@ -203,6 +250,20 @@ message App {
   // this through so the target keeps tracking the same branch instead of
   // resolving to the default branch HEAD.
   optional string branch = 14;
+  // Docker compose apps only: every service of the project with the state of
+  // its first container, observed at the same moment as `state`. Empty for
+  // every other kind, and on a daemon that predates the field.
+  repeated AppServiceSummary compose_services = 15;
+}
+
+// One service of a docker compose app, as App.compose_services lists it.
+message AppServiceSummary {
+  string name = 1;
+  // running | exited | created | paused | restarting | dead | missing
+  // ("missing": the service has no container at all).
+  string state = 2;
+  // healthy | unhealthy | starting; empty without a healthcheck.
+  string health = 3;
 }
 
 // Per-app resource limits; every field is optional — only set limits appear.
@@ -665,6 +726,163 @@ message CloneAppEvent {
   }
 }
 
+message RebuildAppRequest {
+  // App id or custom name.
+  string id = 1;
+  // Docker compose apps only: rebuild and recreate just this service, leaving
+  // the others untouched. Requires `pull_source` = false (INVALID_ARGUMENT
+  // otherwise); INVALID_ARGUMENT for any other app kind.
+  optional string service = 2;
+  // Fetch the ref the app already follows (its branch head, or the tag it is
+  // pinned to) before building. The version never changes: moving to another
+  // branch or tag is UpgradeApp. Ignored for an app with no git source.
+  bool pull_source = 3;
+}
+
+message RebuildAppResponse {
+  string id = 1;
+  // Services rebuilt/recreated: every service of a compose app (or the one
+  // asked for), the app id for a docker app.
+  repeated string services = 2;
+  // Full commit shas of the app's repository before and after; absent when
+  // it is not a git repository.
+  optional string from_commit = 3;
+  optional string to_commit = 4;
+  // `pull_source` moved the repository to another commit.
+  bool source_updated = 5;
+  // The app (or the service) is running after the rebuild.
+  bool running = 6;
+}
+
+// One event of RebuildAppStream: a progress line or the terminal result. A
+// stream that ends without `result` ended in an error — the gRPC status
+// carries it, same as RebuildApp.
+message RebuildAppEvent {
+  oneof event {
+    string line = 1;
+    RebuildAppResponse result = 2;
+  }
+}
+
+message ListAppServicesRequest {
+  // App id or custom name.
+  string id = 1;
+  // Sample live resource usage: one shared ~500ms window over this app's
+  // running containers only.
+  bool with_stats = 2;
+  // Narrow the answer to one service; NOT_FOUND when the project has no such
+  // service.
+  optional string service = 3;
+}
+
+message ListAppServicesResponse {
+  // Sorted by service name.
+  repeated ComposeServiceInfo services = 1;
+}
+
+// One service of a docker compose app. Not named "AppService*": the package
+// already has `service AppService`.
+message ComposeServiceInfo {
+  string name = 1;
+  // Name and full id of the first replica's container; empty when the
+  // service has no container ("missing").
+  string container = 2;
+  string container_id = 3;
+  // Image reference the container runs (or the one the compose file names,
+  // when there is no container).
+  string image = 4;
+  // running | exited | created | paused | restarting | dead | missing.
+  string state = 5;
+  // healthy | unhealthy | starting; empty without a healthcheck.
+  string health = 6;
+  // Engine status line ("Up 3 hours", "Exited (0) 2 days ago").
+  string status = 7;
+  // Exit code of a container that is not running.
+  optional int32 exit_code = 8;
+  // Unix seconds the current run started; absent when not running.
+  optional int64 started_at = 9;
+  repeated ContainerPort ports = 10;
+  // Containers the service has (scale / deploy.replicas), 0 when missing.
+  uint32 replicas = 11;
+  // The service has a `build:` section — it is rebuilt from source rather
+  // than pulled.
+  bool buildable = 12;
+  // The daemon's override file has an entry for this service.
+  bool has_overrides = 13;
+  // First replica's live usage; only with ListAppServicesRequest.with_stats
+  // and only while it runs.
+  optional ContainerStats stats = 14;
+}
+
+enum AppServiceAction {
+  APP_SERVICE_ACTION_UNSPECIFIED = 0;
+  // Start the service's containers (creating them when it has none).
+  APP_SERVICE_ACTION_START = 1;
+  // Graceful stop — never `down`: the containers stay.
+  APP_SERVICE_ACTION_STOP = 2;
+  APP_SERVICE_ACTION_RESTART = 3;
+  // SIGKILL right away.
+  APP_SERVICE_ACTION_KILL = 4;
+}
+
+message ControlAppServiceRequest {
+  // App id or custom name.
+  string id = 1;
+  string service = 2;
+  AppServiceAction action = 3;
+}
+
+message ControlAppServiceResponse {
+  // The service as it is after the action.
+  ComposeServiceInfo service = 1;
+}
+
+// Per-service overrides of a docker compose app. Every field is optional:
+// only what is set overrides the compose file.
+message ComposeServiceSettings {
+  // Variables added to (or replacing) the service's own environment.
+  map<string, string> environment = 1;
+  // deploy.resources.limits.cpus — cores, > 0 and at most the host's cores.
+  optional double cpus = 2;
+  // deploy.resources.limits.memory — bytes, at least 6 MiB.
+  optional uint64 memory_bytes = 3;
+  // no | always | on-failure | on-failure:N | unless-stopped.
+  optional string restart = 4;
+}
+
+message GetAppServiceSettingsRequest {
+  string id = 1;
+  string service = 2;
+}
+
+message GetAppServiceSettingsResponse {
+  // What the daemon's override file sets for the service.
+  ComposeServiceSettings overrides = 1;
+  // Effective values, as `docker compose config` resolves them with the
+  // overrides applied. Environment variable names only — never values.
+  repeated string effective_environment_keys = 2;
+  optional double effective_cpus = 3;
+  optional uint64 effective_memory_bytes = 4;
+  optional string effective_restart = 5;
+}
+
+message SetAppServiceSettingsRequest {
+  string id = 1;
+  string service = 2;
+  // Full replacement: an empty message clears the service's overrides.
+  ComposeServiceSettings overrides = 3;
+  // Recreate the service now when it is running, so the overrides take
+  // effect; a stopped service picks them up when it next starts.
+  bool apply = 4;
+}
+
+message SetAppServiceSettingsResponse {
+  // The running service was recreated with the new overrides.
+  bool applied = 1;
+  // The service is running on the old configuration (`apply` was false).
+  bool restart_required = 2;
+}
+
 message RenameAppRequest {
   string id = 1;
   // New custom name; empty resets to the package's own name.
@@ -715,6 +933,10 @@ message GetAppLogsRequest {
   // — RFC3339Nano/UTC for docker apps, journalctl's short-iso for
   // systemd ones. process apps have no timestamp source and ignore this.
   bool timestamps = 3;
+  // Docker compose apps only: the logs of this one service, without the
+  // service-name prefix the whole-project log carries. INVALID_ARGUMENT for
+  // any other app kind, NOT_FOUND for an unknown service.
+  optional string service = 4;
 }
 
 message GetAppLogsResponse {
@@ -733,7 +955,8 @@ enum ConsoleSessionType {
   CONSOLE_SESSION_TYPE_LOGS = 1;
   // Interactive attach (stdin/stdout).
   CONSOLE_SESSION_TYPE_ATTACH = 2;
-  // Interactive shell inside a running container — docker apps only.
+  // Interactive shell inside a running container — docker apps, and one
+  // service of a docker compose app (IssueConsoleTokenRequest.service).
   // Frames on this session are tagged (0x00 data, 0x01 resize:
   // big-endian u16 cols then u16 rows), unlike LOGS/ATTACH which are not.
   CONSOLE_SESSION_TYPE_EXEC = 3;
@@ -745,6 +968,12 @@ message IssueConsoleTokenRequest {
   // EXEC only: the command to run. Empty asks the daemon to probe a shell
   // (/bin/bash, falling back to /bin/sh).
   repeated string command = 3;
+  // Docker compose apps only: scope the session to one service — LOGS
+  // follows that service alone, EXEC opens a shell in its first running
+  // container. ATTACH with a service is FAILED_PRECONDITION; so is EXEC on a
+  // compose app without one. INVALID_ARGUMENT for any other app kind,
+  // NOT_FOUND for an unknown service. Capability "app.services".
+  optional string service = 4;
 }
 
 message IssueConsoleTokenResponse {

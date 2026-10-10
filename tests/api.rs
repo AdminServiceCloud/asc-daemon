@@ -746,6 +746,7 @@ mod grpc {
                     app_id: "demo".into(),
                     session: pb::ConsoleSessionType::Logs as i32,
                     command: vec![],
+                    service: None,
                 },
             )))
             .await

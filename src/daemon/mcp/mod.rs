@@ -313,7 +313,7 @@ impl McpServer {
         let tail = input.tail.unwrap_or(DEFAULT_LOG_TAIL).min(MAX_LOG_TAIL);
         match self
             .backend
-            .call(move |daemon| daemon.logs(&input.app, tail, false))
+            .call(move |daemon| daemon.logs(&input.app, tail, false, None))
             .await
         {
             Ok(logs) => result(json!({ "logs": logs, "tail": tail })),

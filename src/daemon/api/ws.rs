@@ -27,8 +27,10 @@ use tracing::{debug, warn};
 
 use super::ApiState;
 use super::console::{ConsoleGrant, SessionType};
+use crate::daemon::apps::compose_services;
 use crate::daemon::apps::meta::Runtime;
 use crate::daemon::config::DockerConfig;
+use crate::daemon::i18n::{Msg, tf2};
 use crate::daemon::{console, docker};
 
 pub fn router(state: Arc<ApiState>) -> Router {
@@ -90,9 +92,12 @@ async fn handle(
     let docker_cfg = &state.config.docker;
 
     let result = match grant.session {
-        SessionType::Logs => match &meta.runtime {
-            Runtime::Docker { container, .. } => {
+        SessionType::Logs => match (&meta.runtime, &grant.service) {
+            (Runtime::Docker { container, .. }, _) => {
                 stream_docker_logs(socket, docker_cfg, container, tail).await
+            }
+            (Runtime::Compose { project, .. }, Some(service)) => {
+                stream_service_logs(socket, &state, &meta, &dir, project, service, tail).await
             }
             _ => match console::logs_command(&meta, &dir, tail, docker_cfg).await {
                 Ok(cmd) => stream_subprocess_logs(socket, cmd).await,
@@ -114,11 +119,38 @@ async fn handle(
                 .await
             }
         },
-        SessionType::Exec => match &meta.runtime {
-            Runtime::Docker { container, .. } => {
+        SessionType::Exec => match (&meta.runtime, &grant.service) {
+            (Runtime::Docker { container, .. }, _) => {
                 exec_docker(socket, &state, container, &grant.command, cols, rows).await
             }
-            other => {
+            // A shell in one service of a compose app: its first running
+            // replica, looked up now — the token may be older than a
+            // restart that replaced the container.
+            (Runtime::Compose { .. }, Some(service)) => {
+                let lookup = {
+                    let (config, meta, service) =
+                        (state.config.clone(), meta.clone(), service.clone());
+                    tokio::task::spawn_blocking(move || {
+                        compose_services::running_container(&config, &meta, &service)
+                    })
+                    .await
+                };
+                match lookup {
+                    Ok(Ok(Some(container))) => {
+                        exec_docker(socket, &state, &container, &grant.command, cols, rows).await
+                    }
+                    Ok(Ok(None)) => {
+                        close_with_error(
+                            socket,
+                            &tf2(Msg::ConsoleServiceNotRunning, service, &meta.id),
+                        )
+                        .await
+                    }
+                    Ok(Err(err)) => close_with_error(socket, &format!("{err:#}")).await,
+                    Err(err) => close_with_error(socket, &format!("{err:#}")).await,
+                }
+            }
+            (other, _) => {
                 close_with_error(
                     socket,
                     &format!(
@@ -340,6 +372,47 @@ async fn exec_docker(
     }
     socket.close().await.ok();
     Ok(())
+}
+
+/// The live log of one service of a compose app: a single container is
+/// followed through the Engine API exactly like a Docker app (from its
+/// current run's start); several replicas through the plugin's own
+/// multiplexing (`compose logs -f --no-log-prefix <service>`), cut at the
+/// earliest start among them.
+async fn stream_service_logs(
+    socket: WebSocket,
+    state: &ApiState,
+    meta: &crate::daemon::apps::AppMeta,
+    dir: &std::path::Path,
+    project: &str,
+    service: &str,
+    tail: usize,
+) -> anyhow::Result<()> {
+    let cfg = &state.config.docker;
+    let ids = {
+        let (config, meta_owned, service_owned) =
+            (state.config.clone(), meta.clone(), service.to_string());
+        tokio::task::spawn_blocking(move || {
+            compose_services::container_ids(&config, &meta_owned, &service_owned)
+        })
+        .await
+    };
+    let ids = match ids {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(err)) => return close_with_error(socket, &format!("{err:#}")).await,
+        Err(err) => return close_with_error(socket, &format!("{err:#}")).await,
+    };
+    if let [only] = ids.as_slice() {
+        return stream_docker_logs(socket, cfg, only, tail).await;
+    }
+    let since = console::compose_started_at(cfg, project, Some(service)).await;
+    let project = match crate::daemon::apps::compose::project_of(meta, dir) {
+        Ok(project) => project,
+        Err(err) => return close_with_error(socket, &format!("{err:#}")).await,
+    };
+    let cmd =
+        crate::daemon::compose::logs_follow_command(cfg, &project, tail, since, Some(service));
+    stream_subprocess_logs(socket, cmd).await
 }
 
 /// Read-only log stream from a follow-mode subprocess (systemd/process).

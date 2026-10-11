@@ -27,6 +27,9 @@ pub struct ConsoleGrant {
     /// EXEC only: the command to run. Empty means "probe a shell" — see
     /// `docker::exec`. Ignored for LOGS/ATTACH.
     pub command: Vec<String>,
+    /// Docker compose apps only: the one service the session is scoped to
+    /// (checked when the token was issued).
+    pub service: Option<String>,
 }
 
 struct Entry {
@@ -44,7 +47,13 @@ pub struct ConsoleTokens {
 impl ConsoleTokens {
     /// Issue a token for one console session. Returns `(token, expires_at)`
     /// where `expires_at` is Unix seconds (for API clients).
-    pub fn issue(&self, app_id: &str, session: SessionType, command: Vec<String>) -> (String, i64) {
+    pub fn issue(
+        &self,
+        app_id: &str,
+        session: SessionType,
+        command: Vec<String>,
+        service: Option<String>,
+    ) -> (String, i64) {
         let token = random_hex(32);
         let expires_at = (SystemTime::now() + TOKEN_TTL)
             .duration_since(UNIX_EPOCH)
@@ -59,6 +68,7 @@ impl ConsoleTokens {
                     app_id: app_id.to_string(),
                     session,
                     command,
+                    service,
                 },
                 expires: Instant::now() + TOKEN_TTL,
             },
@@ -104,7 +114,7 @@ mod tests {
     #[test]
     fn token_is_single_use() {
         let tokens = ConsoleTokens::default();
-        let (token, expires_at) = tokens.issue("demo", SessionType::Logs, Vec::new());
+        let (token, expires_at) = tokens.issue("demo", SessionType::Logs, Vec::new(), None);
         assert_eq!(token.len(), 64);
         assert!(expires_at > 0);
         let grant = tokens.consume(&token).expect("first use works");
@@ -120,10 +130,12 @@ mod tests {
             "demo",
             SessionType::Exec,
             vec!["/bin/sh".into(), "-c".into(), "ls".into()],
+            Some("web".into()),
         );
         let grant = tokens.consume(&token).expect("first use works");
         assert_eq!(grant.session, SessionType::Exec);
         assert_eq!(grant.command, vec!["/bin/sh", "-c", "ls"]);
+        assert_eq!(grant.service.as_deref(), Some("web"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod fail2ban;
 mod firewall;
 mod wireguard;
 
+use asc_daemon::daemon::apps::compose_services::ServiceAction as ComposeServiceAction;
 use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
     AppManager, AppStats, AppStatus, ImageSource, Outcome, RuntimeState, UserContext,
@@ -602,21 +603,15 @@ enum AppAction {
     /// List apps (root sees all users' apps, grouped by owner)
     List,
     /// Show one app's details
-    Info {
-        id: String,
-    },
+    Info { id: String },
     /// Show disk usage: quota bar (if a quota is set) and a breakdown by
     /// image, repository, data and custom volumes. Without an id: total
     /// space occupied by all apps, then each app's usage, largest first.
-    Disk {
-        id: Option<String>,
-    },
+    Disk { id: Option<String> },
     /// Show published ports with their transport (`8080->3000/tcp` when the
     /// host and container sides differ). Without an id: every app and its
     /// ports as a table.
-    Ports {
-        id: Option<String>,
-    },
+    Ports { id: Option<String> },
     /// Clone an app instance (data, env, settings) into a new one
     Clone {
         id: String,
@@ -667,13 +662,9 @@ enum AppAction {
         method: Option<InstallMethodArg>,
     },
     /// Attach to the app's console (same as top-level `asc attach`)
-    Attach {
-        id: String,
-    },
+    Attach { id: String },
     /// Upgrade the app to a new version (same as top-level `asc upgrade`)
-    Upgrade {
-        spec: String,
-    },
+    Upgrade { spec: String },
     /// Rebuild the app without changing its version: pull or build its
     /// images afresh and recreate its containers (same as top-level
     /// `asc rebuild`)
@@ -688,6 +679,9 @@ enum AppAction {
         #[arg(long)]
         no_pull: bool,
     },
+    /// List the services of a docker compose app: state, health, image and
+    /// ports of each service's first container
+    Services { id: String },
     /// Start the app and attach to its console (Docker apps, interactive
     /// terminal); use -d to start in the background
     Start {
@@ -695,16 +689,29 @@ enum AppAction {
         /// Detached mode: start the app without attaching to its console
         #[arg(short = 'd', long)]
         detach: bool,
+        /// Start one service of a docker compose app only
+        #[arg(long)]
+        service: Option<String>,
     },
     Stop {
         id: String,
+        /// Stop one service of a docker compose app only (until the app's
+        /// next start, rebuild or upgrade)
+        #[arg(long)]
+        service: Option<String>,
     },
     /// Force-stop: SIGKILL, no graceful shutdown (for an app stuck stopping)
     Kill {
         id: String,
+        /// Kill one service of a docker compose app only
+        #[arg(long)]
+        service: Option<String>,
     },
     Restart {
         id: String,
+        /// Restart one service of a docker compose app only
+        #[arg(long)]
+        service: Option<String>,
     },
     /// Show app logs
     Logs {
@@ -715,11 +722,13 @@ enum AppAction {
         /// Prefix each line with its timestamp
         #[arg(short = 't', long)]
         timestamps: bool,
+        /// Logs of one service of a docker compose app, without the
+        /// service-name prefix
+        #[arg(long)]
+        service: Option<String>,
     },
     /// Interactively edit app settings defined in asc.settings.yaml
-    Settings {
-        id: String,
-    },
+    Settings { id: String },
     /// Remove an app and all its data
     Remove {
         id: String,
@@ -2528,11 +2537,103 @@ fn app_cmd(action: AppAction, config: &Config) -> anyhow::Result<()> {
             | AppAction::Remove { .. }
             | AppAction::Attach { .. }
             | AppAction::Settings { .. }
+            | AppAction::Services { .. }
     );
     if routable && let Some(daemon) = daemon_backend(config)? {
         return app_cmd_daemon(&daemon, action, config);
     }
     app_cmd_local(action, config)
+}
+
+/// `start|stop|restart|kill --service S`: the one-service form of a
+/// lifecycle action, as `(app, service, action)`.
+fn service_target(action: &AppAction) -> Option<(&str, &str, ComposeServiceAction)> {
+    let (id, service, op) = match action {
+        AppAction::Start { id, service, .. } => (id, service, ComposeServiceAction::Start),
+        AppAction::Stop { id, service } => (id, service, ComposeServiceAction::Stop),
+        AppAction::Restart { id, service } => (id, service, ComposeServiceAction::Restart),
+        AppAction::Kill { id, service } => (id, service, ComposeServiceAction::Kill),
+        _ => return None,
+    };
+    Some((id.as_str(), service.as_deref()?, op))
+}
+
+fn print_service_control(app: &str, service: &str, op: ComposeServiceAction) {
+    let msg = match op {
+        ComposeServiceAction::Start => Msg::AppServiceStarted,
+        ComposeServiceAction::Stop => Msg::AppServiceStopped,
+        ComposeServiceAction::Restart => Msg::AppServiceRestarted,
+        ComposeServiceAction::Kill => Msg::AppServiceKilled,
+    };
+    println!("{}", tf2(msg, service, app));
+}
+
+/// One row of `asc app services`.
+struct ServiceRow {
+    name: String,
+    state: String,
+    health: String,
+    image: String,
+    replicas: u32,
+    /// `8080->80/tcp`, comma-separated; published ports only.
+    ports: String,
+}
+
+fn service_ports_label(ports: impl Iterator<Item = (u16, Option<u16>, String)>) -> String {
+    ports
+        .filter_map(|(private, public, protocol)| {
+            let public = public?;
+            let protocol = if protocol.is_empty() {
+                "tcp".to_string()
+            } else {
+                protocol
+            };
+            Some(if public == private {
+                format!("{public}/{protocol}")
+            } else {
+                format!("{public}->{private}/{protocol}")
+            })
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_services(app: &str, rows: &[ServiceRow]) {
+    if rows.is_empty() {
+        println!("{}", tf(Msg::AppServicesEmpty, app));
+        return;
+    }
+    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(7).max(7);
+    let image_w = rows.iter().map(|r| r.image.len()).max().unwrap_or(5).max(5);
+    println!(
+        "{:<name_w$}  {:<10}  {:<9}  {:<image_w$}  {:<8}  PORTS",
+        "SERVICE", "STATE", "HEALTH", "IMAGE", "REPLICAS"
+    );
+    for row in rows {
+        println!(
+            "{:<name_w$}  {}  {:<9}  {:<image_w$}  {:<8}  {}",
+            row.name,
+            colored_state(&row.state, row.state == "running", 10),
+            if row.health.is_empty() {
+                "-"
+            } else {
+                &row.health
+            },
+            if row.image.is_empty() {
+                "-"
+            } else {
+                &row.image
+            },
+            row.replicas,
+            if row.ports.is_empty() {
+                "-"
+            } else {
+                &row.ports
+            },
+        );
+    }
 }
 
 /// App commands over the daemon's unix socket: the daemon reads the
@@ -2543,10 +2644,34 @@ fn app_cmd_daemon(
     action: AppAction,
     config: &Config,
 ) -> anyhow::Result<()> {
+    if let Some((id, service, op)) = service_target(&action) {
+        with_spinner(|| daemon.control_service(id, service, op.as_wire()))?;
+        print_service_control(id, service, op);
+        return Ok(());
+    }
     match action {
         AppAction::List => {
             let rows: Vec<AppRow> = daemon.list()?.iter().map(remote_row).collect();
             print_app_list(&rows, UserContext::current().is_root, "");
+        }
+        AppAction::Services { id } => {
+            let rows: Vec<ServiceRow> = daemon
+                .services(&id)?
+                .into_iter()
+                .map(|svc| ServiceRow {
+                    ports: service_ports_label(
+                        svc.ports
+                            .into_iter()
+                            .map(|p| (p.private_port, p.public_port, p.protocol)),
+                    ),
+                    name: svc.name,
+                    state: svc.state,
+                    health: svc.health,
+                    image: svc.image,
+                    replicas: svc.replicas,
+                })
+                .collect();
+            print_services(&id, &rows);
         }
         AppAction::Info { id } => {
             let app = daemon.info(&id)?;
@@ -2563,7 +2688,7 @@ fn app_cmd_daemon(
             }
             println!("  {}", tf(Msg::OwnerLabel, &app.owner));
         }
-        AppAction::Start { id, detach } => {
+        AppAction::Start { id, detach, .. } => {
             match with_spinner(|| daemon.start(&id))? {
                 false => println!("{}", tf(Msg::AppStarted, &id)),
                 true => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
@@ -2583,15 +2708,15 @@ fn app_cmd_daemon(
             daemon.attach(&id)?;
         }
         AppAction::Settings { id } => app_settings_cmd_daemon(daemon, &id)?,
-        AppAction::Stop { id } => match with_spinner(|| daemon.stop(&id))? {
+        AppAction::Stop { id, .. } => match with_spinner(|| daemon.stop(&id))? {
             false => println!("{}", tf(Msg::AppStopped, &id)),
             true => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
-        AppAction::Kill { id } => match with_spinner(|| daemon.kill(&id))? {
+        AppAction::Kill { id, .. } => match with_spinner(|| daemon.kill(&id))? {
             false => println!("{}", tf(Msg::AppKilled, &id)),
             true => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
-        AppAction::Restart { id } => {
+        AppAction::Restart { id, .. } => {
             with_spinner(|| daemon.restart(&id))?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
@@ -2599,8 +2724,9 @@ fn app_cmd_daemon(
             id,
             tail,
             timestamps,
+            service,
         } => {
-            let logs = daemon.logs(&id, tail, timestamps)?;
+            let logs = daemon.logs(&id, tail, timestamps, service.as_deref())?;
             if logs.trim().is_empty() {
                 println!("{}", t(Msg::NoLogs));
             } else {
@@ -2623,10 +2749,34 @@ fn app_cmd_daemon(
 fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
     let manager = AppManager::new(config);
     let ctx = UserContext::current();
+    if let Some((id, service, op)) = service_target(&action) {
+        with_spinner(|| manager.control_service(&ctx, id, service, op))?;
+        print_service_control(id, service, op);
+        return Ok(());
+    }
     match action {
         AppAction::List => {
             let rows: Vec<AppRow> = manager.list(&ctx)?.iter().map(local_row).collect();
             print_app_list(&rows, ctx.is_root, "");
+        }
+        AppAction::Services { id } => {
+            let (_, services) = manager.services(&ctx, &id, None)?;
+            let rows: Vec<ServiceRow> = services
+                .into_iter()
+                .map(|svc| ServiceRow {
+                    ports: service_ports_label(
+                        svc.ports
+                            .into_iter()
+                            .map(|p| (p.private, p.public, p.protocol)),
+                    ),
+                    name: svc.name,
+                    state: svc.state,
+                    health: svc.health,
+                    image: svc.image,
+                    replicas: svc.replicas,
+                })
+                .collect();
+            print_services(&id, &rows);
         }
         AppAction::Info { id } => {
             let status = manager.status(&ctx, &id)?;
@@ -2679,7 +2829,7 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             service,
             no_pull,
         } => rebuild_cmd(&app, service.as_deref(), no_pull, config)?,
-        AppAction::Start { id, detach } => {
+        AppAction::Start { id, detach, .. } => {
             confirm_start_resources(&manager, &ctx, &id, config)?;
             match with_spinner(|| manager.start(&ctx, &id))? {
                 Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
@@ -2701,15 +2851,15 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
                 attach_cmd(&id, config)?;
             }
         }
-        AppAction::Stop { id } => match with_spinner(|| manager.stop(&ctx, &id))? {
+        AppAction::Stop { id, .. } => match with_spinner(|| manager.stop(&ctx, &id))? {
             Outcome::Done => println!("{}", tf(Msg::AppStopped, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
-        AppAction::Kill { id } => match with_spinner(|| manager.kill(&ctx, &id))? {
+        AppAction::Kill { id, .. } => match with_spinner(|| manager.kill(&ctx, &id))? {
             Outcome::Done => println!("{}", tf(Msg::AppKilled, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
-        AppAction::Restart { id } => {
+        AppAction::Restart { id, .. } => {
             with_spinner(|| manager.restart(&ctx, &id))?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
@@ -2717,8 +2867,12 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             id,
             tail,
             timestamps,
+            service,
         } => {
-            let logs = manager.logs(&ctx, &id, tail, timestamps)?;
+            let logs = match &service {
+                Some(service) => manager.service_logs(&ctx, &id, service, tail, timestamps)?,
+                None => manager.logs(&ctx, &id, tail, timestamps)?,
+            };
             if logs.trim().is_empty() {
                 println!("{}", t(Msg::NoLogs));
             } else {

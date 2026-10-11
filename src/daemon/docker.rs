@@ -439,6 +439,7 @@ pub struct ContainerMountInfo {
 /// Unlike [`PublishedPort`], which describes what an app's *manifest asks
 /// for*, this is what the Engine actually has: a port that is merely exposed
 /// carries no `public` side at all.
+#[derive(Debug, Clone)]
 pub struct ContainerPortInfo {
     pub private: u16,
     pub public: Option<u16>,

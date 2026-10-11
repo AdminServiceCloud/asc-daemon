@@ -39,6 +39,11 @@ const BACKED_UP_DIRS: [&str; 2] = ["repository", "data"];
 const SETTINGS_ENTRY: &str = ".asc/settings.json";
 const LEGACY_SETTINGS_ENTRY: &str = "config/settings.json";
 
+/// Archive path of a docker compose app's per-service settings (the
+/// daemon's override file): app configuration like `settings.json`, kept
+/// outside `repository/`, so it is archived on its own.
+const COMPOSE_OVERRIDE_ENTRY: &str = ".asc/compose.override.yaml";
+
 /// `asc.backup.yaml`, optional, at the repository root: paths to leave out
 /// of the archive, relative to the app directory (e.g. `data/cache/**`,
 /// `repository/vendor`).
@@ -254,6 +259,16 @@ pub fn create_backup_multi(
             if settings.is_file() {
                 append_file(&mut builder, &settings, SETTINGS_ENTRY, include, &exclude)?;
             }
+            let overrides = crate::daemon::apps::compose::override_path(&app_dir);
+            if overrides.is_file() {
+                append_file(
+                    &mut builder,
+                    &overrides,
+                    COMPOSE_OVERRIDE_ENTRY,
+                    include,
+                    &exclude,
+                )?;
+            }
             builder
                 .into_inner()
                 .context("cannot finalize backup archive")?
@@ -295,7 +310,8 @@ pub fn create_backup_multi(
 }
 
 /// Download `backup_name` from `storage_name` and extract it over `meta`'s
-/// app directory — `repository/`, `data/` and `.asc/settings.json` are
+/// app directory — `repository/`, `data/`, `.asc/settings.json` and a
+/// compose app's `.asc/compose.override.yaml` are
 /// replaced wholesale (removed, then re-extracted) so the result is exactly the
 /// backed-up snapshot, not a merge with whatever was there before. The app
 /// should be stopped first; the CLI enforces that.
@@ -331,11 +347,14 @@ pub fn restore_backup(
             }
         }
         let settings = layout::ensure_state_dir(&app_dir)?.join(SettingValues::FILE);
-        match fs::remove_file(&settings) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("cannot clear {}", settings.display()));
+        let overrides = crate::daemon::apps::compose::override_path(&app_dir);
+        for file in [&settings, &overrides] {
+            match fs::remove_file(file) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("cannot clear {}", file.display()));
+                }
             }
         }
         let file = fs::File::open(&tmp_archive)
@@ -542,6 +561,37 @@ mod tests {
         );
         // meta.json is never part of the archive and survives the restore.
         assert!(AppMeta::path(&app_dir).exists());
+    }
+
+    #[test]
+    fn a_compose_override_file_is_backed_up_and_restored() {
+        let ws = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.daemon.data_dir = ws.path().join("data");
+        config.daemon.apps_dir = ws.path().join("apps");
+        let store = AppStore::new(config.daemon.apps_dir.clone());
+        let meta = seed_app(&store, "demo", &[]);
+        let app_dir = store.app_dir("demo").unwrap();
+        let overrides = crate::daemon::apps::compose::override_path(&app_dir);
+        fs::write(&overrides, "services:\n  web:\n    restart: always\n").unwrap();
+        let storages = StorageList::load_with(crate::daemon::pkg::sources::Scope::User).unwrap();
+
+        let info =
+            create_backup(&config, &store, &meta, &storages, storage::LOCAL_NAME, None).unwrap();
+        fs::write(&overrides, "services:\n  web:\n    restart: \"no\"\n").unwrap();
+        restore_backup(
+            &config,
+            &store,
+            &meta,
+            &storages,
+            storage::LOCAL_NAME,
+            &info.name,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&overrides).unwrap(),
+            "services:\n  web:\n    restart: always\n"
+        );
     }
 
     #[test]

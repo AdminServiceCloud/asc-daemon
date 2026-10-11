@@ -354,6 +354,8 @@ fn dynamic_source(path: &[String], arg: &Arg) -> Option<Dynamic> {
         (["rebuild"], "app") | (["app", "rebuild"], "app") => {
             Dynamic::AppsOfKind(&["docker", "compose"])
         }
+        // Only a compose app has services.
+        (["app", "services"], "id") => Dynamic::AppsOfKind(&["compose"]),
         (["source", "remove"], "name") => Dynamic::Sources,
         (["backup", "storage", "remove"], "name") => Dynamic::Storages,
         (["auth", "remove"], "target") => Dynamic::Credentials,
@@ -592,6 +594,15 @@ mod tests {
         let flags = values("asc rebuild demo --");
         assert!(flags.contains(&"--service".to_string()));
         assert!(flags.contains(&"--no-pull".to_string()));
+    }
+
+    #[test]
+    fn compose_services_are_reachable_from_the_lifecycle_commands() {
+        assert!(values("asc app ").contains(&"services".to_string()));
+        for action in ["start", "stop", "restart", "kill", "logs"] {
+            let flags = values(&format!("asc app {action} demo --"));
+            assert!(flags.contains(&"--service".to_string()), "{action}");
+        }
     }
 
     #[test]

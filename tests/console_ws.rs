@@ -75,7 +75,7 @@ async fn ws_streams_logs_with_valid_token() {
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Logs, Vec::new())
+        .issue_console_token(root(), "demo".into(), SessionType::Logs, Vec::new(), None)
         .await
         .unwrap();
 
@@ -107,7 +107,7 @@ async fn ws_rejects_invalid_and_reused_tokens() {
 
     // A valid token works once...
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Logs, Vec::new())
+        .issue_console_token(root(), "demo".into(), SessionType::Logs, Vec::new(), None)
         .await
         .unwrap();
     let ok = connect_async(format!("ws://{addr}/v1/console?token={token}")).await;
@@ -125,7 +125,7 @@ async fn attach_reports_unsupported_runtime() {
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Attach, Vec::new())
+        .issue_console_token(root(), "demo".into(), SessionType::Attach, Vec::new(), None)
         .await
         .unwrap();
     let (mut socket, _) = connect_async(format!("ws://{addr}/v1/console?token={token}"))
@@ -139,13 +139,38 @@ async fn attach_reports_unsupported_runtime() {
 }
 
 #[tokio::test]
+async fn a_service_session_needs_a_compose_app() {
+    let (state, _ws) = test_state();
+    install_app_with_logs(&state, "demo", "");
+    for session in [SessionType::Logs, SessionType::Exec, SessionType::Attach] {
+        let err = state
+            .issue_console_token(
+                root(),
+                "demo".into(),
+                session,
+                Vec::new(),
+                Some("web".into()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<asc_daemon::daemon::exec::ModuleError>(),
+                Some(asc_daemon::daemon::exec::ModuleError::Invalid(_))
+            ),
+            "{session:?}: {err:#}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn exec_reports_unsupported_runtime() {
     let (state, _ws) = test_state();
     install_app_with_logs(&state, "demo", "");
     let addr = spawn_server(Arc::clone(&state)).await;
 
     let (token, _) = state
-        .issue_console_token(root(), "demo".into(), SessionType::Exec, Vec::new())
+        .issue_console_token(root(), "demo".into(), SessionType::Exec, Vec::new(), None)
         .await
         .unwrap();
     let (mut socket, _) = connect_async(format!("ws://{addr}/v1/console?token={token}"))
@@ -170,6 +195,7 @@ async fn exec_token_carries_the_command_and_geometry_query_params_are_accepted()
             "demo".into(),
             SessionType::Exec,
             vec!["/bin/sh".into(), "-c".into(), "echo hi".into()],
+            None,
         )
         .await
         .unwrap();

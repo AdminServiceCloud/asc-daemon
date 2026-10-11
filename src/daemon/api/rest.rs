@@ -71,6 +71,16 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/apps/{id}/kill", post(kill_app))
         .route("/v1/apps/{id}/restart", post(restart_app))
         .route("/v1/apps/{id}/logs", get(app_logs))
+        // Services of a docker compose app.
+        .route("/v1/apps/{id}/services", get(app_services))
+        .route(
+            "/v1/apps/{id}/services/{service}/settings",
+            get(app_service_settings).put(set_app_service_settings),
+        )
+        .route(
+            "/v1/apps/{id}/services/{service}/{action}",
+            post(control_app_service),
+        )
         .route(
             "/v1/apps/{id}/settings",
             get(app_settings).put(set_app_settings),
@@ -429,6 +439,10 @@ struct AppJson {
     /// Stable instance identity; absent for legacy installs.
     #[serde(skip_serializing_if = "Option::is_none")]
     uuid: Option<String>,
+    /// A docker compose app's services (`name`, `state`, `health`); absent
+    /// for every other kind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    compose_services: Vec<serde_json::Value>,
 }
 
 fn to_json(status: &AppStatus) -> AppJson {
@@ -451,6 +465,17 @@ fn to_json(status: &AppStatus) -> AppJson {
             .then(|| status.meta.name.clone()),
         package: status.meta.package.clone(),
         quota: status.meta.quota,
+        compose_services: status
+            .compose_services
+            .iter()
+            .map(|service| {
+                serde_json::json!({
+                    "name": service.name,
+                    "state": service.state,
+                    "health": service.health,
+                })
+            })
+            .collect(),
     }
 }
 
@@ -1535,6 +1560,9 @@ struct LogsQuery {
     tail: Option<usize>,
     #[serde(default)]
     timestamps: bool,
+    /// One service of a docker compose app.
+    #[serde(default)]
+    service: Option<String>,
 }
 
 async fn app_logs(
@@ -1543,10 +1571,167 @@ async fn app_logs(
     Path(id): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
+    let service = query.service.filter(|s| !s.is_empty());
     let logs = state
-        .logs(ctx, id, query.tail.unwrap_or(100), query.timestamps)
+        .logs(
+            ctx,
+            id,
+            query.tail.unwrap_or(100),
+            query.timestamps,
+            service,
+        )
         .await?;
     Ok(Json(serde_json::json!({ "logs": logs })).into_response())
+}
+
+/// One compose service — the JSON form of `ComposeServiceInfo`.
+fn service_json(
+    info: &crate::daemon::apps::compose_services::ServiceInfo,
+    stats: Option<&super::ContainerStatsRow>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": info.name,
+        "container": info.container,
+        "container_id": info.container_id,
+        "image": info.image,
+        "state": info.state,
+        "health": info.health,
+        "status": info.status,
+        "exit_code": info.exit_code,
+        "started_at": info.started_at,
+        "ports": info.ports.iter().map(|port| serde_json::json!({
+            "private_port": port.private,
+            "public_port": port.public,
+            "protocol": port.protocol,
+            "ip": port.ip,
+        })).collect::<Vec<_>>(),
+        "replicas": info.replicas,
+        "buildable": info.buildable,
+        "has_overrides": info.has_overrides,
+        "stats": stats.map(|row| serde_json::json!({
+            "cpu_percent": row.cpu_percent,
+            "memory_bytes": row.memory_bytes,
+            "memory_limit_bytes": row.memory_limit_bytes,
+            "network_rx_bytes": row.net_rx_bytes,
+            "network_tx_bytes": row.net_tx_bytes,
+            "block_read_bytes": row.block_read_bytes,
+            "block_write_bytes": row.block_write_bytes,
+        })),
+    })
+}
+
+#[derive(Deserialize)]
+struct ServicesQuery {
+    #[serde(default)]
+    service: Option<String>,
+    #[serde(default)]
+    stats: bool,
+}
+
+/// Services of a docker compose app; 400 for any other app kind.
+async fn app_services(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    Query(query): Query<ServicesQuery>,
+) -> Result<Response, ApiError> {
+    let service = query.service.filter(|s| !s.is_empty());
+    let services = state
+        .list_app_services(ctx, id, service, query.stats)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "services": services
+            .iter()
+            .map(|(info, stats)| service_json(info, stats.as_ref()))
+            .collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+/// `start|stop|restart|kill` one service; the app's desired state stays.
+async fn control_app_service(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path((id, service, action)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let Some(action) = crate::daemon::apps::compose_services::ServiceAction::from_wire(&action)
+    else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "action must be start, stop, restart or kill" })),
+        )
+            .into_response());
+    };
+    let info = state.control_app_service(ctx, id, service, action).await?;
+    Ok(Json(serde_json::json!({ "service": service_json(&info, None) })).into_response())
+}
+
+/// The JSON form of `ComposeServiceSettings`.
+#[derive(Deserialize, Serialize, Default)]
+struct ServiceOverridesJson {
+    #[serde(default)]
+    environment: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cpus: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restart: Option<String>,
+}
+
+async fn app_service_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path((id, service)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let settings = state.app_service_settings(ctx, id, service).await?;
+    let overrides = ServiceOverridesJson {
+        environment: settings.overrides.environment,
+        cpus: settings.overrides.cpus,
+        memory_bytes: settings.overrides.memory_bytes,
+        restart: settings.overrides.restart,
+    };
+    Ok(Json(serde_json::json!({
+        "overrides": overrides,
+        "effective": {
+            "environment_keys": settings.effective_environment_keys,
+            "cpus": settings.effective_cpus,
+            "memory_bytes": settings.effective_memory_bytes,
+            "restart": settings.effective_restart,
+        },
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct ServiceSettingsBody {
+    /// Full replacement: what is absent here is cleared.
+    #[serde(default)]
+    overrides: ServiceOverridesJson,
+    #[serde(default)]
+    apply: bool,
+}
+
+async fn set_app_service_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path((id, service)): Path<(String, String)>,
+    Json(body): Json<ServiceSettingsBody>,
+) -> Result<Response, ApiError> {
+    let overrides = crate::daemon::apps::compose_override::ServiceOverride {
+        environment: body.overrides.environment,
+        cpus: body.overrides.cpus,
+        memory_bytes: body.overrides.memory_bytes,
+        restart: body.overrides.restart.filter(|r| !r.is_empty()),
+    };
+    let write = state
+        .set_app_service_settings(ctx, id, service, overrides, body.apply)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "applied": write.applied,
+        "restart_required": write.restart_required,
+    }))
+    .into_response())
 }
 
 async fn remove_app(
@@ -1600,6 +1785,9 @@ struct ConsoleTokenBody {
     /// shell.
     #[serde(default)]
     command: Vec<String>,
+    /// Docker compose apps only: scope the session to one service.
+    #[serde(default)]
+    service: Option<String>,
 }
 
 async fn console_token(
@@ -1621,7 +1809,13 @@ async fn console_token(
         }
     };
     let (token, expires_at) = state
-        .issue_console_token(ctx, id, session, body.command)
+        .issue_console_token(
+            ctx,
+            id,
+            session,
+            body.command,
+            body.service.filter(|s| !s.is_empty()),
+        )
         .await?;
     Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
 }

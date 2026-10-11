@@ -12,6 +12,7 @@ use super::console::SessionType;
 use super::proto::v1 as pb;
 use super::tokens;
 use super::{ApiState, proto};
+use crate::daemon::apps::compose_services as apps_services;
 use crate::daemon::apps::{AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::files;
 use crate::daemon::pkg;
@@ -229,7 +230,85 @@ fn to_pb(status: &AppStatus) -> pb::App {
         package: status.meta.package.clone(),
         repo_path: status.meta.repo_path.clone(),
         branch: status.meta.branch.clone(),
-        compose_services: Vec::new(),
+        compose_services: status
+            .compose_services
+            .iter()
+            .map(|service| pb::AppServiceSummary {
+                name: service.name.clone(),
+                state: service.state.clone(),
+                health: service.health.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// One compose service, with its first replica's usage when sampled.
+fn service_info_to_pb(
+    info: &apps_services::ServiceInfo,
+    stats: Option<&super::ContainerStatsRow>,
+) -> pb::ComposeServiceInfo {
+    pb::ComposeServiceInfo {
+        name: info.name.clone(),
+        container: info.container.clone(),
+        container_id: info.container_id.clone(),
+        image: info.image.clone(),
+        state: info.state.clone(),
+        health: info.health.clone(),
+        status: info.status.clone(),
+        exit_code: info.exit_code.and_then(|code| i32::try_from(code).ok()),
+        started_at: info.started_at,
+        ports: info
+            .ports
+            .iter()
+            .map(|port| pb::ContainerPort {
+                private_port: port.private as u32,
+                public_port: port.public.map(u32::from),
+                protocol: port.protocol.clone(),
+                ip: port.ip.clone(),
+            })
+            .collect(),
+        replicas: info.replicas,
+        buildable: info.buildable,
+        has_overrides: info.has_overrides,
+        stats: stats.map(container_stats_to_pb),
+    }
+}
+
+fn service_settings_to_pb(
+    overrides: &crate::daemon::apps::compose_override::ServiceOverride,
+) -> pb::ComposeServiceSettings {
+    pb::ComposeServiceSettings {
+        environment: overrides
+            .environment
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        cpus: overrides.cpus,
+        memory_bytes: overrides.memory_bytes,
+        restart: overrides.restart.clone(),
+    }
+}
+
+fn service_settings_from_pb(
+    settings: pb::ComposeServiceSettings,
+) -> crate::daemon::apps::compose_override::ServiceOverride {
+    crate::daemon::apps::compose_override::ServiceOverride {
+        environment: settings.environment.into_iter().collect(),
+        cpus: settings.cpus,
+        memory_bytes: settings.memory_bytes,
+        restart: settings.restart.filter(|r| !r.is_empty()),
+    }
+}
+
+fn service_action_from_pb(action: i32) -> Result<apps_services::ServiceAction, Status> {
+    match pb::AppServiceAction::try_from(action) {
+        Ok(pb::AppServiceAction::Start) => Ok(apps_services::ServiceAction::Start),
+        Ok(pb::AppServiceAction::Stop) => Ok(apps_services::ServiceAction::Stop),
+        Ok(pb::AppServiceAction::Restart) => Ok(apps_services::ServiceAction::Restart),
+        Ok(pb::AppServiceAction::Kill) => Ok(apps_services::ServiceAction::Kill),
+        _ => Err(Status::invalid_argument(
+            "action must be START, STOP, RESTART or KILL",
+        )),
     }
 }
 
@@ -1483,7 +1562,7 @@ impl AppService for Grpc {
         };
         let logs = self
             .0
-            .logs(ctx, req.id, tail, req.timestamps)
+            .logs(ctx, req.id, tail, req.timestamps, req.service)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::GetAppLogsResponse { logs }))
@@ -1519,7 +1598,7 @@ impl AppService for Grpc {
         };
         let (token, expires_at) = self
             .0
-            .issue_console_token(ctx, req.app_id, session, req.command)
+            .issue_console_token(ctx, req.app_id, session, req.command, req.service)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::IssueConsoleTokenResponse {
@@ -1721,38 +1800,76 @@ impl AppService for Grpc {
 
     async fn list_app_services(
         &self,
-        _request: Request<pb::ListAppServicesRequest>,
+        request: Request<pb::ListAppServicesRequest>,
     ) -> Result<Response<pb::ListAppServicesResponse>, Status> {
-        Err(Status::unimplemented(
-            "ListAppServices is not implemented yet",
-        ))
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let services = self
+            .0
+            .list_app_services(ctx, req.id, req.service, req.with_stats)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListAppServicesResponse {
+            services: services
+                .iter()
+                .map(|(info, stats)| service_info_to_pb(info, stats.as_ref()))
+                .collect(),
+        }))
     }
 
     async fn control_app_service(
         &self,
-        _request: Request<pb::ControlAppServiceRequest>,
+        request: Request<pb::ControlAppServiceRequest>,
     ) -> Result<Response<pb::ControlAppServiceResponse>, Status> {
-        Err(Status::unimplemented(
-            "ControlAppService is not implemented yet",
-        ))
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let action = service_action_from_pb(req.action)?;
+        let info = self
+            .0
+            .control_app_service(ctx, req.id, req.service, action)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ControlAppServiceResponse {
+            service: Some(service_info_to_pb(&info, None)),
+        }))
     }
 
     async fn get_app_service_settings(
         &self,
-        _request: Request<pb::GetAppServiceSettingsRequest>,
+        request: Request<pb::GetAppServiceSettingsRequest>,
     ) -> Result<Response<pb::GetAppServiceSettingsResponse>, Status> {
-        Err(Status::unimplemented(
-            "GetAppServiceSettings is not implemented yet",
-        ))
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let settings = self
+            .0
+            .app_service_settings(ctx, req.id, req.service)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::GetAppServiceSettingsResponse {
+            overrides: Some(service_settings_to_pb(&settings.overrides)),
+            effective_environment_keys: settings.effective_environment_keys,
+            effective_cpus: settings.effective_cpus,
+            effective_memory_bytes: settings.effective_memory_bytes,
+            effective_restart: settings.effective_restart,
+        }))
     }
 
     async fn set_app_service_settings(
         &self,
-        _request: Request<pb::SetAppServiceSettingsRequest>,
+        request: Request<pb::SetAppServiceSettingsRequest>,
     ) -> Result<Response<pb::SetAppServiceSettingsResponse>, Status> {
-        Err(Status::unimplemented(
-            "SetAppServiceSettings is not implemented yet",
-        ))
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let overrides = service_settings_from_pb(req.overrides.unwrap_or_default());
+        let write = self
+            .0
+            .set_app_service_settings(ctx, req.id, req.service, overrides, req.apply)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::SetAppServiceSettingsResponse {
+            applied: write.applied,
+            restart_required: write.restart_required,
+        }))
     }
 }
 

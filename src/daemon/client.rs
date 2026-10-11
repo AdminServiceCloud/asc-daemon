@@ -293,6 +293,32 @@ pub struct RemoteBackup {
     pub bytes: u64,
 }
 
+/// One published port of a compose service, as `GET /v1/apps/{id}/services`
+/// reports it.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteServicePort {
+    pub private_port: u16,
+    #[serde(default)]
+    pub public_port: Option<u16>,
+    #[serde(default)]
+    pub protocol: String,
+}
+
+/// One service of a docker compose app.
+#[derive(Debug, serde::Deserialize)]
+pub struct RemoteService {
+    pub name: String,
+    #[serde(default)]
+    pub image: String,
+    pub state: String,
+    #[serde(default)]
+    pub health: String,
+    #[serde(default)]
+    pub ports: Vec<RemoteServicePort>,
+    #[serde(default)]
+    pub replicas: u32,
+}
+
 /// Blocking client of the daemon's unix-socket API.
 pub struct Daemon {
     socket: PathBuf,
@@ -585,13 +611,37 @@ impl Daemon {
         Ok(())
     }
 
-    pub fn logs(&self, id: &str, tail: usize, timestamps: bool) -> Result<String> {
+    /// The app's log tail; `service` — one service of a docker compose app.
+    pub fn logs(
+        &self,
+        id: &str,
+        tail: usize,
+        timestamps: bool,
+        service: Option<&str>,
+    ) -> Result<String> {
+        let mut path = format!("/v1/apps/{id}/logs?tail={tail}&timestamps={timestamps}");
+        if let Some(service) = service {
+            path.push_str(&format!("&service={service}"));
+        }
+        let json = self.request(Method::GET, &path, None)?;
+        Ok(json["logs"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// The services of a docker compose app.
+    pub fn services(&self, id: &str) -> Result<Vec<RemoteService>> {
+        let json = self.request(Method::GET, &format!("/v1/apps/{id}/services"), None)?;
+        serde_json::from_value(json["services"].clone())
+            .context("malformed service list from the daemon")
+    }
+
+    /// `start|stop|restart|kill` one service of a docker compose app.
+    pub fn control_service(&self, id: &str, service: &str, action: &str) -> Result<RemoteService> {
         let json = self.request(
-            Method::GET,
-            &format!("/v1/apps/{id}/logs?tail={tail}&timestamps={timestamps}"),
+            Method::POST,
+            &format!("/v1/apps/{id}/services/{service}/{action}"),
             None,
         )?;
-        Ok(json["logs"].as_str().unwrap_or_default().to_string())
+        serde_json::from_value(json["service"].clone()).context("malformed service from the daemon")
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {

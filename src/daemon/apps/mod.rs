@@ -6,6 +6,7 @@
 
 pub mod compose;
 pub mod compose_override;
+pub mod compose_services;
 pub mod disk;
 pub mod docker;
 pub mod driver;
@@ -163,6 +164,10 @@ pub struct AppStatus {
     /// without a commit to show. `None` when it cannot be read (not a git
     /// repository, git not installed).
     pub commit: Option<String>,
+    /// A docker compose app's services with the state of their first
+    /// container, observed together with `state`; empty for every other
+    /// runtime.
+    pub compose_services: Vec<compose_services::ServiceSummary>,
 }
 
 /// One app's resource consumption for `asc stats`.
@@ -255,21 +260,109 @@ impl AppManager {
     }
 
     /// Apps visible to this user (root sees all), with runtime state.
+    ///
+    /// Every compose app's state and service summary come from **one**
+    /// Engine container list for the whole call, grouped by the compose
+    /// project label — not a `docker compose ps` per app.
     pub fn list(&self, ctx: &UserContext) -> Result<Vec<AppStatus>> {
-        let mut result = Vec::new();
-        for meta in self.store.list()? {
-            if !ctx.is_root && meta.owner.uid != ctx.uid {
-                continue;
+        let metas: Vec<AppMeta> = self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|meta| ctx.is_root || meta.owner.uid == ctx.uid)
+            .collect();
+        let mut by_project: Option<std::collections::HashMap<String, Vec<_>>> = None;
+        if metas
+            .iter()
+            .any(|m| matches!(m.runtime, meta::Runtime::Compose { .. }))
+        {
+            match crate::daemon::docker::list_containers(&self.config.docker, true, false) {
+                Ok(containers) => {
+                    let mut groups = std::collections::HashMap::new();
+                    for container in containers {
+                        if let Some(project) = container.compose_project.clone() {
+                            groups
+                                .entry(project)
+                                .or_insert_with(Vec::new)
+                                .push(container);
+                        }
+                    }
+                    by_project = Some(groups);
+                }
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot list containers for compose apps");
+                }
             }
-            let state = self.state_of(&meta);
+        }
+        let mut result = Vec::new();
+        for meta in metas {
+            let (state, compose_services) = match (&meta.runtime, &by_project) {
+                (meta::Runtime::Compose { project, .. }, groups) => {
+                    let containers = groups
+                        .as_ref()
+                        .and_then(|g| g.get(project))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    self.compose_status(&meta, containers, groups.is_some())
+                }
+                _ => (self.state_of(&meta), Vec::new()),
+            };
             let commit = self.commit_of(&meta.id);
             result.push(AppStatus {
                 meta,
                 state,
                 commit,
+                compose_services,
             });
         }
         Ok(result)
+    }
+
+    /// State and service summaries of a compose app from its containers;
+    /// `known` is false when the Engine could not be asked (stopped, no
+    /// services shown).
+    fn compose_status(
+        &self,
+        meta: &AppMeta,
+        containers: &[crate::daemon::docker::ContainerInfo],
+        known: bool,
+    ) -> (RuntimeState, Vec<compose_services::ServiceSummary>) {
+        if !known {
+            return (RuntimeState::Stopped, Vec::new());
+        }
+        let names = self
+            .store
+            .app_dir(&meta.id)
+            .map(|dir| compose_services::service_names(meta, &dir))
+            .unwrap_or_default();
+        (
+            compose::state_of(containers),
+            compose_services::summaries(&names, containers),
+        )
+    }
+
+    /// [`AppStatus`] of one app — for a compose app, one label-filtered
+    /// Engine query gives both its state and its services.
+    fn status_of(&self, meta: AppMeta) -> AppStatus {
+        let (state, compose_services) = match &meta.runtime {
+            meta::Runtime::Compose { project, .. } => {
+                match crate::daemon::docker::list_project_containers(&self.config.docker, project) {
+                    Ok(containers) => self.compose_status(&meta, &containers, true),
+                    Err(err) => {
+                        warn!(app = %meta.id, error = %format!("{err:#}"), "cannot query app state");
+                        (RuntimeState::Stopped, Vec::new())
+                    }
+                }
+            }
+            _ => (self.state_of(&meta), Vec::new()),
+        };
+        let commit = self.commit_of(&meta.id);
+        AppStatus {
+            meta,
+            state,
+            commit,
+            compose_services,
+        }
     }
 
     /// The commit the app's `repository/` clone is checked out at — a
@@ -440,13 +533,7 @@ impl AppManager {
 
     pub fn status(&self, ctx: &UserContext, id: &str) -> Result<AppStatus> {
         let meta = self.get_authorized(ctx, id)?;
-        let state = self.state_of(&meta);
-        let commit = self.commit_of(&meta.id);
-        Ok(AppStatus {
-            meta,
-            state,
-            commit,
-        })
+        Ok(self.status_of(meta))
     }
 
     /// Set or clear the app's custom name. An empty (or
@@ -479,13 +566,7 @@ impl AppManager {
         };
         meta.custom_name = custom_name;
         self.store.save(&meta)?;
-        let state = self.state_of(&meta);
-        let commit = self.commit_of(&meta.id);
-        Ok(AppStatus {
-            meta,
-            state,
-            commit,
-        })
+        Ok(self.status_of(meta))
     }
 
     pub fn start(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
@@ -602,6 +683,79 @@ impl AppManager {
         let meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
         driver::for_runtime(&meta.runtime, &self.config.docker).logs(&meta, &dir, tail, timestamps)
+    }
+
+    /// The services of a docker compose app (or just `only`) — see
+    /// [`compose_services::list`].
+    pub fn services(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        only: Option<&str>,
+    ) -> Result<(AppMeta, Vec<compose_services::ServiceInfo>)> {
+        let meta = self.get_authorized(ctx, id)?;
+        let dir = self.store.app_dir(&meta.id)?;
+        let services = compose_services::list(&self.config, &meta, &dir, only)?;
+        Ok((meta, services))
+    }
+
+    /// Start, stop, restart or kill one service of a docker compose app.
+    /// The app's desired state is left alone: stopping a service is
+    /// temporary.
+    pub fn control_service(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        service: &str,
+        action: compose_services::ServiceAction,
+    ) -> Result<compose_services::ServiceInfo> {
+        let meta = self.get_authorized(ctx, id)?;
+        let dir = self.store.app_dir(&meta.id)?;
+        compose_services::control(&self.config, &meta, &dir, service, action)
+    }
+
+    /// The last `tail` log lines of one service of a docker compose app.
+    pub fn service_logs(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        service: &str,
+        tail: usize,
+        timestamps: bool,
+    ) -> Result<String> {
+        let meta = self.get_authorized(ctx, id)?;
+        let dir = self.store.app_dir(&meta.id)?;
+        compose_services::logs(&self.config, &meta, &dir, service, tail, timestamps)
+    }
+
+    /// One service's settings: the daemon's overrides and what compose
+    /// resolves with them.
+    pub fn service_settings(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        service: &str,
+    ) -> Result<compose_services::ServiceSettings> {
+        let meta = self.get_authorized(ctx, id)?;
+        let dir = self.store.app_dir(&meta.id)?;
+        compose_services::settings(&self.config, &meta, &dir, service)
+    }
+
+    /// Replace one service's overrides, under the app's operation lock — a
+    /// settings write must not land in the middle of an upgrade or rebuild.
+    pub fn set_service_settings(
+        &self,
+        ctx: &UserContext,
+        id: &str,
+        service: &str,
+        overrides: compose_override::ServiceOverride,
+        apply: bool,
+    ) -> Result<compose_services::SettingsWrite> {
+        let meta = self.get_authorized(ctx, id)?;
+        let dir = self.store.app_dir(&meta.id)?;
+        compose_services::require(&meta, &dir, service)?;
+        let _lock = oplock::acquire(&dir, &meta.id)?;
+        compose_services::set_settings(&self.config, &meta, &dir, service, overrides, apply)
     }
 
     /// Remove the app: release runtime resources, then delete its directory.

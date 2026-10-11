@@ -33,6 +33,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use tracing::{debug, info, warn};
 
+use crate::daemon::apps::compose_services as apps_services;
 use crate::daemon::apps::meta::AppMeta;
 use crate::daemon::apps::{AppManager, AppStatus, Outcome, RuntimeState, UserContext};
 use crate::daemon::config::Config;
@@ -104,6 +105,10 @@ pub const CAPABILITIES: &[&str] = &[
     "app.upgrade.compose",
     // RebuildApp/RebuildAppStream, POST /v1/apps/{id}/rebuild.
     "app.rebuild",
+    // ListAppServices, ControlAppService, Get/SetAppServiceSettings,
+    // App.compose_services, GetAppLogsRequest.service,
+    // IssueConsoleTokenRequest.service.
+    "app.services",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -1654,15 +1659,98 @@ impl ApiState {
         self.blocking(move |s| s.manager.restart(&ctx, &id)).await
     }
 
+    /// The app's log tail — or, with `service`, one service of a docker
+    /// compose app (`INVALID_ARGUMENT` for any other kind).
     pub async fn logs(
         self: &Arc<Self>,
         ctx: UserContext,
         id: String,
         tail: usize,
         timestamps: bool,
+        service: Option<String>,
     ) -> Result<String> {
-        self.blocking(move |s| s.manager.logs(&ctx, &id, tail, timestamps))
+        self.blocking(move |s| match &service {
+            Some(service) => s.manager.service_logs(&ctx, &id, service, tail, timestamps),
+            None => s.manager.logs(&ctx, &id, tail, timestamps),
+        })
+        .await
+    }
+
+    /// Every service of a docker compose app (or just `only`), each with
+    /// its first replica's live usage when `with_stats` — one shared
+    /// sampling window over this app's running containers only. No root
+    /// requirement: the caller owns the app (unlike `list_container_stats`,
+    /// which covers the whole host).
+    pub async fn list_app_services(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        only: Option<String>,
+        with_stats: bool,
+    ) -> Result<Vec<(apps_services::ServiceInfo, Option<ContainerStatsRow>)>> {
+        self.blocking(move |s| {
+            let (_, services) = s.manager.services(&ctx, &id, only.as_deref())?;
+            let mut stats = if with_stats {
+                let targets: Vec<String> = services
+                    .iter()
+                    .filter(|svc| svc.state == "running" && !svc.container_id.is_empty())
+                    .map(|svc| svc.container_id.clone())
+                    .collect();
+                sample_container_stats(&s.config.docker, targets)
+            } else {
+                Vec::new()
+            };
+            Ok(services
+                .into_iter()
+                .map(|svc| {
+                    let row = stats
+                        .iter()
+                        .position(|row| row.id == svc.container_id)
+                        .map(|at| stats.swap_remove(at));
+                    (svc, row)
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Start, stop, restart or kill one service of a docker compose app.
+    pub async fn control_app_service(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        service: String,
+        action: apps_services::ServiceAction,
+    ) -> Result<apps_services::ServiceInfo> {
+        self.blocking(move |s| s.manager.control_service(&ctx, &id, &service, action))
             .await
+    }
+
+    /// One service's overrides and effective settings.
+    pub async fn app_service_settings(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        service: String,
+    ) -> Result<apps_services::ServiceSettings> {
+        self.blocking(move |s| s.manager.service_settings(&ctx, &id, &service))
+            .await
+    }
+
+    /// Replace one service's overrides; `apply` recreates a running service.
+    pub async fn set_app_service_settings(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        service: String,
+        overrides: crate::daemon::apps::compose_override::ServiceOverride,
+        apply: bool,
+    ) -> Result<apps_services::SettingsWrite> {
+        self.blocking(move |s| {
+            s.manager
+                .set_service_settings(&ctx, &id, &service, overrides, apply)
+        })
+        .await
     }
 
     pub async fn remove(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<()> {
@@ -1857,19 +1945,46 @@ impl ApiState {
         Ok((file, values, config_dir))
     }
 
-    /// Issue a one-time console token after verifying the app exists.
+    /// Issue a one-time console token after verifying the app exists — and,
+    /// with `service`, that it is a docker compose app with that service.
+    /// A service session can be a log stream or a shell, never an attach;
+    /// a shell on a compose app needs a service, since the project has no
+    /// single container.
     pub async fn issue_console_token(
         self: &Arc<Self>,
         ctx: UserContext,
         app_id: String,
         session: console::SessionType,
         command: Vec<String>,
+        service: Option<String>,
     ) -> Result<(String, i64)> {
-        let id = app_id.clone();
+        let (id, wanted) = (app_id.clone(), service.clone());
         // Existence + authorization check first: no tokens for unknown apps.
-        self.blocking(move |s| s.manager.get_authorized(&ctx, &id))
-            .await?;
-        Ok(self.console_tokens.issue(&app_id, session, command))
+        self.blocking(move |s| {
+            let meta = s.manager.get_authorized(&ctx, &id)?;
+            let dir = s.manager.store().app_dir(&meta.id)?;
+            let compose = matches!(
+                meta.runtime,
+                crate::daemon::apps::meta::Runtime::Compose { .. }
+            );
+            match (&wanted, session) {
+                (Some(service), console::SessionType::Attach) => {
+                    apps_services::require(&meta, &dir, service)?;
+                    Err(crate::daemon::exec::precondition(t(
+                        Msg::ConsoleAttachService,
+                    )))
+                }
+                (Some(service), _) => apps_services::require(&meta, &dir, service),
+                (None, console::SessionType::Exec) if compose => Err(
+                    crate::daemon::exec::precondition(t(Msg::ConsoleExecNeedsService)),
+                ),
+                (None, _) => Ok(()),
+            }
+        })
+        .await?;
+        Ok(self
+            .console_tokens
+            .issue(&app_id, session, command, service))
     }
 
     // ── Registry sources & credentials — pushed by the

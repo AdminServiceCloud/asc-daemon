@@ -38,6 +38,51 @@ struct ComposeService {
     ports: Vec<serde_yaml::Value>,
     #[serde(default)]
     volumes: Vec<serde_yaml::Value>,
+    #[serde(default)]
+    build: Option<serde_yaml::Value>,
+    #[serde(default)]
+    image: Option<String>,
+}
+
+/// What the compose files themselves say about one service, read without
+/// the plugin: cheap enough for a service list polled every few seconds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StaticService {
+    /// Some file gives it a `build:` section.
+    pub(crate) buildable: bool,
+    /// The `image:` the last file naming one gives it.
+    pub(crate) image: Option<String>,
+}
+
+/// Every service the project's `files` (relative to `working_dir`) define,
+/// merged in order the way compose merges them, sorted by name. A file that
+/// cannot be read or parsed contributes nothing — the same permissive stance
+/// as [`detect`]; an unparseable `${…}` in a service *name* is the one thing
+/// this cannot follow, and the recorded `config --services` covers it.
+pub(crate) fn static_services(
+    working_dir: &Path,
+    files: &[String],
+) -> BTreeMap<String, StaticService> {
+    let mut services: BTreeMap<String, StaticService> = BTreeMap::new();
+    for file in files {
+        let Ok(path) = super::install::safe_join(working_dir, file) else {
+            continue;
+        };
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = serde_yaml::from_str::<ComposeDoc>(&raw) else {
+            continue;
+        };
+        for (name, service) in doc.services {
+            let entry = services.entry(name).or_default();
+            entry.buildable |= service.build.is_some();
+            if service.image.is_some() {
+                entry.image = service.image;
+            }
+        }
+    }
+    services
 }
 
 /// Ports a compose app publishes, read from the compose file itself rather
@@ -341,6 +386,34 @@ mod tests {
         assert!(ports.iter().any(|p| p.host == 53 && p.container == 53));
         assert!(ports.iter().any(|p| p.host == 5432 && p.container == 5432));
         assert!(ports.iter().any(|p| p.host == 9000 && p.container == 9000));
+    }
+
+    #[test]
+    fn static_services_merge_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "docker-compose.yml",
+            "services:\n  web:\n    build: .\n  db:\n    image: postgres:15\n",
+        );
+        write(
+            dir.path(),
+            "docker-compose.prod.yml",
+            "services:\n  db:\n    image: postgres:16\n  cache:\n    image: redis\n",
+        );
+        let services = static_services(
+            dir.path(),
+            &[
+                "docker-compose.yml".into(),
+                "docker-compose.prod.yml".into(),
+            ],
+        );
+        assert_eq!(services.keys().collect::<Vec<_>>(), ["cache", "db", "web"]);
+        assert!(services["web"].buildable);
+        assert_eq!(services["db"].image.as_deref(), Some("postgres:16"));
+        assert!(!services["db"].buildable);
+        // A missing or broken file contributes nothing.
+        assert!(static_services(dir.path(), &["nope.yml".into()]).is_empty());
     }
 
     #[test]

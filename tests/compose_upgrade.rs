@@ -288,6 +288,22 @@ fn a_branch_upgrade_pulls_the_new_commit_and_recreates_in_place() {
             "{outcome:?}"
         );
         assert_eq!(containers(&env, &id)["web"].0, after["web"].0);
+
+        // A rebuild on the branch pulls the next commit too, without
+        // changing what the app follows.
+        let v3 = commit_dockerfile(&env.repo, &dockerfile("v3"), "v3");
+        let outcome = pkg::rebuild(&env.config, &env.ctx, &id, None, true, None).unwrap();
+        assert!(outcome.source_updated);
+        assert_eq!(outcome.from_commit.as_deref(), Some(to.as_str()));
+        assert_eq!(outcome.to_commit.as_deref(), Some(v3.as_str()));
+        assert!(outcome.running);
+        assert_eq!(head(&repo_dir), v3);
+        let rebuilt = containers(&env, &id);
+        assert_ne!(rebuilt["web"].0, after["web"].0, "web is recreated");
+        assert_eq!(version_in(&env, &rebuilt["web"].0), "v3");
+        let meta = env.store.get(&id).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("main"));
+        assert_eq!(meta.branch.as_deref(), Some("main"));
     }));
     cleanup(&env, &id);
     result.unwrap();

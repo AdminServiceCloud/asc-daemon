@@ -38,6 +38,8 @@ curl -fsSL https://raw.githubusercontent.com/AdminServiceCloud/asc-daemon/main/i
 | App details | `asc app info <name>` |
 | Disk usage | `asc app disk <name>` — quota bar (if a disk quota is set) plus a breakdown by image, repository, data and custom volumes |
 | Logs (follow) | `asc app logs <name> -f` |
+| Upgrade / rebuild | `asc upgrade <name>[@version]` moves an app to another version (docker compose apps upgrade in place while running; others must be stopped first); `asc rebuild <name> [--no-pull]` pulls/builds its images afresh and recreates its containers without changing the version |
+| Compose app services | `asc app services <name>`; act on one service with `--service <svc>` on `asc app logs|start|stop|restart|kill` — stopping a service is temporary |
 | Remove an app | `asc app remove <name>` — confirm with the user first |
 | Update sources | `asc update` |
 | Add a registry/repo | `asc source add <url>` |

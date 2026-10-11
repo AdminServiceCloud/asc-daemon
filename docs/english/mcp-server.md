@@ -29,9 +29,15 @@ is intended.
 |---|---|---|
 | `system_info`, `metrics_get` | daemon and application metrics | read-only |
 | `app_list`, `app_info`, `logs_read`, `app_settings_get` | application data | read-only |
-| `app_install`, `app_upgrade`, `app_control`, `app_settings_update` | application management | mutating |
+| `app_install`, `app_upgrade`, `app_rebuild`, `app_control`, `app_settings_update` | application management | mutating |
 | `backup_list`, `backup_create`, `backup_restore`, `backup_prune` | backups | restore is destructive |
 | `app_remove`, `exec_command` | removal and host command execution | destructive |
+
+`app_upgrade` upgrades a stopped app — or a docker compose app in place, while
+it runs. `app_rebuild` (`app`, optional `service`, `pull_source` — default
+`true`, forced `false` with a `service`) pulls or builds the app's images afresh
+and recreates its containers without changing its version; see
+[📱 app-management](app-management.md).
 
 App references are resolved by the daemon on every call. A foreign application
 and an unknown application produce the same `not found` error, so ownership is

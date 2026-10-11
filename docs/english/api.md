@@ -37,7 +37,7 @@ Every authenticated request gets a `UserContext` (uid, user name, root flag) sta
 - No token. The daemon asks the kernel for the connecting process's uid (`SO_PEERCRED`) and builds the context from it — nothing inside the request can escalate privileges.
 - The socket file is world-connectable (0666) on purpose: reaching it grants nothing, authorization is the peer uid, per request. A regular user sees and manages **only their own** apps; a root peer sees everyone's.
 - `sudo asc ...` attribution: the CLI forwards `SUDO_UID`/`SUDO_USER` as the `X-Asc-Sudo-Uid`/`X-Asc-Sudo-User` headers; the daemon honors them **only when the peer itself is root**, mirroring the in-process behavior — new apps are attributed to the invoking user while sudo keeps full visibility.
-- CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|logs|remove|info`), `app attach` and `app settings`, and the reporting and upgrade commands (`disk`/`ports`/`stats`/`stacks`/`upgrade`) go through the socket whenever it exists. No socket file — the CLI works in-process as before (root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
+- CLI routing: the lifecycle commands (`ls`/`status`/`install`/`app start|stop|restart|kill|logs|remove|info`, with or without `--service`), `app services`, `app attach` and `app settings`, and the reporting, upgrade and rebuild commands (`disk`/`ports`/`stats`/`stacks`/`upgrade`/`rebuild`) go through the socket whenever it exists. No socket file — the CLI works in-process as before (root on the system paths, a user on their private `~/.asc` tree). A socket that exists but does not answer is an error for a regular user and a warned in-process fallback for root (recovery must not depend on a healthy daemon).
 - Known limits: docker containers still run with the daemon's (root) privileges — a malicious manifest can request dangerous mounts, so a container policy for non-root owners is the follow-up; private-repo installs through the daemon use the daemon's git credentials, not the caller's.
 
 ### 🧭 Capability discovery
@@ -54,7 +54,7 @@ recognizes keeps working against a newer daemon.
 
 ### 🎫 Temporary console tokens
 
-- `AppService.IssueConsoleToken(app_id, session)` / `POST /v1/apps/{id}/console-token {"session": "logs"|"attach"}`.
+- `AppService.IssueConsoleToken(app_id, session, service?)` / `POST /v1/apps/{id}/console-token {"session": "logs"|"attach"|"exec", "service"?}` — `service` scopes a docker compose app's session to one service (see [🖥️ console](console.md)).
 - The token is single-use, TTL 30 seconds, bound to an application and a session type; kept in the daemon's memory.
 - The WebSocket console accepts connections only with such a token.
 
@@ -70,14 +70,19 @@ recognizes keeps working against a newer daemon.
 | `GET /v1/apps/{id}/image` | `AppService.GetAppImage` | Image reference, version, local vs registry digest (`?checkRemote=true`) and freshness state of a Docker app; `{}` for other runtimes |
 | `POST /v1/apps/{id}/repull` | `AppService.RepullApp` | Pull the `latest` image afresh and restart a running app if it changed; 409 for a pinned tag, a digest or a locally built image |
 | `GET /v1/apps/{id}/ports` | — (REST only for now) | The ports the app publishes, resolved from its settings — a stopped app reports what it will bind next start |
-| `POST /v1/apps/{id}/upgrade {"version"?, "branch"?, "tag"?}` | — (REST only for now) | Upgrade the app; `branch` switches it onto (and keeps it following) that branch, `tag` pins it and stops it following one; without `version` — to the repository's newest tag, or the branch it tracks for a direct repository install. The app must be stopped. Answers `{"id", "up_to_date", "from", "to"}` |
+| `POST /v1/apps/{id}/upgrade {"version"?, "branch"?, "tag"?}` | — (REST only for now) | Upgrade the app; `branch` switches it onto (and keeps it following) that branch, `tag` pins it and stops it following one; without `version` — to the repository's newest tag, or the branch it tracks for a direct repository install. The app must be stopped — a docker compose app excepted, which is upgraded in place while it runs (capability `app.upgrade.compose`). 409 while another upgrade or rebuild of the app runs. Answers `{"id", "up_to_date", "from", "to"}` |
+| `POST /v1/apps/{id}/rebuild {"service"?, "pull_source"?}` | `AppService.RebuildApp`/`RebuildAppStream` | Pull or build the app's images afresh and force-recreate its containers without changing its version; `pull_source` (default `true` without `service`, `false` with it) fetches the ref the app already follows first; `service` rebuilds one service of a docker compose app. 409 for a systemd/process app and while another upgrade or rebuild runs, 400 for `service` with `pull_source`. Answers `{"id", "services", "from_commit", "to_commit", "source_updated", "running"}`. Capability `app.rebuild` |
+| `GET /v1/apps/{id}/services?service=&stats=bool` | `AppService.ListAppServices` | Services of a docker compose app: state, health, image, ports, replicas, `buildable`, `has_overrides`, and with `stats` one shared ~500 ms usage sample. 400 for another app kind. Capability `app.services` |
+| `POST /v1/apps/{id}/services/{service}/start\|stop\|restart\|kill` | `AppService.ControlAppService` | One service's lifecycle; the app's desired state is not touched. Answers `{"service": {...}}` |
+| `GET /v1/apps/{id}/services/{service}/settings` | `AppService.GetAppServiceSettings` | The service's overrides (`environment`, `cpus`, `memory_bytes`, `restart`) and the effective values — environment variable names only |
+| `PUT /v1/apps/{id}/services/{service}/settings {"overrides": {...}, "apply"?}` | `AppService.SetAppServiceSettings` | Replace the service's overrides; with `apply` a running service is recreated with them. Answers `{"applied", "restart_required"}` |
 | `POST /v1/apps/{id}/clone {"name"?}` | `AppService.CloneApp`/`CloneAppStream` | Full copy of the app under a new `<id>-N`, always stopped; the stream sibling reports the directory copy as progress lines. REST exposes only the unary form — the platform's clone dialog uses the gRPC stream, same split as install/upgrade. Answers `{"id", "name", "copied_bytes"}` |
 | `GET /v1/disk` | — (REST only for now) | Every visible app's footprint, largest first, plus the capacity of the filesystem holding the app store |
 | `GET /v1/ports` | — (REST only for now) | Every visible app and the ports it publishes |
 | `GET /v1/stats?ids=a,b` | `AppService.GetAppStats` | Resource consumption per app (CPU %, memory, disk, network); `ids` filters the set **before** sampling, not after — empty means every visible app. Costs the ~500 ms sampling interval per call |
 | — (gRPC only) | `AppService.StreamAppStats` | The same samples as a push stream; `min_interval_secs` is the minimum gap between frames (the server floors it at ≥1s) |
-| `POST /v1/apps/{id}/start\|stop\|restart` | `AppService.Start/Stop/RestartApp` | Lifecycle |
-| `GET /v1/apps/{id}/logs?tail=N&timestamps=bool` | `AppService.GetAppLogs` | Log tail, optionally with an ISO timestamp on each line |
+| `POST /v1/apps/{id}/start\|stop\|restart\|kill` | `AppService.Start/Stop/Restart/KillApp` | Lifecycle |
+| `GET /v1/apps/{id}/logs?tail=N&timestamps=bool&service=` | `AppService.GetAppLogs` | Log tail, optionally with an ISO timestamp on each line; `service` — one service of a docker compose app, without the service-name prefix |
 | `GET /v1/apps/{id}/settings` | — (REST only for now) | The app's settings schema (`asc.settings.yaml`, `null` when the package defines none) and the values chosen so far, defaults merged in |
 | `PUT /v1/apps/{id}/settings {"values": {...}}` | — (REST only for now) | Replace the chosen values; keys the app's own schema does not define are rejected. A gRPC counterpart waits on modelling the settings schema in the proto contracts |
 | `DELETE /v1/apps/{id}` | `AppService.RemoveApp` | Removal including data |

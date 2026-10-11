@@ -57,6 +57,8 @@ fn install_from_a_bare_dockerfile_synthesizes_ports_and_volumes() {
     let mut config = Config::default();
     config.daemon.data_dir = ws.path().join("data");
     config.daemon.apps_dir = ws.path().join("apps");
+    // A container an interrupted earlier run left behind.
+    let _ = asc_daemon::daemon::docker::remove(&config.docker, "asc-demo");
     let ctx = UserContext {
         uid: 0,
         name: "root".into(),
@@ -113,4 +115,8 @@ fn install_from_a_bare_dockerfile_synthesizes_ports_and_volumes() {
     assert!(usage.image_bytes.is_some(), "image was built");
     let ports = asc_daemon::daemon::apps::ports::published(&config, &store, &meta).unwrap();
     assert!(ports.iter().any(|p| p.container == 8080), "got: {ports:?}");
+
+    // The container name is fixed (`asc-demo`): leaving it behind would
+    // make the next run of this test fail with a name conflict.
+    let _ = asc_daemon::daemon::docker::remove(&config.docker, "asc-demo");
 }

@@ -294,6 +294,72 @@ fn a_branch_upgrade_pulls_the_new_commit_and_recreates_in_place() {
 }
 
 #[test]
+fn a_rebuild_of_a_tag_pinned_app_keeps_its_commit_and_recreates() {
+    if !docker_enabled() {
+        return;
+    }
+    let env = env("crb-tag");
+    git(&env.repo, &["tag", "v1.0.0"]);
+    let id = install(&env, Some(GitRef::Tag("v1.0.0")));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env.manager.start(&env.ctx, &id).unwrap();
+        let repo_dir = env.store.app_dir(&id).unwrap().join("repository");
+        let pinned = head(&repo_dir);
+        let before = containers(&env, &id);
+        // The branch moves on; the app is pinned to the tag and stays there.
+        commit_dockerfile(&env.repo, &dockerfile("v2"), "v2");
+
+        let outcome = pkg::rebuild(&env.config, &env.ctx, &id, None, true, None).unwrap();
+        assert_eq!(outcome.from_commit.as_deref(), Some(pinned.as_str()));
+        assert_eq!(outcome.to_commit.as_deref(), Some(pinned.as_str()));
+        assert!(!outcome.source_updated);
+        assert!(outcome.running);
+        assert_eq!(outcome.services, ["db".to_string(), "web".to_string()]);
+        assert_eq!(head(&repo_dir), pinned);
+
+        let after = containers(&env, &id);
+        assert_ne!(after["web"].0, before["web"].0, "web is recreated");
+        assert_ne!(after["db"].0, before["db"].0, "db is recreated");
+        assert_eq!(after["web"].1, "running");
+        assert_eq!(version_in(&env, &after["web"].0), "v1");
+        let meta = env.store.get(&id).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("v1.0.0"));
+        assert_eq!(meta.branch, None);
+    }));
+    cleanup(&env, &id);
+    result.unwrap();
+}
+
+#[test]
+fn rebuilding_one_service_leaves_the_others_alone() {
+    if !docker_enabled() {
+        return;
+    }
+    let env = env("crb-service");
+    let id = install(&env, Some(GitRef::Branch("main")));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env.manager.start(&env.ctx, &id).unwrap();
+        let before = containers(&env, &id);
+
+        // A service cannot pull the source on its own.
+        let err = pkg::rebuild(&env.config, &env.ctx, &id, Some("web"), true, None).unwrap_err();
+        assert!(format!("{err:#}").contains("--no-pull"), "got: {err:#}");
+        let err = pkg::rebuild(&env.config, &env.ctx, &id, Some("nope"), false, None).unwrap_err();
+        assert!(format!("{err:#}").contains("nope"), "got: {err:#}");
+
+        let outcome = pkg::rebuild(&env.config, &env.ctx, &id, Some("web"), false, None).unwrap();
+        assert_eq!(outcome.services, ["web".to_string()]);
+        assert!(outcome.running);
+        let after = containers(&env, &id);
+        assert_ne!(after["web"].0, before["web"].0, "web is recreated");
+        assert_eq!(after["web"].1, "running");
+        assert_eq!(after["db"], before["db"], "db is untouched");
+    }));
+    cleanup(&env, &id);
+    result.unwrap();
+}
+
+#[test]
 fn a_broken_build_keeps_the_old_containers_and_commit() {
     if !docker_enabled() {
         return;

@@ -128,6 +128,24 @@ pub enum Msg {
     PkgUpToDate,
     PkgUpgradeStopFirst,
     AppOperationInProgress,
+    AppNotRebuildable,
+    RebuildServiceWithPull,
+    AppRebuilt,
+    AppRebuiltStopped,
+    AppServicesComposeOnly,
+    AppServiceNotFound,
+    AppServiceBadEnvName,
+    AppServiceBadCpus,
+    AppServiceBadMemory,
+    AppServiceBadRestart,
+    AppServiceStarted,
+    AppServiceStopped,
+    AppServiceRestarted,
+    AppServiceKilled,
+    AppServicesEmpty,
+    ConsoleAttachService,
+    ConsoleExecNeedsService,
+    ConsoleServiceNotRunning,
     PkgAuthRequired,
     PkgAuthRejected,
     PkgLicenseRequired,
@@ -573,6 +591,72 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::AppOperationInProgress => (
             "another upgrade or rebuild of app '{}' is in progress — try again once it has finished",
             "над приложением '{}' уже идёт обновление или пересборка — повторите, когда она закончится",
+        ),
+        Msg::AppNotRebuildable => (
+            "app '{}' cannot be rebuilt: a {} app has no image — only docker and docker compose apps are rebuilt",
+            "приложение '{}' нельзя пересобрать: у приложения типа {} нет образа — пересобираются только docker- и docker compose-приложения",
+        ),
+        Msg::RebuildServiceWithPull => (
+            "a single service is rebuilt from the source the app already has — rebuild it with --no-pull, or rebuild the whole app",
+            "один сервис пересобирается из уже имеющихся исходников приложения — пересоберите его с --no-pull или пересоберите приложение целиком",
+        ),
+        Msg::AppRebuilt => ("App '{}' rebuilt: {}", "Приложение '{}' пересобрано: {}"),
+        Msg::AppRebuiltStopped => (
+            "  the app is stopped: its containers were recreated, not started",
+            "  приложение остановлено: контейнеры пересозданы, но не запущены",
+        ),
+        Msg::AppServicesComposeOnly => (
+            "app '{}' is a {} app — only docker compose apps have services",
+            "приложение '{}' — типа {}; сервисы есть только у docker compose-приложений",
+        ),
+        Msg::AppServiceNotFound => (
+            "service '{}' not found in app '{}'",
+            "сервис '{}' не найден в приложении '{}'",
+        ),
+        Msg::AppServiceBadEnvName => (
+            "invalid environment variable name '{}': use letters, digits and _, not starting with a digit",
+            "недопустимое имя переменной окружения '{}': буквы, цифры и _, не с цифры",
+        ),
+        Msg::AppServiceBadCpus => (
+            "invalid CPU limit {}: it must be above 0 and at most the host's {} cores",
+            "недопустимый лимит CPU {}: больше 0 и не больше {} ядер хоста",
+        ),
+        Msg::AppServiceBadMemory => (
+            "invalid memory limit of {} bytes: the minimum is 6 MiB",
+            "недопустимый лимит памяти {} байт: минимум 6 МиБ",
+        ),
+        Msg::AppServiceBadRestart => (
+            "invalid restart policy '{}': use no, always, on-failure[:N] or unless-stopped",
+            "недопустимая политика перезапуска '{}': no, always, on-failure[:N] или unless-stopped",
+        ),
+        Msg::AppServiceStarted => (
+            "Service '{}' of '{}' started",
+            "Сервис '{}' приложения '{}' запущен",
+        ),
+        Msg::AppServiceStopped => (
+            "Service '{}' of '{}' stopped (the next start of the app brings it back)",
+            "Сервис '{}' приложения '{}' остановлен (следующий старт приложения поднимет его снова)",
+        ),
+        Msg::AppServiceRestarted => (
+            "Service '{}' of '{}' restarted",
+            "Сервис '{}' приложения '{}' перезапущен",
+        ),
+        Msg::AppServiceKilled => (
+            "Service '{}' of '{}' killed",
+            "Сервис '{}' приложения '{}' принудительно остановлен",
+        ),
+        Msg::AppServicesEmpty => ("App '{}' has no services", "У приложения '{}' нет сервисов"),
+        Msg::ConsoleAttachService => (
+            "attach is not available for a single service — open its shell (exec) or its logs instead",
+            "attach недоступен для отдельного сервиса — откройте его shell (exec) или логи",
+        ),
+        Msg::ConsoleExecNeedsService => (
+            "a docker compose app has no single container — choose a service to open a shell in",
+            "у docker compose-приложения нет одного контейнера — выберите сервис, в котором открыть shell",
+        ),
+        Msg::ConsoleServiceNotRunning => (
+            "service '{}' of '{}' is not running",
+            "сервис '{}' приложения '{}' не запущен",
         ),
         Msg::PkgAuthRejected => (
             "access to repository {} was denied with the configured credential ({}) — check that the key/token is valid and has access (for SSH: the key is added as a deploy key and github.com is in root's known_hosts); git said: {}",

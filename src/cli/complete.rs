@@ -319,6 +319,9 @@ fn values_for(path: &[String], arg: &Arg, config: &Config) -> Reply {
 enum Dynamic {
     /// Installed apps, by id.
     Apps,
+    /// Installed apps of the given runtime kinds only (`asc rebuild` takes
+    /// docker and compose apps, `asc app services` compose ones).
+    AppsOfKind(&'static [&'static str]),
     /// Packages in the registry index cache.
     Packages,
     /// Configured registry sources.
@@ -347,6 +350,10 @@ fn dynamic_source(path: &[String], arg: &Arg) -> Option<Dynamic> {
         (["search"], "query") => Dynamic::Packages,
         // `asc upgrade <app>` names an installed app, not a package.
         (["upgrade"], "spec") | (["app", "upgrade"], "spec") => Dynamic::Apps,
+        // Only apps with images can be rebuilt.
+        (["rebuild"], "app") | (["app", "rebuild"], "app") => {
+            Dynamic::AppsOfKind(&["docker", "compose"])
+        }
         (["source", "remove"], "name") => Dynamic::Sources,
         (["backup", "storage", "remove"], "name") => Dynamic::Storages,
         (["auth", "remove"], "target") => Dynamic::Credentials,
@@ -365,7 +372,8 @@ fn dynamic_source(path: &[String], arg: &Arg) -> Option<Dynamic> {
 impl Dynamic {
     fn candidates(&self, config: &Config) -> Vec<Candidate> {
         match self {
-            Dynamic::Apps => apps(config),
+            Dynamic::Apps => apps(config, None),
+            Dynamic::AppsOfKind(kinds) => apps(config, Some(*kinds)),
             Dynamic::Packages => packages(config),
             Dynamic::Sources => sources(),
             Dynamic::Storages => storages(),
@@ -406,15 +414,18 @@ fn sites() -> Vec<Candidate> {
 
 /// Installed apps: through the daemon when there is one (it is the only path
 /// that sees another user's apps, and the only one a regular user can read at
-/// all), else straight from the local app store.
-fn apps(config: &Config) -> Vec<Candidate> {
+/// all), else straight from the local app store. `kinds` keeps only apps of
+/// those runtime kinds.
+fn apps(config: &Config, kinds: Option<&'static [&'static str]>) -> Vec<Candidate> {
     let config = config.clone();
+    let wanted = move |kind: &str| kinds.is_none_or(|kinds| kinds.contains(&kind));
     within_deadline(move || {
         if let Ok(Some(daemon)) = client::Daemon::connect(&config)
             && let Ok(apps) = daemon.list()
         {
             return apps
                 .iter()
+                .filter(|app| wanted(&app.kind))
                 .map(|app| Candidate::new(&app.id, Some(app.name.as_str())))
                 .collect();
         }
@@ -424,6 +435,7 @@ fn apps(config: &Config) -> Vec<Candidate> {
             .list(&ctx)
             .map(|apps| {
                 apps.iter()
+                    .filter(|app| wanted(app.meta.runtime.kind()))
                     .map(|app| Candidate::new(&app.meta.id, Some(app.meta.display_name())))
                     .collect()
             })
@@ -571,6 +583,15 @@ mod tests {
         assert!(all.contains(&"backup".to_string()));
         // Hidden internals never surface.
         assert!(!all.contains(&"__complete".to_string()));
+    }
+
+    #[test]
+    fn rebuild_is_a_command_and_an_app_action() {
+        assert!(values("asc ").contains(&"rebuild".to_string()));
+        assert!(values("asc app ").contains(&"rebuild".to_string()));
+        let flags = values("asc rebuild demo --");
+        assert!(flags.contains(&"--service".to_string()));
+        assert!(flags.contains(&"--no-pull".to_string()));
     }
 
     #[test]

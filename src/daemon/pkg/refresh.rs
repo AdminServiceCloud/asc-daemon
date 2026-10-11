@@ -55,7 +55,63 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
         return Ok(false);
     }
     info!(app = %meta.id, "settings changed (or container missing), recreating the container");
-    docker::remove(&config.docker, &container)?;
+    recreate_from(
+        config,
+        meta,
+        app_dir,
+        &container,
+        image_source,
+        desired,
+        None,
+    )?;
+    Ok(true)
+}
+
+/// Unconditionally remove a Docker app's container and create it again
+/// from the current manifest and settings — what a rebuild does once the
+/// image has been pulled or built afresh. The new container is created
+/// stopped; `meta` (runtime, quota) is updated and the caller persists it.
+/// Non-Docker runtimes are untouched.
+pub fn recreate(
+    config: &Config,
+    meta: &mut AppMeta,
+    app_dir: &Path,
+    report: Option<&dyn crate::daemon::progress::InstallReporter>,
+) -> Result<()> {
+    let Runtime::Docker {
+        container,
+        image_source,
+    } = &meta.runtime
+    else {
+        return Ok(());
+    };
+    let container = container.clone();
+    let image_source = *image_source;
+    let desired = Desired::load(config, meta, app_dir, image_source)?;
+    recreate_from(
+        config,
+        meta,
+        app_dir,
+        &container,
+        image_source,
+        desired,
+        report,
+    )
+}
+
+/// Remove `container` and provision it again from `desired` — shared by
+/// the settings-drift recreate and [`recreate`]. App data lives in volumes
+/// and survives.
+fn recreate_from(
+    config: &Config,
+    meta: &mut AppMeta,
+    app_dir: &Path,
+    container: &str,
+    image_source: Option<ImageSource>,
+    desired: Desired,
+    report: Option<&dyn crate::daemon::progress::InstallReporter>,
+) -> Result<()> {
+    docker::remove(&config.docker, container)?;
     let runtime = provision(
         &desired.manifest,
         &meta.id,
@@ -66,13 +122,13 @@ pub fn apply_settings(config: &Config, meta: &mut AppMeta, app_dir: &Path) -> Re
         desired.quota.as_ref(),
         desired.settings.as_ref(),
         image_source,
-        None,
+        report,
     )?;
     // Keep meta truthful for `asc app info`: the quota may have been
     // overridden in the settings editor.
     meta.quota = desired.quota;
     meta.runtime = runtime;
-    Ok(true)
+    Ok(())
 }
 
 /// Whether the current settings.json, applied to a *running* Docker app,

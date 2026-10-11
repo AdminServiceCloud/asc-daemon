@@ -57,6 +57,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/apps/{id}/repull", post(repull_app))
         .route("/v1/apps/{id}/ports", get(app_ports))
         .route("/v1/apps/{id}/upgrade", post(upgrade_app))
+        // Rebuild without changing the version; the streamed sibling is
+        // gRPC-only, like UpgradeAppStream.
+        .route("/v1/apps/{id}/rebuild", post(rebuild_app))
         // Full copy of an installed app under a new id —
         // no streamed REST sibling; the platform's clone dialog uses the
         // gRPC CloneAppStream instead, the same split InstallApp/
@@ -296,6 +299,7 @@ impl IntoResponse for ApiError {
             .0
             .downcast_ref::<crate::daemon::pkg::image::NotRepullable>()
             .is_some()
+            || self.0.downcast_ref::<pkg::NotRebuildable>().is_some()
         {
             return (
                 StatusCode::CONFLICT,
@@ -1247,6 +1251,40 @@ async fn upgrade_app(
         }),
     };
     Ok(Json(json).into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct RebuildBody {
+    /// One service of a docker compose app only.
+    #[serde(default)]
+    service: Option<String>,
+    /// Fetch the ref the app follows first. Absent: `true` for the whole
+    /// app, `false` for a single service (which cannot pull its source).
+    #[serde(default)]
+    pull_source: Option<bool>,
+}
+
+/// Rebuild one app without changing its version — mirrors
+/// `RebuildAppResponse`. 409 for a systemd/process app or while another
+/// upgrade/rebuild of it runs.
+async fn rebuild_app(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    body: Option<Json<RebuildBody>>,
+) -> Result<Response, ApiError> {
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let pull_source = body.pull_source.unwrap_or(body.service.is_none());
+    let outcome = state.rebuild(ctx, id, body.service, pull_source).await?;
+    Ok(Json(serde_json::json!({
+        "id": outcome.id,
+        "services": outcome.services,
+        "from_commit": outcome.from_commit,
+        "to_commit": outcome.to_commit,
+        "source_updated": outcome.source_updated,
+        "running": outcome.running,
+    }))
+    .into_response())
 }
 
 #[derive(Deserialize)]

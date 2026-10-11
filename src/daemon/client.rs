@@ -527,6 +527,41 @@ impl Daemon {
         })
     }
 
+    /// Rebuild an app without changing its version: `service` narrows a
+    /// compose app to one service, `pull_source` fetches the ref the app
+    /// follows first. The daemon fetches with its own git credentials.
+    pub fn rebuild(
+        &self,
+        reference: &str,
+        service: Option<&str>,
+        pull_source: bool,
+    ) -> Result<pkg::RebuildOutcome> {
+        let body = serde_json::json!({ "service": service, "pull_source": pull_source });
+        let json = self.request(
+            Method::POST,
+            &format!("/v1/apps/{reference}/rebuild"),
+            Some(body),
+        )?;
+        let strings = |key: &str| {
+            json[key]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Ok(pkg::RebuildOutcome {
+            id: json["id"].as_str().unwrap_or(reference).to_string(),
+            services: strings("services"),
+            from_commit: json["from_commit"].as_str().map(str::to_string),
+            to_commit: json["to_commit"].as_str().map(str::to_string),
+            source_updated: json["source_updated"].as_bool().unwrap_or(false),
+            running: json["running"].as_bool().unwrap_or(false),
+        })
+    }
+
     /// `true` when the app was already running (idempotent call).
     pub fn start(&self, id: &str) -> Result<bool> {
         let json = self.request(Method::POST, &format!("/v1/apps/{id}/start"), None)?;

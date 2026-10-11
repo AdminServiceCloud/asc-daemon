@@ -124,6 +124,7 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
     if err
         .downcast_ref::<crate::daemon::pkg::image::NotRepullable>()
         .is_some()
+        || err.downcast_ref::<pkg::NotRebuildable>().is_some()
     {
         return Status::failed_precondition(msg);
     }
@@ -988,6 +989,18 @@ fn upgrade_outcome_to_pb(outcome: pkg::UpgradeOutcome) -> pb::UpgradeAppResponse
     }
 }
 
+/// Shared by `rebuild_app` and `rebuild_app_stream`.
+fn rebuild_outcome_to_pb(outcome: pkg::RebuildOutcome) -> pb::RebuildAppResponse {
+    pb::RebuildAppResponse {
+        id: outcome.id,
+        services: outcome.services,
+        from_commit: outcome.from_commit,
+        to_commit: outcome.to_commit,
+        source_updated: outcome.source_updated,
+        running: outcome.running,
+    }
+}
+
 /// Shared by `clone_app` and `clone_app_stream`: both end in the same
 /// `CloneAppResponse` shape, one returned directly, the other as the last
 /// stream event.
@@ -1659,18 +1672,51 @@ impl AppService for Grpc {
 
     async fn rebuild_app(
         &self,
-        _request: Request<pb::RebuildAppRequest>,
+        request: Request<pb::RebuildAppRequest>,
     ) -> Result<Response<pb::RebuildAppResponse>, Status> {
-        Err(Status::unimplemented("RebuildApp is not implemented yet"))
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let outcome = self
+            .0
+            .rebuild(ctx, req.id, req.service, req.pull_source)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(rebuild_outcome_to_pb(outcome)))
     }
 
+    /// Streamed sibling of `rebuild_app`, mirroring `upgrade_app_stream`;
+    /// closing the stream cancels the rebuild — see
+    /// `ApiState::rebuild_stream`.
     async fn rebuild_app_stream(
         &self,
-        _request: Request<pb::RebuildAppRequest>,
+        request: Request<pb::RebuildAppRequest>,
     ) -> Result<Response<Self::RebuildAppStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "RebuildAppStream is not implemented yet",
-        ))
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let rx = self
+            .0
+            .rebuild_stream(ctx, req.id, req.service, req.pull_source);
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(super::RebuildStreamEvent::Line(line)) => Some((
+                    Ok(pb::RebuildAppEvent {
+                        event: Some(pb::rebuild_app_event::Event::Line(line)),
+                    }),
+                    rx,
+                )),
+                Some(super::RebuildStreamEvent::Done(Ok(outcome))) => Some((
+                    Ok(pb::RebuildAppEvent {
+                        event: Some(pb::rebuild_app_event::Event::Result(rebuild_outcome_to_pb(
+                            outcome,
+                        ))),
+                    }),
+                    rx,
+                )),
+                Some(super::RebuildStreamEvent::Done(Err(err))) => Some((Err(to_status(err)), rx)),
+                None => None,
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn list_app_services(

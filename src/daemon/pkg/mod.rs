@@ -13,6 +13,7 @@ pub mod image;
 pub mod inspect;
 pub mod install;
 pub mod manifest;
+pub mod rebuild;
 pub mod refresh;
 pub mod registry;
 pub mod resources;
@@ -31,6 +32,7 @@ pub use install::{
     install_from_git, instance_id, is_git_url, repo_name,
 };
 pub(crate) use install::{VolumeKind, classify_volume, effective_image_ref, runtime_inputs};
+pub use rebuild::{NotRebuildable, RebuildOutcome, rebuild};
 pub use registry::RegistryClient;
 pub use resources::{RequirementsNotMet, Shortage};
 pub use sources::SourceList;

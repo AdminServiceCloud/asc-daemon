@@ -102,6 +102,8 @@ pub const CAPABILITIES: &[&str] = &[
     // UpgradeApp of a docker compose app: in place, while it runs — no
     // StopApp first.
     "app.upgrade.compose",
+    // RebuildApp/RebuildAppStream, POST /v1/apps/{id}/rebuild.
+    "app.rebuild",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -212,6 +214,47 @@ fn usage_or_warn(
             None
         }
     }
+}
+
+/// Live usage of `targets` (container ids or names): two readings around
+/// one shared sleep, exactly as `AppManager::stats_for` does it — every
+/// container's first counter, one sleep, every second counter — so the
+/// window is ~500 ms in total, not per container. Shared by the host-wide
+/// `list_container_stats` and a compose app's own `list_app_services`. A
+/// container that stops or disappears between the readings is left out.
+fn sample_container_stats(
+    cfg: &crate::daemon::config::DockerConfig,
+    targets: Vec<String>,
+) -> Vec<ContainerStatsRow> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let first: Vec<Option<docker::ContainerUsage>> =
+        targets.iter().map(|id| usage_or_warn(cfg, id)).collect();
+    let started = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(STATS_SAMPLE_MILLIS));
+    let elapsed_micros = started.elapsed().as_micros() as u64;
+
+    let mut rows = Vec::with_capacity(targets.len());
+    for (id, first) in targets.into_iter().zip(first) {
+        let (Some(first), Some(second)) = (first, usage_or_warn(cfg, &id)) else {
+            // The container stopped or was removed between the two
+            // readings — an ordinary race, not a failed call. Leave it out
+            // rather than reporting zeroes.
+            continue;
+        };
+        rows.push(ContainerStatsRow {
+            id,
+            cpu_percent: cpu_percent_between(&first, &second, elapsed_micros),
+            memory_bytes: second.memory_bytes,
+            memory_limit_bytes: second.memory_limit_bytes,
+            net_rx_bytes: second.net_rx_bytes,
+            net_tx_bytes: second.net_tx_bytes,
+            block_read_bytes: second.disk_read_bytes,
+            block_write_bytes: second.disk_write_bytes,
+        });
+    }
+    rows
 }
 
 /// CPU percentage from two cumulative readings over a wall-clock interval —
@@ -777,6 +820,14 @@ pub enum RepullStreamEvent {
     Done(Result<(pkg::image::RepullOutcome, bool)>),
 }
 
+/// One event of [`ApiState::rebuild_stream`]: a progress line, or the
+/// terminal result — the same `Result` the unary [`ApiState::rebuild`]
+/// returns.
+pub enum RebuildStreamEvent {
+    Line(String),
+    Done(Result<pkg::RebuildOutcome>),
+}
+
 pub enum CloneStreamEvent {
     Line(String),
     Done(Box<Result<(AppMeta, u64)>>),
@@ -1188,6 +1239,67 @@ impl ApiState {
             // from inside a runtime and must never be dropped: a full
             // channel means a slow reader, not a lost result.
             let _ = result_tx.blocking_send(UpgradeStreamEvent::Done(outcome));
+        });
+        rx
+    }
+
+    /// Rebuild an app the caller owns without changing its version — see
+    /// [`pkg::rebuild`]. Fetching uses the daemon's git credentials, like an
+    /// upgrade over this API.
+    pub async fn rebuild(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        service: Option<String>,
+        pull_source: bool,
+    ) -> Result<pkg::RebuildOutcome> {
+        self.blocking(move |s| {
+            pkg::rebuild(&s.config, &ctx, &id, service.as_deref(), pull_source, None)
+        })
+        .await
+    }
+
+    /// Streamed sibling of [`Self::rebuild`], built exactly like
+    /// [`Self::upgrade_stream`]: git, pull and build output as
+    /// [`RebuildStreamEvent::Line`], ending in one [`RebuildStreamEvent::Done`].
+    /// Dropping the receiver cancels the rebuild at its next checkpoint.
+    pub fn rebuild_stream(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        service: Option<String>,
+        pull_source: bool,
+    ) -> tokio::sync::mpsc::Receiver<RebuildStreamEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        struct ChannelReporter(tokio::sync::mpsc::Sender<RebuildStreamEvent>);
+        impl progress::InstallReporter for ChannelReporter {
+            fn line(&self, text: &str) {
+                send_progress_line(&self.0, RebuildStreamEvent::Line(text.to_string()));
+            }
+
+            // the stream holding the receiver was dropped — the caller
+            // cancelled (or went away); stop at the next checkpoint.
+            fn cancelled(&self) -> bool {
+                self.0.is_closed()
+            }
+        }
+
+        let state = Arc::clone(self);
+        let result_tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let reporter = ChannelReporter(tx);
+            let outcome = catching_panics("rebuild", || {
+                pkg::rebuild(
+                    &state.config,
+                    &ctx,
+                    &id,
+                    service.as_deref(),
+                    pull_source,
+                    Some(&reporter),
+                )
+            });
+            // See upgrade_stream: the terminal event is never dropped.
+            let _ = result_tx.blocking_send(RebuildStreamEvent::Done(outcome));
         });
         rx
     }
@@ -2188,33 +2300,7 @@ impl ApiState {
             } else {
                 ids
             };
-
-            let first: Vec<Option<docker::ContainerUsage>> =
-                targets.iter().map(|id| usage_or_warn(cfg, id)).collect();
-            let started = std::time::Instant::now();
-            std::thread::sleep(std::time::Duration::from_millis(STATS_SAMPLE_MILLIS));
-            let elapsed_micros = started.elapsed().as_micros() as u64;
-
-            let mut rows = Vec::with_capacity(targets.len());
-            for (id, first) in targets.into_iter().zip(first) {
-                let (Some(first), Some(second)) = (first, usage_or_warn(cfg, &id)) else {
-                    // The container stopped or was removed between the two
-                    // readings — an ordinary race, not a failed call. Leave
-                    // it out rather than reporting zeroes.
-                    continue;
-                };
-                rows.push(ContainerStatsRow {
-                    id,
-                    cpu_percent: cpu_percent_between(&first, &second, elapsed_micros),
-                    memory_bytes: second.memory_bytes,
-                    memory_limit_bytes: second.memory_limit_bytes,
-                    net_rx_bytes: second.net_rx_bytes,
-                    net_tx_bytes: second.net_tx_bytes,
-                    block_read_bytes: second.disk_read_bytes,
-                    block_write_bytes: second.disk_write_bytes,
-                });
-            }
-            Ok(rows)
+            Ok(sample_container_stats(cfg, targets))
         })
         .await
     }

@@ -200,6 +200,17 @@ struct UpgradeInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RebuildInput {
+    app: String,
+    /// One service of a docker compose app; rebuilt from the source the app
+    /// already has (pull_source is forced to false).
+    service: Option<String>,
+    /// Fetch the branch or tag the app follows before building; defaults to
+    /// true for the whole app.
+    pull_source: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ControlInput {
     app: String,
     /// One of `start`, `stop`, or `restart`.
@@ -377,6 +388,29 @@ impl McpServer {
             .await
         {
             Ok(outcome) => result(json!({ "outcome": format!("{outcome:?}") })),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        description = "Rebuild an authorized docker or docker compose application without changing its version: optionally fetch the ref it follows, pull or build its images afresh, then recreate its containers. A stopped app stays stopped. `service` rebuilds one compose service only.",
+        annotations(open_world_hint = true)
+    )]
+    async fn app_rebuild(&self, Parameters(input): Parameters<RebuildInput>) -> CallToolResult {
+        let pull_source = input.service.is_none() && input.pull_source.unwrap_or(true);
+        match self
+            .backend
+            .call(move |daemon| daemon.rebuild(&input.app, input.service.as_deref(), pull_source))
+            .await
+        {
+            Ok(outcome) => result(json!({
+                "id": outcome.id,
+                "services": outcome.services,
+                "from_commit": outcome.from_commit,
+                "to_commit": outcome.to_commit,
+                "source_updated": outcome.source_updated,
+                "running": outcome.running,
+            })),
             Err(error) => tool_error(error),
         }
     }

@@ -166,6 +166,19 @@ enum Command {
     Attach { id: String },
     /// Upgrade an app to a new version: <name> (latest) or <name>@<version>
     Upgrade { spec: String },
+    /// Rebuild an app without changing its version: pull or build its images
+    /// afresh and recreate its containers (same as `asc app rebuild`)
+    Rebuild {
+        /// App id or name
+        app: String,
+        /// Rebuild one service of a docker compose app only (implies
+        /// --no-pull)
+        #[arg(long)]
+        service: Option<String>,
+        /// Do not fetch the branch or tag the app follows first
+        #[arg(long)]
+        no_pull: bool,
+    },
     /// Search packages in the configured registries
     Search { query: String },
     /// Refresh registry indexes (bypass the cache)
@@ -661,6 +674,20 @@ enum AppAction {
     Upgrade {
         spec: String,
     },
+    /// Rebuild the app without changing its version: pull or build its
+    /// images afresh and recreate its containers (same as top-level
+    /// `asc rebuild`)
+    Rebuild {
+        /// App id or name
+        app: String,
+        /// Rebuild one service of a docker compose app only (implies
+        /// --no-pull)
+        #[arg(long)]
+        service: Option<String>,
+        /// Do not fetch the branch or tag the app follows first
+        #[arg(long)]
+        no_pull: bool,
+    },
     /// Start the app and attach to its console (Docker apps, interactive
     /// terminal); use -d to start in the background
     Start {
@@ -987,6 +1014,11 @@ fn run() -> anyhow::Result<()> {
         ),
         Command::Attach { id } => attach_anywhere(&id, &config),
         Command::Upgrade { spec } => upgrade_cmd(&spec, &config),
+        Command::Rebuild {
+            app,
+            service,
+            no_pull,
+        } => rebuild_cmd(&app, service.as_deref(), no_pull, &config),
         Command::Search { query } => search_cmd(&query, &config),
         Command::Update => {
             let updated = RegistryClient::new(&config)?.update()?;
@@ -2368,6 +2400,60 @@ fn print_upgrade_outcome(outcome: &pkg::UpgradeOutcome) {
     }
 }
 
+/// `asc rebuild <app>` / `asc app rebuild <app>`: through the daemon when its
+/// socket is there, like `asc upgrade` — it owns the app tree. The source is
+/// fetched unless `--no-pull` (or `--service`, which never pulls) says
+/// otherwise.
+fn rebuild_cmd(
+    app: &str,
+    service: Option<&str>,
+    no_pull: bool,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let pull_source = !no_pull && service.is_none();
+    let outcome = if let Some(daemon) = daemon_backend(config)? {
+        loop {
+            match with_spinner(|| daemon.rebuild(app, service, pull_source)) {
+                Ok(outcome) => break outcome,
+                Err(err) if offer_auth_setup(&err) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+    } else {
+        let ctx = UserContext::current();
+        let run = || pkg::rebuild(config, &ctx, app, service, pull_source, None);
+        match with_spinner(run) {
+            Ok(outcome) => outcome,
+            // Private repository: offer to set up auth right here, then retry.
+            Err(err) if offer_auth_setup(&err) => with_spinner(run)?,
+            Err(err) => return Err(err),
+        }
+    };
+    println!(
+        "{}",
+        tf2(Msg::AppRebuilt, &outcome.id, outcome.services.join(", "))
+    );
+    if outcome.source_updated {
+        let short = |sha: &Option<String>| {
+            sha.as_deref()
+                .map(pkg::short_commit)
+                .unwrap_or_else(|| "-".into())
+        };
+        println!(
+            "{}",
+            tf2(
+                Msg::PkgUpgradedCommit,
+                short(&outcome.from_commit),
+                short(&outcome.to_commit)
+            )
+        );
+    }
+    if !outcome.running {
+        println!("{}", t(Msg::AppRebuiltStopped));
+    }
+    Ok(())
+}
+
 fn search_cmd(query: &str, config: &Config) -> anyhow::Result<()> {
     let results = RegistryClient::new(config)?.search(query)?;
     if results.is_empty() {
@@ -2588,6 +2674,11 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
         )?,
         AppAction::Attach { id } => attach_cmd(&id, config)?,
         AppAction::Upgrade { spec } => upgrade_cmd(&spec, config)?,
+        AppAction::Rebuild {
+            app,
+            service,
+            no_pull,
+        } => rebuild_cmd(&app, service.as_deref(), no_pull, config)?,
         AppAction::Start { id, detach } => {
             confirm_start_resources(&manager, &ctx, &id, config)?;
             match with_spinner(|| manager.start(&ctx, &id))? {

@@ -40,6 +40,7 @@ use tracing::{info, warn};
 use super::compose as pkg_compose;
 use super::gitref::{self, FetchRef, head_commit, short_commit};
 use super::install::{GitRemote, VersionSpec};
+use super::rebuild::RebuildOutcome;
 use super::upgrade::{
     UpgradeOutcome, UpgradeRef, already_at_tag, record_tracking, resolve_target, tracked_branch,
 };
@@ -177,6 +178,144 @@ pub(super) fn upgrade(
         from_commit: outcome.from_commit,
         to_commit: outcome.to_commit,
     })
+}
+
+/// `asc rebuild` of a compose app: the whole project (with `pull_source`,
+/// the ref it already follows is fetched first — the version never
+/// changes), or one `service` alone. The caller holds the operation lock.
+pub(super) fn rebuild(
+    config: &Config,
+    ctx: &UserContext,
+    meta: AppMeta,
+    app_dir: &Path,
+    service: Option<&str>,
+    pull_source: bool,
+    report: Option<&dyn InstallReporter>,
+) -> Result<RebuildOutcome> {
+    if let Some(service) = service {
+        return rebuild_service(config, &meta, app_dir, service, report);
+    }
+    let fetch = if pull_source {
+        Some(Fetch {
+            remote: GitRemote::resolve(&git_source(&meta)?, ctx),
+            target: current_ref(&meta),
+            stop_if_unchanged: false,
+        })
+    } else {
+        None
+    };
+    let outcome = refresh(config, &meta, app_dir, fetch, "rebuild", report)?;
+    Ok(RebuildOutcome {
+        id: meta.id,
+        source_updated: outcome.from_commit != outcome.to_commit,
+        services: outcome.services,
+        from_commit: outcome.from_commit,
+        to_commit: outcome.to_commit,
+        running: outcome.running,
+    })
+}
+
+/// One service rebuilt alone: `build --pull <service>` (it has a `build:`
+/// section) or `pull <service>`, then `up --no-deps --force-recreate
+/// <service>` — `-d` when it runs, `--no-start` when it does not. The other
+/// services are not touched. A failure points the service's image tag back
+/// at the image its container runs and, when the recreate itself failed,
+/// recreates it on that image again.
+fn rebuild_service(
+    config: &Config,
+    meta: &AppMeta,
+    app_dir: &Path,
+    service: &str,
+    report: Option<&dyn InstallReporter>,
+) -> Result<RebuildOutcome> {
+    let cfg = &config.docker;
+    if !compose::available(cfg) {
+        bail!("the docker compose plugin is not installed on this host");
+    }
+    let Runtime::Compose {
+        project: project_name,
+        ..
+    } = &meta.runtime
+    else {
+        bail!("app '{}' is not a compose app", meta.id);
+    };
+    let project = project_of(meta, app_dir)?;
+    let resolved = compose::config_resolved(cfg, &project)?;
+    let Some(definition) = resolved.services.get(service) else {
+        return Err(crate::daemon::exec::not_found(crate::daemon::i18n::tf2(
+            crate::daemon::i18n::Msg::AppServiceNotFound,
+            service,
+            &meta.id,
+        )));
+    };
+    pkg_compose::check_resolved_mounts(&resolved, app_dir)?;
+    let containers = docker::list_project_containers(cfg, project_name)?;
+    let mine: Vec<&docker::ContainerInfo> = containers
+        .iter()
+        .filter(|c| c.compose_service.as_deref() == Some(service))
+        .collect();
+    let running = mine.iter().any(|c| c.state == "running");
+    let images = image_snapshot(cfg, mine.iter().copied());
+    let names = [service.to_string()];
+    let mut recreate_attempted = false;
+    let result = (|| -> Result<()> {
+        if definition.buildable() {
+            compose::build(cfg, &project, &names, true, report)?;
+        } else if definition.image.is_some() {
+            compose::pull(cfg, &project, &names, report)?;
+        }
+        progress::ensure_not_cancelled(report)?;
+        recreate_attempted = true;
+        compose::up_recreate(
+            cfg,
+            &project,
+            running,
+            Some(service),
+            Some(&Uncancellable(report)),
+        )
+    })();
+    if let Err(err) = result {
+        for (reference, id) in &images {
+            if let Err(err) = docker::tag_image(cfg, id, reference) {
+                warn!(app = %meta.id, service, error = %format!("{err:#}"), "rollback: cannot restore an image tag");
+            }
+        }
+        if recreate_attempted
+            && let Err(err) = compose::up_recreate(
+                cfg,
+                &project,
+                running,
+                Some(service),
+                Some(&Uncancellable(report)),
+            )
+        {
+            warn!(app = %meta.id, service, error = %format!("{err:#}"), "rollback: cannot recreate the service");
+        }
+        return Err(err.context(format!(
+            "rebuild of service '{service}' of '{}' failed, previous image restored",
+            meta.id
+        )));
+    }
+    let commit = head_commit(&app_dir.join("repository"));
+    Ok(RebuildOutcome {
+        id: meta.id.clone(),
+        services: names.to_vec(),
+        from_commit: commit.clone(),
+        to_commit: commit,
+        source_updated: false,
+        running,
+    })
+}
+
+/// The ref a compose app already follows: its branch, the tag it is pinned
+/// to, or the default branch HEAD — what a rebuild with `pull_source`
+/// fetches, never moving the app to another ref.
+pub(super) fn current_ref(meta: &AppMeta) -> FetchRef {
+    match (&meta.branch, &meta.version) {
+        (Some(branch), _) => FetchRef::Branch(branch.clone()),
+        (None, Some(tag)) => FetchRef::Tag(tag.clone()),
+        (None, None) => FetchRef::Head,
+    }
 }
 
 /// The recorded repository URL of a compose app — always a direct git
@@ -417,9 +556,9 @@ fn record_project(
 
 /// The `ref → id` of every image the project's containers run, before
 /// anything is pulled or built — what a rollback points the tags back at.
-fn image_snapshot(
+fn image_snapshot<'a>(
     cfg: &crate::daemon::config::DockerConfig,
-    containers: &[docker::ContainerInfo],
+    containers: impl IntoIterator<Item = &'a docker::ContainerInfo>,
 ) -> Vec<(String, String)> {
     let mut images: Vec<(String, String)> = Vec::new();
     for container in containers {
@@ -697,6 +836,19 @@ mod tests {
                 services: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn a_rebuild_fetches_the_ref_the_app_already_follows() {
+        assert_eq!(
+            current_ref(&meta(Some("main"), Some("main"))),
+            FetchRef::Branch("main".into())
+        );
+        assert_eq!(
+            current_ref(&meta(None, Some("v1.2.0"))),
+            FetchRef::Tag("v1.2.0".into())
+        );
+        assert_eq!(current_ref(&meta(None, None)), FetchRef::Head);
     }
 
     #[test]

@@ -119,6 +119,51 @@ pub(super) fn check_bind_mounts(compose_path: &Path, package_dir: &Path) -> Resu
     Ok(())
 }
 
+/// [`check_bind_mounts`] over **every** file of a project, not just the
+/// first: a second `-f` file mounts just as much. `files` are relative to
+/// `working_dir` (the compose project's own directory, inside the package).
+pub(super) fn check_bind_mounts_all(
+    working_dir: &Path,
+    files: &[String],
+    package_dir: &Path,
+) -> Result<()> {
+    for file in files {
+        check_bind_mounts(&super::install::safe_join(working_dir, file)?, package_dir)?;
+    }
+    Ok(())
+}
+
+/// The bind-mount guard over the project as compose itself resolves it
+/// (`docker compose config`): every host path a service mounts — a bind
+/// mount, or the `device` of a named volume declared with `o: bind` — must
+/// sit inside the app directory, and never inside its `.asc/` state
+/// directory. This is what catches what the static check above cannot see:
+/// `extends` from another file, `${…}` interpolation, the daemon's override
+/// file, a named volume bound to a host directory.
+pub(crate) fn check_resolved_mounts(
+    resolved: &crate::daemon::compose::ResolvedProject,
+    app_dir: &Path,
+) -> Result<()> {
+    let state_dir = crate::daemon::apps::layout::state_dir(app_dir);
+    for source in resolved.host_mount_sources() {
+        let path = Path::new(&source);
+        let inside = path.is_absolute()
+            && !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            && path.starts_with(app_dir)
+            && !path.starts_with(&state_dir);
+        if !inside {
+            bail!(
+                "compose project mounts host path '{source}' outside the app directory \
+                 ({}) — refusing for safety",
+                app_dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Every bind-mount **source** across every service's `volumes:` — short
 /// syntax (`./data:/data`, `/abs/path:/data`) and long syntax
 /// (`type: bind, source: ./data`). A source with no `/`/`.`/`~` prefix is a
@@ -296,6 +341,68 @@ mod tests {
         assert!(ports.iter().any(|p| p.host == 53 && p.container == 53));
         assert!(ports.iter().any(|p| p.host == 5432 && p.container == 5432));
         assert!(ports.iter().any(|p| p.host == 9000 && p.container == 9000));
+    }
+
+    #[test]
+    fn every_file_of_the_project_is_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "docker-compose.yml",
+            "services:\n  web:\n    image: nginx\n    volumes:\n      - ./data:/data\n",
+        );
+        write(
+            dir.path(),
+            "docker-compose.prod.yml",
+            "services:\n  web:\n    volumes:\n      - /etc:/host-etc\n",
+        );
+        check_bind_mounts_all(dir.path(), &["docker-compose.yml".into()], dir.path()).unwrap();
+        let err = check_bind_mounts_all(
+            dir.path(),
+            &[
+                "docker-compose.yml".into(),
+                "docker-compose.prod.yml".into(),
+            ],
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("/etc"), "got: {err:#}");
+    }
+
+    fn resolved(yaml: &str) -> crate::daemon::compose::ResolvedProject {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn resolved_mounts_must_stay_inside_the_app_directory() {
+        let app = Path::new("/asc/apps/demo");
+        let ok = resolved(
+            "services:\n  web:\n    volumes:\n      - type: bind\n        source: /asc/apps/demo/repository/data\n        target: /data\n      - type: volume\n        source: named\n        target: /n\n",
+        );
+        check_resolved_mounts(&ok, app).unwrap();
+
+        for source in [
+            "/etc",
+            "/asc/apps/demo-2/repository",
+            "/asc/apps/demo/.asc",
+            "/asc/apps/demo/.asc/meta.json",
+            "/asc/apps/demo/repository/../../other",
+        ] {
+            let project = resolved(&format!(
+                "services:\n  web:\n    volumes:\n      - type: bind\n        source: {source}\n        target: /x\n"
+            ));
+            let err = check_resolved_mounts(&project, app).unwrap_err();
+            assert!(format!("{err:#}").contains(source), "{source}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn a_named_volume_bound_to_a_host_directory_is_a_mount_too() {
+        let project = resolved(
+            "services:\n  web:\n    volumes:\n      - type: volume\n        source: evil\n        target: /x\nvolumes:\n  evil:\n    driver_opts:\n      type: none\n      o: bind\n      device: /root\n",
+        );
+        let err = check_resolved_mounts(&project, Path::new("/asc/apps/demo")).unwrap_err();
+        assert!(format!("{err:#}").contains("/root"), "got: {err:#}");
     }
 
     #[test]

@@ -127,6 +127,7 @@ pub enum Msg {
     PkgUpgradedCommit,
     PkgUpToDate,
     PkgUpgradeStopFirst,
+    AppOperationInProgress,
     PkgAuthRequired,
     PkgAuthRejected,
     PkgLicenseRequired,
@@ -568,6 +569,10 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::PkgUpgradeStopFirst => (
             "app '{}' is running — stop it before upgrading: asc app stop {}",
             "приложение '{}' запущено — перед обновлением остановите его: asc app stop {}",
+        ),
+        Msg::AppOperationInProgress => (
+            "another upgrade or rebuild of app '{}' is in progress — try again once it has finished",
+            "над приложением '{}' уже идёт обновление или пересборка — повторите, когда она закончится",
         ),
         Msg::PkgAuthRejected => (
             "access to repository {} was denied with the configured credential ({}) — check that the key/token is valid and has access (for SSH: the key is added as a deploy key and github.com is in root's known_hosts); git said: {}",

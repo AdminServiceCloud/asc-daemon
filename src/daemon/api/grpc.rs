@@ -159,7 +159,10 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
     // Any other git failure (host key, network, missing ref) carries git's
     // own message — surface it instead of an opaque internal error. Checked
     // before "not found": git's "Repository not found" is not a daemon object.
-    if msg.contains("git clone failed") || msg.contains("git ls-remote failed") {
+    if msg.contains("git clone failed")
+        || msg.contains("git ls-remote failed")
+        || msg.contains("git fetch failed")
+    {
         return Status::failed_precondition(msg);
     }
     if msg.contains("not found") || msg.contains("не найдено") {

@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod clone;
 pub mod compose;
+mod compose_update;
 pub mod detect;
 pub mod dockerfile;
 pub mod gitref;

@@ -57,11 +57,7 @@ pub async fn run_start(meta: &AppMeta, dir: &Path, tail: usize, docker: &DockerC
                 .flatten()
                 .map_or(RunStart::Unknown, RunStart::Offset)
         }
-        Runtime::Compose {
-            project,
-            files,
-            working_dir,
-        } => compose_started_at(docker, project, &dir.join(working_dir), files)
+        Runtime::Compose { project, .. } => compose_started_at(docker, project, None)
             .await
             .map_or(RunStart::Unknown, RunStart::Since),
         Runtime::Docker { .. } => RunStart::Unknown,
@@ -131,28 +127,25 @@ fn backlog_start<F: Read + Seek>(
     Ok(window_start)
 }
 
-/// When the compose project's earliest running container started; `None`
-/// when nothing runs (the plain tail then) or the plugin cannot be asked.
-async fn compose_started_at(
+/// When the compose project's (or one `service`'s) earliest running
+/// container started; `None` when nothing runs (the plain tail then) or the
+/// Engine cannot be asked. The containers are found by their compose labels.
+pub async fn compose_started_at(
     docker_cfg: &DockerConfig,
     project: &str,
-    working_dir: &Path,
-    files: &[String],
+    service: Option<&str>,
 ) -> Option<time::OffsetDateTime> {
-    let (cfg, project, working_dir, files) = (
-        docker_cfg.clone(),
-        project.to_string(),
-        working_dir.to_path_buf(),
-        files.to_vec(),
-    );
+    let (cfg, project) = (docker_cfg.clone(), project.to_string());
     let containers =
-        tokio::task::spawn_blocking(move || compose::ps(&cfg, &project, &working_dir, &files))
+        tokio::task::spawn_blocking(move || docker::list_project_containers(&cfg, &project))
             .await
             .ok()?
             .ok()?;
     let mut earliest = None;
-    for container in containers.iter().filter(|c| c.running) {
-        if let Ok(Some(started)) = docker::run_started_at(docker_cfg, &container.name).await {
+    for container in containers.iter().filter(|c| {
+        c.state == "running" && service.is_none_or(|s| c.compose_service.as_deref() == Some(s))
+    }) {
+        if let Ok(Some(started)) = docker::run_started_at(docker_cfg, &container.id).await {
             earliest = Some(earliest.map_or(started, |at: time::OffsetDateTime| at.min(started)));
         }
     }
@@ -181,7 +174,7 @@ fn build_logs_command(
     docker: &DockerConfig,
     run: &RunStart,
 ) -> Result<Command> {
-    let tail = tail.to_string();
+    let tail_arg = tail.to_string();
     match &meta.runtime {
         Runtime::Systemd { unit } => {
             let mut cmd = Command::new("journalctl");
@@ -192,7 +185,7 @@ fn build_logs_command(
                 RunStart::Invocation(id) => cmd.arg(format!("_SYSTEMD_INVOCATION_ID={id}")),
                 _ => cmd.args(["-u", unit]),
             };
-            cmd.args(["-f", "-n", &tail, "-o", "short-iso", "--no-pager"]);
+            cmd.args(["-f", "-n", &tail_arg, "-o", "short-iso", "--no-pager"]);
             Ok(cmd)
         }
         Runtime::Process { .. } => {
@@ -200,7 +193,7 @@ fn build_logs_command(
             // -F: survive log rotation; the file may not exist yet.
             match run {
                 RunStart::Offset(at) => cmd.args(["-c", &format!("+{}", at + 1), "-F"]),
-                _ => cmd.args(["-n", &tail, "-F"]),
+                _ => cmd.args(["-n", &tail_arg, "-F"]),
             };
             cmd.arg(dir.join(process::LOG_FILE));
             Ok(cmd)
@@ -208,30 +201,21 @@ fn build_logs_command(
         Runtime::Docker { .. } => {
             bail!("docker logs stream over the Engine API, not a subprocess")
         }
-        // A compose project has no single container for exec/attach to
-        // address, but its logs are already multiplexed and
-        // service-prefixed by the plugin itself — the one console feature
-        // that works exactly the same as any other runtime's live log.
-        Runtime::Compose {
-            project,
-            files,
-            working_dir,
-        } => {
-            let mut cmd = Command::new("docker");
-            cmd.env("DOCKER_HOST", format!("unix://{}", docker.socket.display()));
-            cmd.current_dir(dir.join(working_dir));
-            cmd.arg("compose").arg("-p").arg(project);
-            for file in files {
-                cmd.arg("-f").arg(file);
-            }
-            cmd.args(["logs", "--no-color", "-f", "-n", &tail]);
-            if let RunStart::Since(at) = run {
-                // Seconds with nanoseconds: the plugin and the Engine both
-                // take a fractional unix timestamp, so the cut is exact.
-                cmd.arg("--since")
-                    .arg(format!("{}.{:09}", at.unix_timestamp(), at.nanosecond()));
-            }
-            Ok(cmd)
+        // A whole compose project's logs are already multiplexed and
+        // service-prefixed by the plugin itself — built where every other
+        // plugin call is, in `compose`.
+        Runtime::Compose { .. } => {
+            let since = match run {
+                RunStart::Since(at) => Some(*at),
+                _ => None,
+            };
+            Ok(compose::logs_follow_command(
+                docker,
+                &crate::daemon::apps::compose::project_of(meta, dir)?,
+                tail,
+                since,
+                None,
+            ))
         }
     }
 }
@@ -288,6 +272,7 @@ mod tests {
             project: "asc-demo".into(),
             files: vec!["docker-compose.yml".into()],
             working_dir: "repository".into(),
+            services: Vec::new(),
         })
     }
 
@@ -388,6 +373,8 @@ mod tests {
             args(&cmd),
             [
                 "compose",
+                "--ansi",
+                "never",
                 "-p",
                 "asc-demo",
                 "-f",

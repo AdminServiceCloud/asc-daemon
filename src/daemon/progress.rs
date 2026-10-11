@@ -51,6 +51,20 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// Forwards every line to the wrapped reporter but never reports a
+/// cancellation — for a step that must run to completion once it has
+/// started (recreating a compose project's containers: stopping half-way
+/// would leave fewer containers than either version had).
+pub struct Uncancellable<'a>(pub Option<&'a dyn InstallReporter>);
+
+impl InstallReporter for Uncancellable<'_> {
+    fn line(&self, text: &str) {
+        if let Some(report) = self.0 {
+            report.line(text);
+        }
+    }
+}
+
 /// A checkpoint: fail with [`Cancelled`] once the reporter says the caller
 /// has gone.
 pub fn ensure_not_cancelled(report: Option<&dyn InstallReporter>) -> anyhow::Result<()> {
@@ -417,6 +431,46 @@ impl CopyBar {
     pub fn finish(&self) {
         self.0.finish_and_clear();
     }
+}
+
+/// Read a child's piped output, splitting on `\r` *or* `\n` — `git
+/// --progress` overwrites its status line with a bare `\r`, which
+/// `BufRead::lines()` would never split on. Calls `on_line` for every
+/// segment and returns the full text, newline-joined, for error reporting.
+pub fn read_progress_lines(
+    reader: &mut impl std::io::Read,
+    mut on_line: impl FnMut(&str),
+) -> String {
+    let mut captured = String::new();
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 4096];
+    let flush = |pending: &mut Vec<u8>, captured: &mut String, on_line: &mut dyn FnMut(&str)| {
+        if pending.is_empty() {
+            return;
+        }
+        let line = String::from_utf8_lossy(pending).into_owned();
+        on_line(&line);
+        if !captured.is_empty() {
+            captured.push('\n');
+        }
+        captured.push_str(&line);
+        pending.clear();
+    };
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &byte in &buf[..n] {
+            if byte == b'\r' || byte == b'\n' {
+                flush(&mut pending, &mut captured, &mut on_line);
+            } else {
+                pending.push(byte);
+            }
+        }
+    }
+    flush(&mut pending, &mut captured, &mut on_line);
+    captured
 }
 
 /// Parse a `git clone --progress` line, e.g. `Receiving objects:  45%

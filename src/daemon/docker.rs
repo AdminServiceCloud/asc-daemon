@@ -473,6 +473,11 @@ pub struct ContainerInfo {
     pub labels: HashMap<String, String>,
     pub compose_project: Option<String>,
     pub compose_service: Option<String>,
+    /// `healthy`, `unhealthy` or `starting`; empty for a container without
+    /// a healthcheck. Read from the list's own `Health` field where the
+    /// Engine reports one (API 1.52+), else from the status line
+    /// ("Up 3 minutes (healthy)") older Engines put it in.
+    pub health: String,
     /// Only present when the caller asked for sizes.
     pub size_rw: Option<u64>,
     pub size_root_fs: Option<u64>,
@@ -492,11 +497,48 @@ pub fn list_containers(
     all: bool,
     with_size: bool,
 ) -> Result<Vec<ContainerInfo>> {
+    list_filtered(cfg, all, with_size, None)
+}
+
+/// Every container of one compose project, running or not — the Engine
+/// filters by the `com.docker.compose.project` label compose writes on each
+/// container it creates, so a project is found without asking the plugin.
+pub fn list_project_containers(cfg: &DockerConfig, project: &str) -> Result<Vec<ContainerInfo>> {
+    let mut filters = HashMap::new();
+    filters.insert(
+        "label".to_string(),
+        vec![format!("{COMPOSE_PROJECT_LABEL}={project}")],
+    );
+    list_filtered(cfg, true, false, Some(filters))
+}
+
+/// The health word out of a container's status line — `"Up 3 minutes
+/// (healthy)"`, `"Up 2 seconds (health: starting)"` — for an Engine whose
+/// container list does not carry `Health` on its own yet.
+fn health_from_status(status: &str) -> &'static str {
+    if status.contains("(healthy)") {
+        "healthy"
+    } else if status.contains("(unhealthy)") {
+        "unhealthy"
+    } else if status.contains("(health: starting)") {
+        "starting"
+    } else {
+        ""
+    }
+}
+
+fn list_filtered(
+    cfg: &DockerConfig,
+    all: bool,
+    with_size: bool,
+    filters: Option<HashMap<String, Vec<String>>>,
+) -> Result<Vec<ContainerInfo>> {
     block_on(async {
         let docker = connect(cfg)?;
         let opts = ListContainersOptions {
             all,
             size: with_size,
+            filters,
             ..Default::default()
         };
         let summaries = docker
@@ -513,6 +555,15 @@ pub fn list_containers(
 /// Map one Engine container summary onto [`ContainerInfo`].
 fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
     let labels = summary.labels.unwrap_or_default();
+    let status = summary.status.unwrap_or_default();
+    let health = match summary.health.and_then(|h| h.status) {
+        Some(bollard::models::ContainerSummaryHealthStatusEnum::HEALTHY) => "healthy",
+        Some(bollard::models::ContainerSummaryHealthStatusEnum::UNHEALTHY) => "unhealthy",
+        Some(bollard::models::ContainerSummaryHealthStatusEnum::STARTING) => "starting",
+        Some(_) => "",
+        None => health_from_status(&status),
+    }
+    .to_string();
     let networks = summary
         .network_settings
         .and_then(|settings| settings.networks)
@@ -548,7 +599,8 @@ fn container_info(summary: ContainerSummary, with_size: bool) -> ContainerInfo {
         image: summary.image.unwrap_or_default(),
         image_id: summary.image_id.unwrap_or_default(),
         state: summary.state.map(|s| s.to_string()).unwrap_or_default(),
-        status: summary.status.unwrap_or_default(),
+        status,
+        health,
         created: summary.created.unwrap_or(0),
         ports: summary
             .ports
@@ -1120,6 +1172,86 @@ pub fn container_image_id(cfg: &DockerConfig, container: &str) -> Result<Option<
     })
 }
 
+/// The image reference a container was created from (`Config.Image`, e.g.
+/// `nginx:1.27` or a compose project's `asc-demo-web`) together with the id
+/// of the image it actually runs (`Image`). `None` when the container does
+/// not exist. A compose upgrade records this pair for every container
+/// before it pulls or builds anything, so a failure can point each tag back
+/// at the image the old containers still run ([`tag_image`]).
+pub fn container_image(cfg: &DockerConfig, container: &str) -> Result<Option<(String, String)>> {
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_container(container, None).await {
+            Ok(info) => {
+                let reference = info.config.and_then(|c| c.image).unwrap_or_default();
+                let id = info.image.unwrap_or_default();
+                Ok((!reference.is_empty() && !id.is_empty()).then_some((reference, id)))
+            }
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
+/// Point `reference` (`repo:tag`; a bare name means `:latest`) at the image
+/// `image_id` — `docker tag <id> <reference>`. A digest reference cannot
+/// be re-pointed and is refused.
+pub fn tag_image(cfg: &DockerConfig, image_id: &str, reference: &str) -> Result<()> {
+    if reference.contains('@') {
+        return Err(anyhow!("cannot tag a digest reference ({reference})"));
+    }
+    let (repo, tag) = image_ref(reference);
+    block_on(async {
+        let docker = connect(cfg)?;
+        let opts = bollard::query_parameters::TagImageOptions {
+            repo: Some(repo.to_string()),
+            tag: tag.map(str::to_string),
+        };
+        docker
+            .tag_image(image_id, Some(opts))
+            .await
+            .map_err(|e| friendly(cfg, e))
+    })
+}
+
+/// What one inspect says about a container's current run, for a caller
+/// that shows a single container in detail (a compose service).
+#[derive(Debug, Clone, Default)]
+pub struct ContainerRunInfo {
+    /// Unix seconds the current run started; `None` when not running.
+    pub started_at: Option<i64>,
+    /// Exit code of the last run; `None` while it is running.
+    pub exit_code: Option<i64>,
+}
+
+/// [`ContainerRunInfo`] of one container; `None` when it does not exist.
+pub fn container_run_info(cfg: &DockerConfig, container: &str) -> Result<Option<ContainerRunInfo>> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    block_on(async {
+        let docker = connect(cfg)?;
+        match docker.inspect_container(container, None).await {
+            Ok(info) => {
+                let state = info.state.unwrap_or_default();
+                let running = state.running.unwrap_or(false);
+                let started_at = state
+                    .started_at
+                    .as_deref()
+                    .and_then(|raw| OffsetDateTime::parse(raw, &Rfc3339).ok())
+                    .map(|at| at.unix_timestamp())
+                    .filter(|at| running && *at > 0);
+                Ok(Some(ContainerRunInfo {
+                    started_at,
+                    exit_code: if running { None } else { state.exit_code },
+                }))
+            }
+            Err(e) if status_of(&e) == Some(404) => Ok(None),
+            Err(e) => Err(friendly(cfg, e)),
+        }
+    })
+}
+
 /// Split a reference into `(repository, tag)` the way the Engine does —
 /// `None` tag for a digest reference; a bare name gets `latest`.
 pub fn split_image_ref(image: &str) -> (&str, Option<&str>) {
@@ -1359,6 +1491,10 @@ pub struct BuildSpec<'a> {
     pub tag: &'a str,
     /// `--build-arg` values.
     pub args: &'a std::collections::BTreeMap<String, String>,
+    /// Always look for a newer base image (`docker build --pull`) instead of
+    /// building on whatever `FROM` image the host already has — what a
+    /// rebuild asks for.
+    pub pull: bool,
 }
 
 /// Build a Docker image from a Dockerfile shipped in the package.
@@ -1418,6 +1554,9 @@ pub fn build_image(
             // callback (auth), so any per-build id does.
             .version(BuilderVersion::BuilderBuildKit)
             .session(&session);
+        if spec.pull {
+            builder = builder.pull("1");
+        }
         if !spec.args.is_empty() {
             let args: HashMap<String, String> = spec
                 .args

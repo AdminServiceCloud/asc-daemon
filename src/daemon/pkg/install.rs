@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -908,8 +907,23 @@ fn install_compose_one(
         .into_owned();
     let project = format!("asc-{name}");
     let files = vec![compose_rel];
-    crate::daemon::compose::create(&config.docker, &project, manifest_dir, &files)
+    let compose_project =
+        crate::daemon::compose::ComposeProject::new(project.clone(), manifest_dir, files.clone());
+    // The same guard over the project as compose resolves it: `extends`,
+    // `${…}` interpolation and named volumes bound to a host directory are
+    // invisible to the static check above.
+    let resolved = crate::daemon::compose::config_resolved(&config.docker, &compose_project)?;
+    compose::check_resolved_mounts(&resolved, app_dir)?;
+    crate::daemon::compose::create(&config.docker, &compose_project)
         .context("cannot create the compose project")?;
+    // Recorded for the service list; a project the plugin cannot list right
+    // after creating it is still installed — readers fall back to parsing
+    // the compose file.
+    let services = crate::daemon::compose::config_services(&config.docker, &compose_project)
+        .unwrap_or_else(|err| {
+            warn!(app = name, error = %format!("{err:#}"), "cannot list the compose services");
+            Vec::new()
+        });
 
     let base = install_from_git_app_base(url, path)?;
     let suffixed = name != base;
@@ -945,6 +959,7 @@ fn install_compose_one(
             project,
             files,
             working_dir,
+            services,
         },
     };
     store.save(&meta)?;
@@ -1329,12 +1344,15 @@ fn build_summary(manifest: &Manifest) -> String {
 
 /// Build the app's image from its `image-build` manifest section and return
 /// the tag it was built as. The build context resolves under the manifest
-/// directory (never outside the repository).
-fn build_app_image(
+/// directory (never outside the repository). `pull` asks the Engine for a
+/// newer base image first — a rebuild does, an install builds on what the
+/// host has.
+pub(super) fn build_app_image(
     manifest: &Manifest,
     docker_cfg: &DockerConfig,
     manifest_dir: &Path,
     id: &str,
+    pull: bool,
     report: Option<&dyn InstallReporter>,
 ) -> Result<String> {
     let build = manifest
@@ -1355,6 +1373,7 @@ fn build_app_image(
             dockerfile,
             tag: &tag,
             args: &build.args,
+            pull,
         },
         report,
     )?;
@@ -1434,11 +1453,138 @@ pub(super) fn clone_repository(
     }
 }
 
+/// Credentials, URL rewriting and the typed auth errors of one remote
+/// repository — shared by every git command that talks to it: the clone
+/// below and a compose app's in-place `git fetch`.
+pub(super) struct GitRemote {
+    /// The URL as recorded (`meta.source`) — what errors name.
+    pub(super) url: String,
+    /// The URL git is actually given: an SSH key cannot authorize an https
+    /// clone (nor a token an ssh one), so it follows the credential's
+    /// transport.
+    pub(super) transport_url: String,
+    method: Option<super::auth::Method>,
+}
+
+impl GitRemote {
+    /// Credentials for private repositories, looked up in the
+    /// stores the *calling* user can reach — the daemon runs as
+    /// root, so its own store is not where `asc auth add` put them. An
+    /// unreadable auth file must not block public repositories.
+    pub(super) fn resolve(git_url: &str, ctx: &UserContext) -> Self {
+        let auth = match super::auth::GitAuth::load_for(ctx) {
+            Ok(auth) => Some(auth),
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "cannot read git credentials, going without auth");
+                None
+            }
+        };
+        let method = auth
+            .as_ref()
+            .and_then(|a| a.lookup(git_url))
+            .map(|c| c.method.clone());
+        let transport_url = super::auth::transport_url(git_url, method.as_ref());
+        if transport_url != git_url {
+            debug!(from = %git_url, to = %transport_url, "git URL rewritten for the configured credential");
+        }
+        Self {
+            url: git_url.to_string(),
+            transport_url,
+            method,
+        }
+    }
+
+    /// Run `git <args>` against this remote with its stderr streamed:
+    /// `git`'s own `--progress` output is rendered as a live bar on a
+    /// terminal (regardless of the log level) and forwarded to `report`
+    /// line by line, and every line is a chance to notice a cancelled caller
+    /// and kill git — stderr then hits EOF and the read ends on its own.
+    /// `verb` names the command in the error (`git clone failed: …`).
+    pub(super) fn run(
+        &self,
+        args: &[&str],
+        verb: &str,
+        report: Option<&dyn InstallReporter>,
+    ) -> Result<()> {
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::piped());
+        let _askpass = super::auth::configure_git(&mut cmd, self.method.as_ref())?;
+
+        progress::ensure_not_cancelled(report)?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(t(Msg::ErrGitNotFound)),
+            Err(e) => return Err(e).context("cannot run git"),
+        };
+        // Read to EOF before wait(): git closes stderr at exit, and draining
+        // it first avoids the classic pipe-fills-up-then-deadlock ordering bug.
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let bar = progress::interactive().then(PhaseBar::new);
+        if let Some(report) = report {
+            report.line(&format!("$ git {}", args.join(" ")));
+        }
+        let mut killed = false;
+        let captured = progress::read_progress_lines(&mut stderr, |line| {
+            if let (Some(bar), Some((phase, pct))) = (&bar, progress::parse_git_progress(line)) {
+                bar.update(phase, pct);
+            }
+            if let Some(report) = report {
+                report.line(line);
+                if !killed && report.cancelled() {
+                    killed = true;
+                    let _ = child.kill();
+                }
+            }
+        });
+        if let Some(bar) = bar {
+            bar.finish();
+        }
+        let status = child
+            .wait()
+            .with_context(|| format!("cannot wait for git {verb}"))?;
+        if killed {
+            return Err(anyhow::Error::new(progress::Cancelled));
+        }
+        if !status.success() {
+            return Err(self.failure(verb, &captured));
+        }
+        Ok(())
+    }
+
+    /// The error for a failed git `verb` that printed `captured`: a typed
+    /// [`super::auth::AuthRequired`] / [`super::auth::AuthRejected`] when it
+    /// looks like missing or refused access, git's own message otherwise.
+    fn failure(&self, verb: &str, captured: &str) -> anyhow::Error {
+        if super::auth::is_auth_failure(captured) {
+            // Only when no credential matched: with one configured, a plain
+            // error (with the real git message) beats an offer to reconfigure.
+            return match &self.method {
+                None => anyhow::Error::new(super::auth::AuthRequired {
+                    url: self.url.clone(),
+                }),
+                Some(method) => anyhow::Error::new(super::auth::AuthRejected {
+                    url: self.url.clone(),
+                    method: method.label(),
+                    detail: captured.to_string(),
+                }),
+            };
+        }
+        if let Some(hint) = super::auth::host_key_hint(captured, &self.transport_url) {
+            return anyhow::anyhow!("git {verb} failed: {} — {hint}", captured.trim());
+        }
+        anyhow::anyhow!("git {verb} failed: {}", captured.trim())
+    }
+}
+
 /// Clones with `git`'s own `--progress` output rendered as a live bar on a
 /// terminal (regardless of the log level): `git` normally suppresses that
 /// output once stderr isn't a tty (which it never is here, piped for
-/// capture), so `--progress` forces it back on and [`read_progress_lines`]
-/// parses the `\r`-delimited status line as it streams in.
+/// capture), so `--progress` forces it back on and
+/// [`progress::read_progress_lines`] parses the `\r`-delimited status line as
+/// it streams in.
 pub(super) fn git_clone(
     git_url: &str,
     tag: Option<&str>,
@@ -1460,136 +1606,16 @@ pub(super) fn git_clone_with(
     report: Option<&dyn InstallReporter>,
     extra: &[&str],
 ) -> Result<()> {
-    // Credentials for private repositories, looked up in the
-    // stores the *calling* user can reach — the daemon runs as
-    // root, so its own store is not where `asc auth add` put them. An
-    // unreadable auth file must not block installs from public repositories.
-    let auth = match super::auth::GitAuth::load_for(ctx) {
-        Ok(auth) => Some(auth),
-        Err(err) => {
-            warn!(error = %format!("{err:#}"), "cannot read git credentials, cloning without auth");
-            None
-        }
-    };
-    let credential = auth.as_ref().and_then(|a| a.lookup(git_url));
-    // An SSH key cannot authorize an https clone (nor a token an ssh one):
-    // the URL follows the credential's transport.
-    let clone_url = super::auth::transport_url(git_url, credential.map(|c| &c.method));
-    if clone_url != git_url {
-        debug!(from = %git_url, to = %clone_url, "clone URL rewritten for the configured credential");
-    }
-
+    let remote = GitRemote::resolve(git_url, ctx);
     let mut args: Vec<&str> = vec!["clone", "--depth", "1", "--progress"];
     args.extend_from_slice(extra);
     if let Some(tag) = tag {
         args.extend(["--branch", tag]);
     }
-    args.push(&clone_url);
+    args.push(&remote.transport_url);
     let dest_str = dest.to_string_lossy();
     args.push(&dest_str);
-
-    let mut cmd = Command::new("git");
-    cmd.args(&args);
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::piped());
-    let _askpass = super::auth::configure_git(&mut cmd, credential.map(|c| &c.method))?;
-
-    progress::ensure_not_cancelled(report)?;
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(t(Msg::ErrGitNotFound)),
-        Err(e) => return Err(e).context("cannot run git"),
-    };
-    // Read to EOF before wait(): git closes stderr at exit, and draining it
-    // first avoids the classic pipe-fills-up-then-deadlock ordering bug.
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let bar = progress::interactive().then(PhaseBar::new);
-    if let Some(report) = report {
-        report.line(&format!("$ git clone {}", args.join(" ")));
-    }
-    // git prints progress several times a second, so every line is
-    // a chance to notice a cancelled caller and kill the clone — stderr then
-    // hits EOF and the read below ends on its own.
-    let mut killed = false;
-    let captured = read_progress_lines(&mut stderr, |line| {
-        if let (Some(bar), Some((phase, pct))) = (&bar, progress::parse_git_progress(line)) {
-            bar.update(phase, pct);
-        }
-        if let Some(report) = report {
-            report.line(line);
-            if !killed && report.cancelled() {
-                killed = true;
-                let _ = child.kill();
-            }
-        }
-    });
-    if let Some(bar) = bar {
-        bar.finish();
-    }
-    let status = child.wait().context("cannot wait for git clone")?;
-    if killed {
-        return Err(anyhow::Error::new(progress::Cancelled));
-    }
-    if !status.success() {
-        // Only when no credential matched: with one configured, a plain
-        // error (with the real git message) beats an offer to reconfigure.
-        if credential.is_none() && super::auth::is_auth_failure(&captured) {
-            return Err(anyhow::Error::new(super::auth::AuthRequired {
-                url: git_url.to_string(),
-            }));
-        }
-        if let Some(credential) = credential
-            && super::auth::is_auth_failure(&captured)
-        {
-            return Err(anyhow::Error::new(super::auth::AuthRejected {
-                url: git_url.to_string(),
-                method: credential.method.label(),
-                detail: captured.clone(),
-            }));
-        }
-        if let Some(hint) = super::auth::host_key_hint(&captured, &clone_url) {
-            bail!("git clone failed: {} — {hint}", captured.trim());
-        }
-        bail!("git clone failed: {}", captured.trim());
-    }
-    Ok(())
-}
-
-/// Read a child's piped stderr, splitting on `\r` *or* `\n` — `git
-/// --progress` overwrites its status line with a bare `\r`, which
-/// `BufRead::lines()` would never split on. Calls `on_line` for every
-/// segment and returns the full text, newline-joined, for error reporting.
-fn read_progress_lines(reader: &mut impl Read, mut on_line: impl FnMut(&str)) -> String {
-    let mut captured = String::new();
-    let mut pending = Vec::new();
-    let mut buf = [0u8; 4096];
-    let flush = |pending: &mut Vec<u8>, captured: &mut String, on_line: &mut dyn FnMut(&str)| {
-        if pending.is_empty() {
-            return;
-        }
-        let line = String::from_utf8_lossy(pending).into_owned();
-        on_line(&line);
-        if !captured.is_empty() {
-            captured.push('\n');
-        }
-        captured.push_str(&line);
-        pending.clear();
-    };
-    loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        for &byte in &buf[..n] {
-            if byte == b'\r' || byte == b'\n' {
-                flush(&mut pending, &mut captured, &mut on_line);
-            } else {
-                pending.push(byte);
-            }
-        }
-    }
-    flush(&mut pending, &mut captured, &mut on_line);
-    captured
+    remote.run(&args, "clone", report)
 }
 
 /// Manifest directory inside the repository (monorepo packages set `path`).
@@ -1968,7 +1994,7 @@ fn docker_create(
             (image, auth)
         }
         ImageSource::Build => (
-            build_app_image(manifest, docker_cfg, manifest_dir, id, report)?,
+            build_app_image(manifest, docker_cfg, manifest_dir, id, false, report)?,
             None,
         ),
     };

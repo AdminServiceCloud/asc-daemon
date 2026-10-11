@@ -1201,7 +1201,8 @@ struct UpgradeBody {
     tag: Option<String>,
 }
 
-/// Upgrade one app. The app must be stopped; the caller must own
+/// Upgrade one app. The app must be stopped — a docker compose app
+/// excepted, which is upgraded in place while it runs; the caller must own
 /// it. Cloning uses the daemon's git credentials.
 async fn upgrade_app(
     State(state): State<Arc<ApiState>>,

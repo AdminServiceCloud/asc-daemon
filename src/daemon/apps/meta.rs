@@ -172,6 +172,13 @@ pub enum Runtime {
         /// mounts, `env_file:`) resolve exactly as the package author wrote
         /// them.
         working_dir: String,
+        /// Service names of the project, as `docker compose config
+        /// --services` last reported them (install, upgrade, rebuild, a
+        /// service settings write) — what the service list shows for a
+        /// service that has no container. Empty for an app installed before
+        /// the field existed; readers then parse the compose files instead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        services: Vec<String>,
     },
 }
 
@@ -401,6 +408,32 @@ mod tests {
         let old_json = serde_json::to_string(&sample()).unwrap();
         let loaded_old: AppMeta = serde_json::from_str(&old_json).unwrap();
         assert_eq!(loaded_old.repo_path, None);
+    }
+
+    #[test]
+    fn compose_services_are_optional_both_ways() {
+        // A compose app installed before the field existed.
+        let old = r#"{"type":"compose","project":"asc-demo","files":["docker-compose.yml"],"working_dir":"repository"}"#;
+        let runtime: Runtime = serde_json::from_str(old).unwrap();
+        let Runtime::Compose { services, .. } = &runtime else {
+            panic!("expected compose, got {runtime:?}");
+        };
+        assert!(services.is_empty());
+        // An empty list is not written back.
+        assert!(
+            !serde_json::to_string(&runtime)
+                .unwrap()
+                .contains("services")
+        );
+
+        let runtime = Runtime::Compose {
+            project: "asc-demo".into(),
+            files: vec!["docker-compose.yml".into()],
+            working_dir: "repository".into(),
+            services: vec!["db".into(), "web".into()],
+        };
+        let json = serde_json::to_string(&runtime).unwrap();
+        assert!(json.contains(r#""services":["db","web"]"#), "{json}");
     }
 
     #[test]

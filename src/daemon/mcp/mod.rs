@@ -367,7 +367,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Upgrade a stopped, authorized application.",
+        description = "Upgrade an authorized application. Docker, systemd and process apps must be stopped first; a docker compose app is upgraded in place while it runs (images built before its containers are recreated, rolled back on failure).",
         annotations(open_world_hint = true)
     )]
     async fn app_upgrade(&self, Parameters(input): Parameters<UpgradeInput>) -> CallToolResult {

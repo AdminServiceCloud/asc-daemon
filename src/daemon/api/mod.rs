@@ -99,6 +99,9 @@ pub const CAPABILITIES: &[&str] = &[
     "fail2ban",
     // WireguardService.
     "wireguard",
+    // UpgradeApp of a docker compose app: in place, while it runs — no
+    // StopApp first.
+    "app.upgrade.compose",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -3056,6 +3059,7 @@ mod tests {
             labels: Default::default(),
             compose_project: project.map(str::to_string),
             compose_service: None,
+            health: String::new(),
             size_rw: None,
             size_root_fs: None,
             networks: Vec::new(),

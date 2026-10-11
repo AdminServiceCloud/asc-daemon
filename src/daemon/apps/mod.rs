@@ -5,11 +5,13 @@
 //! sees everyone's. The daemon API applies the same rule via request context.
 
 pub mod compose;
+pub mod compose_override;
 pub mod disk;
 pub mod docker;
 pub mod driver;
 pub mod layout;
 pub mod meta;
+pub mod oplock;
 pub mod ports;
 pub mod process;
 pub mod store;

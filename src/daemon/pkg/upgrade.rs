@@ -19,6 +19,11 @@
 //! repository commits — the one that was installed and the one that now is
 //! — so a branch-tracking upgrade, where both versions read `dev`,
 //! still says exactly what changed.
+//!
+//! A docker compose app is the one exception to "clone beside and swap":
+//! its project runs from inside `repository/`, where relative bind mounts
+//! keep its data, so it is updated in place while it keeps running — see
+//! [`super::compose_update`].
 
 use std::fs;
 use std::path::Path;
@@ -95,7 +100,8 @@ impl UpgradeRef {
 }
 
 /// Upgrade `name` (to the registry's latest tag) or `name@version`; the app
-/// is referenced by id or custom name. The app must be stopped.
+/// is referenced by id or custom name. The app must be stopped — unless it
+/// is a docker compose app, which is upgraded while it runs.
 pub fn upgrade(
     config: &Config,
     ctx: &UserContext,
@@ -106,6 +112,10 @@ pub fn upgrade(
 }
 
 /// [`upgrade`] with an explicit branch or tag to move to.
+///
+/// Holds the app's operation lock ([`crate::daemon::apps::oplock`]) for the
+/// whole run, so an upgrade never interleaves with another upgrade or a
+/// rebuild of the same app.
 pub fn upgrade_to(
     config: &Config,
     ctx: &UserContext,
@@ -119,21 +129,50 @@ pub fn upgrade_to(
         bail!("give either a branch/tag or an @version, not both");
     }
     let manager = AppManager::new(config);
-    // Ownership check plus live state: only stopped apps are upgraded.
-    let status = manager.status(ctx, reference)?;
-    let state = status.state;
-    let meta = status.meta;
-    // The canonical id: `reference` may have been the app's custom name.
-    let id = meta.id.clone();
-    if state == RuntimeState::Running {
-        bail!(tf2(Msg::PkgUpgradeStopFirst, &id, &id));
-    }
-    // Not a next-increment gap to paper over with a confusing "cannot read
-    // manifest" error: a compose app has no manifest to re-resolve
-    // a version from in the first place, and re-cloning + rebuilding its
-    // project is real, separate work.
+    let meta = manager.get_authorized(ctx, reference)?;
+    let app_dir = manager.store().app_dir(&meta.id)?;
+    let _lock = crate::daemon::apps::oplock::acquire(&app_dir, &meta.id)?;
+    upgrade_locked(
+        config,
+        ctx,
+        &manager,
+        meta,
+        requested_version,
+        target,
+        report,
+    )
+}
+
+/// [`upgrade_to`] for a caller that already holds the app's operation lock
+/// (a rebuild that pulls its source first).
+pub(super) fn upgrade_locked(
+    config: &Config,
+    ctx: &UserContext,
+    manager: &AppManager,
+    meta: AppMeta,
+    requested_version: VersionSpec<'_>,
+    target: &UpgradeRef,
+    report: Option<&dyn InstallReporter>,
+) -> Result<UpgradeOutcome> {
+    // A compose app is upgraded in place, while it runs: its downtime is
+    // the recreate alone, so there is no "stop it first" for it.
     if matches!(meta.runtime, Runtime::Compose { .. }) {
-        bail!("upgrading a docker compose app is not supported yet");
+        return super::compose_update::upgrade(
+            config,
+            ctx,
+            manager,
+            meta,
+            requested_version,
+            target,
+            report,
+        );
+    }
+    // The canonical id: the caller's reference may have been the app's
+    // custom name.
+    let id = meta.id.clone();
+    // Live state: every other runtime is upgraded only while stopped.
+    if manager.status(ctx, &id)?.state == RuntimeState::Running {
+        bail!(tf2(Msg::PkgUpgradeStopFirst, &id, &id));
     }
 
     // Where the new version comes from: the recorded repository URL for a
@@ -176,47 +215,23 @@ pub fn upgrade_to(
     let entry_path = entry_path.as_deref();
     let stack_app = stack_app.as_deref();
 
-    // The version comes from the repository's tags: an explicit
-    // `@version` wins, otherwise the newest tag. `None` means there is no tag
-    // to move to and the app follows a moving ref instead — its own branch,
-    // or the default branch of an untagged repository. Only a direct install
-    // can end up there; a registry package without tags is a broken package.
-    let checkout: Option<String> = match (explicit_ref, requested_version) {
-        (Some(name), _) => Some(name.to_string()),
-        (None, VersionSpec::Exact(v)) => Some(v.to_string()),
-        (None, VersionSpec::Latest | VersionSpec::Pick) => match &meta.branch {
-            Some(branch) => Some(branch.clone()),
-            None => match ls_remote(&git_url, ctx)?.latest_tag() {
-                Some(tag) => Some(tag.to_string()),
-                None if direct_git.is_some() => None,
-                None => {
-                    bail!("repository for '{id}' has no tags; run: asc app upgrade {id}@<version>")
-                }
-            },
-        },
-    };
-    // A tracked branch and a default-branch checkout carry no version to
-    // compare — their commit is compared after the clone instead. An explicit
-    // `@version` always means a tag, even for a branch-tracking app: that is
-    // the user pinning it.
-    let tracks_branch = match target {
-        UpgradeRef::Branch(_) => true,
-        UpgradeRef::Tag(_) => false,
-        UpgradeRef::Spec => {
-            meta.branch.is_some() && !matches!(requested_version, VersionSpec::Exact(_))
-        }
-    };
+    let Resolved {
+        checkout,
+        tracks_branch,
+    } = resolve_target(
+        &meta,
+        target,
+        requested_version,
+        &git_url,
+        direct_git.is_some(),
+        ctx,
+    )?;
     let moving_ref = checkout.is_none() || tracks_branch;
-    // The installed version is the tag that was actually checked out
-    // (`1.2.0` or `v1.2.0`), so compare against both spellings.
-    if let (Some(version), Some(current)) = (&checkout, &meta.version)
-        && !moving_ref
-        && (current == version || *current == format!("v{version}"))
-    {
-        record_tracking(&manager, &meta, target)?;
+    if let Some(current) = already_at_tag(&meta, checkout.as_deref(), moving_ref) {
+        record_tracking(manager, &meta, target)?;
         return Ok(UpgradeOutcome::UpToDate {
             id,
-            version: current.clone(),
+            version: current,
         });
     }
 
@@ -246,7 +261,7 @@ pub fn upgrade_to(
         && let (Some(installed), Some(fetched)) = (&from_commit, &to_commit)
         && installed == fetched
     {
-        record_tracking(&manager, &meta, target)?;
+        record_tracking(manager, &meta, target)?;
         return Ok(UpgradeOutcome::UpToDate {
             id,
             version: meta
@@ -390,10 +405,81 @@ pub fn upgrade_to(
     })
 }
 
+/// Where an upgrade goes, before anything is fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Resolved {
+    /// The tag or branch to check out; `None` — the default branch HEAD of
+    /// an untagged repository.
+    pub(super) checkout: Option<String>,
+    /// `checkout` is a branch the app follows (or starts following), not a
+    /// tag: its commit, not its name, says whether there is anything new.
+    pub(super) tracks_branch: bool,
+}
+
+/// The version comes from the repository's tags: an explicit branch/tag or
+/// `@version` wins, otherwise the tracked branch, otherwise the newest tag.
+/// `checkout: None` means there is no tag to move to and the app follows a
+/// moving ref instead — the default branch of an untagged repository. Only a
+/// direct install (`direct_git`) can end up there; a registry package without
+/// tags is a broken package. Shared by every runtime: a compose app fetches
+/// the same ref in place that any other app clones beside itself.
+pub(super) fn resolve_target(
+    meta: &AppMeta,
+    target: &UpgradeRef,
+    requested_version: VersionSpec<'_>,
+    git_url: &str,
+    direct_git: bool,
+    ctx: &UserContext,
+) -> Result<Resolved> {
+    let id = &meta.id;
+    let checkout: Option<String> = match (target.name()?, requested_version) {
+        (Some(name), _) => Some(name.to_string()),
+        (None, VersionSpec::Exact(v)) => Some(v.to_string()),
+        (None, VersionSpec::Latest | VersionSpec::Pick) => match &meta.branch {
+            Some(branch) => Some(branch.clone()),
+            None => match ls_remote(git_url, ctx)?.latest_tag() {
+                Some(tag) => Some(tag.to_string()),
+                None if direct_git => None,
+                None => {
+                    bail!("repository for '{id}' has no tags; run: asc app upgrade {id}@<version>")
+                }
+            },
+        },
+    };
+    // A tracked branch and a default-branch checkout carry no version to
+    // compare — their commit is compared after the fetch instead. An
+    // explicit `@version` always means a tag, even for a branch-tracking
+    // app: that is the user pinning it.
+    let tracks_branch = match target {
+        UpgradeRef::Branch(_) => true,
+        UpgradeRef::Tag(_) => false,
+        UpgradeRef::Spec => {
+            meta.branch.is_some() && !matches!(requested_version, VersionSpec::Exact(_))
+        }
+    };
+    Ok(Resolved {
+        checkout,
+        tracks_branch,
+    })
+}
+
+/// The installed version when it already is the tag `checkout` names —
+/// `1.2.0` or `v1.2.0`, whichever spelling was actually checked out — and
+/// there is therefore nothing to fetch. Never for a moving ref.
+pub(super) fn already_at_tag(
+    meta: &AppMeta,
+    checkout: Option<&str>,
+    moving_ref: bool,
+) -> Option<String> {
+    let (version, current) = (checkout?, meta.version.as_ref()?);
+    (!moving_ref && (current == version || *current == format!("v{version}")))
+        .then(|| current.clone())
+}
+
 /// The branch the app follows after an upgrade to `target`:
 /// switching to a branch starts following it, pinning a tag stops following
 /// one, and a plain upgrade leaves the choice as it was.
-fn tracked_branch(meta: &AppMeta, target: &UpgradeRef) -> Option<String> {
+pub(super) fn tracked_branch(meta: &AppMeta, target: &UpgradeRef) -> Option<String> {
     match target {
         UpgradeRef::Branch(branch) => Some(branch.clone()),
         UpgradeRef::Tag(_) => None,
@@ -404,7 +490,11 @@ fn tracked_branch(meta: &AppMeta, target: &UpgradeRef) -> Option<String> {
 /// An upgrade that finds nothing to move still has to honour the choice of
 /// ref: switching to a branch that sits on the installed commit, or pinning
 /// the tag the app is already on, only changes what the app follows.
-fn record_tracking(manager: &AppManager, meta: &AppMeta, target: &UpgradeRef) -> Result<()> {
+pub(super) fn record_tracking(
+    manager: &AppManager,
+    meta: &AppMeta,
+    target: &UpgradeRef,
+) -> Result<()> {
     let branch = tracked_branch(meta, target);
     if branch != meta.branch {
         let mut meta = meta.clone();
@@ -421,8 +511,8 @@ fn teardown_runtime(config: &Config, runtime: &Runtime) -> Result<()> {
     match runtime {
         Runtime::Docker { container, .. } => docker::remove(&config.docker, container)
             .context("cannot remove the old container before upgrade"),
-        // `upgrade()` already refuses a compose app before it ever reaches
-        // here — kept exhaustive rather than `unreachable!()`.
+        // A compose app is upgraded in place by `compose_update` and never
+        // reaches here — kept exhaustive rather than `unreachable!()`.
         Runtime::Systemd { .. } | Runtime::Process { .. } | Runtime::Compose { .. } => Ok(()),
     }
 }

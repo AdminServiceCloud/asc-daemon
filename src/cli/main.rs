@@ -270,20 +270,26 @@ enum StatsSort {
 }
 
 /// `asc install <url> --method <kind>`: install as something other
-/// than the package's own asc.yaml. Only one kind is installable so far —
-/// kept as its own clap enum rather than `pkg::detect::InstallMethod` itself,
-/// so the flag's accepted values don't grow the moment detection learns a new
-/// kind (Swarm/Kubernetes/Helm are detected, not installable, and have no
-/// business showing up as a value here).
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+/// than the package's own asc.yaml — the kinds the daemon has an install
+/// path for. Kept as its own clap enum rather than
+/// `pkg::detect::InstallMethod` itself, so the flag's accepted values don't
+/// grow the moment detection learns a new kind (Swarm/Kubernetes/Helm are
+/// detected, not installable, and have no business showing up as a value
+/// here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum InstallMethodArg {
+    /// A bare Dockerfile, built into a `type: docker` app
     Dockerfile,
+    /// A bare compose file, run as a `docker compose` project (needs the
+    /// `docker compose` plugin on the host)
+    DockerCompose,
 }
 
 impl From<InstallMethodArg> for pkg::InstallMethod {
     fn from(arg: InstallMethodArg) -> Self {
         match arg {
             InstallMethodArg::Dockerfile => pkg::InstallMethod::Dockerfile,
+            InstallMethodArg::DockerCompose => pkg::InstallMethod::DockerCompose,
         }
     }
 }
@@ -5859,11 +5865,66 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lang, docs_url, i18n, port_label, resource_shortages};
+    use super::{
+        AppAction, Cli, Command, InstallMethodArg, Lang, docs_url, i18n, port_label,
+        resource_shortages,
+    };
     use asc_daemon::daemon::docker::{PortProtocol, PublishedPort};
     use asc_daemon::daemon::monitor::system::{
         CpuMetrics, DiskMetrics, MemoryMetrics, SystemMetrics,
     };
+    use asc_daemon::daemon::pkg;
+    use clap::Parser;
+
+    #[test]
+    fn install_method_accepts_docker_compose() {
+        let parsed = Cli::try_parse_from([
+            "asc",
+            "install",
+            "git@github.com:owner/repo.git",
+            "--method",
+            "docker-compose",
+            "--name",
+            "x",
+        ])
+        .expect("`--method docker-compose` parses");
+        let Some(Command::Install { method, name, .. }) = parsed.command else {
+            panic!("expected `asc install`");
+        };
+        assert_eq!(method, Some(InstallMethodArg::DockerCompose));
+        assert_eq!(name.as_deref(), Some("x"));
+        assert_eq!(
+            pkg::InstallMethod::from(InstallMethodArg::DockerCompose),
+            pkg::InstallMethod::DockerCompose
+        );
+
+        // `asc app install` carries the same flag.
+        let parsed = Cli::try_parse_from([
+            "asc",
+            "app",
+            "install",
+            "https://github.com/owner/repo",
+            "--method",
+            "docker-compose",
+        ])
+        .expect("`asc app install --method docker-compose` parses");
+        let Some(Command::App {
+            action: AppAction::Install { method, .. },
+        }) = parsed.command
+        else {
+            panic!("expected `asc app install`");
+        };
+        assert_eq!(method, Some(InstallMethodArg::DockerCompose));
+
+        assert_eq!(
+            pkg::InstallMethod::from(InstallMethodArg::Dockerfile),
+            pkg::InstallMethod::Dockerfile
+        );
+        assert!(
+            Cli::try_parse_from(["asc", "install", "git@h:o/r", "--method", "helm"]).is_err(),
+            "detected-only kinds are not accepted"
+        );
+    }
 
     #[test]
     fn port_label_renders_transport_docker_style() {

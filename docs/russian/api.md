@@ -65,6 +65,7 @@ API-сервер демона: один и тот же axum-роутер — gRP
 | `GET /v1/status` | `DaemonService.GetStatus` | Версия, счётчики приложений, список возможностей |
 | `GET /v1/apps` | `AppService.ListApps` | Список приложений (в объёме контекста вызывающего) |
 | `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Установка из реестра или напрямую из git-URL; без `license_ack` репозиторий с LICENSE отвечает `409` + `license_required`, неоднозначный пакет — `409` + `ambiguous` (список кандидатов) — из них CLI строит диалог согласия / выбор источника |
+| `POST /v1/packages/inspect {"git_url", "branch"?, "tag"?, "path"?}` | `AppService.InspectPackage` | Чтение репозитория без установки (разреженный снимок, затем удаляется): `{"kind": "app"\|"stack"\|"unknown", "name", "methods": [{"kind", "files", "items", "supported"}]}` — `supported` уже учитывает плагин `docker compose` на хосте. Приватный репозиторий без учётных данных → `409` + `auth_required`. Используется выбором метода в `asc install` |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | Одно приложение |
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Дисковое пространство: образ, репозиторий, данные, кастомные тома |
 | `GET /v1/apps/{id}/image` | `AppService.GetAppImage` | Ссылка на образ, версия, локальный и удалённый дайджест (`?checkRemote=true`) и свежесть образа Docker-приложения; `{}` для других типов |

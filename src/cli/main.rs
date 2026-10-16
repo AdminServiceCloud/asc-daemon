@@ -8,6 +8,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 mod complete;
 mod fail2ban;
 mod firewall;
+mod select;
 mod wireguard;
 
 use asc_daemon::daemon::apps::compose_services::ServiceAction as ComposeServiceAction;
@@ -1369,6 +1370,19 @@ fn install_from_git_cmd(
     if source.is_some() {
         anyhow::bail!("--source has no effect on a direct repository install");
     }
+    // `--app` always names a stack member, which is always its own manifest.
+    let install_method = match install_method {
+        Some(method) => Some(method),
+        None if stack_app.is_none() => {
+            match pick_install_method(url, branch, tag, path, config, daemon.as_ref())? {
+                MethodPick::Use(method) => method,
+                MethodPick::Cancelled => {
+                    anyhow::bail!(tf(Msg::PkgInstallDeclined, pkg::repo_name(url)?))
+                }
+            }
+        }
+        None => None,
+    };
     let name = match name {
         Some(name) => Some(name),
         None => prompt_git_app_name(url, config, daemon.as_ref())?,
@@ -1494,6 +1508,148 @@ fn prompt_git_app_name(
     let default = instance_default(&base, config, daemon);
     let answer = read_line(&tf(Msg::PkgPromptName, &default))?;
     Ok(Some(answer).filter(|a| !a.is_empty()))
+}
+
+/// The outcome of [`pick_install_method`].
+enum MethodPick {
+    /// Install with this method — `None` is the package's own manifest.
+    Use(Option<pkg::InstallMethod>),
+    /// The user cancelled the picker.
+    Cancelled,
+}
+
+/// What to do about the install method of a direct repository install, from
+/// the methods this host can install it with.
+#[derive(Debug)]
+enum MethodPlan {
+    /// Install as before: the package's own asc.yaml/stack, or nothing found
+    /// (the install then reports the missing manifest itself).
+    Keep,
+    /// The one installable method, and it is not the package's own manifest.
+    Auto(pkg::DetectedMethod),
+    /// Several — let the user choose; the package's own manifest comes first.
+    Ask(Vec<pkg::DetectedMethod>),
+}
+
+/// Decide from `installable` (detection order, host support already
+/// applied). ASC's own formats collapse into the one the install would
+/// actually read — `asc.yaml` wins over `asc.stack.yaml` when a package
+/// directory carries both — so the picker never lists two rows that do the
+/// same thing.
+fn plan_install_method(installable: Vec<pkg::DetectedMethod>) -> MethodPlan {
+    use pkg::InstallMethod::{AscManifest, AscStack};
+    let (own, mut others): (Vec<_>, Vec<_>) = installable
+        .into_iter()
+        .partition(|m| matches!(m.kind, AscManifest | AscStack));
+    let own = own
+        .iter()
+        .find(|m| m.kind == AscManifest)
+        .or_else(|| own.first())
+        .cloned();
+    match (own, others.len()) {
+        (_, 0) => MethodPlan::Keep,
+        (None, 1) => MethodPlan::Auto(others.remove(0)),
+        (Some(own), _) => {
+            others.insert(0, own);
+            MethodPlan::Ask(others)
+        }
+        (None, _) => MethodPlan::Ask(others),
+    }
+}
+
+/// One picker row: the method and where it was found (compose: its
+/// services too).
+fn method_label(method: &pkg::DetectedMethod) -> String {
+    use pkg::InstallMethod;
+    let name = match method.kind {
+        InstallMethod::AscManifest => return t(Msg::PkgMethodManifest).to_string(),
+        InstallMethod::AscStack => {
+            return format!("{} — {}", t(Msg::PkgMethodStack), method.files.join(", "));
+        }
+        InstallMethod::DockerCompose => "docker compose",
+        InstallMethod::Dockerfile => "Dockerfile",
+        InstallMethod::Swarm => "Swarm",
+        InstallMethod::Kubernetes => "Kubernetes",
+        InstallMethod::Helm => "Helm",
+    };
+    let mut label = format!("{name} — {}", method.files.join(", "));
+    if method.kind == InstallMethod::DockerCompose && !method.items.is_empty() {
+        label.push_str(&format!(" ({})", method.items.join(", ")));
+    }
+    label
+}
+
+/// The `--method` an install picked: `None` for the package's own manifest.
+fn method_choice(method: &pkg::DetectedMethod) -> Option<pkg::InstallMethod> {
+    match method.kind {
+        pkg::InstallMethod::AscManifest | pkg::InstallMethod::AscStack => None,
+        other => Some(other),
+    }
+}
+
+/// `asc install <url>` without `--method`, in a terminal: inspect the
+/// repository (sparse — manifests and the files the detector reads) and,
+/// when it can be installed more than one way, let the user choose with the
+/// arrow keys. A single method other than the package's own manifest is
+/// taken with a notice. Scripts (stdin or stdout not a terminal) and a
+/// failed inspect keep the old behavior: the install reads asc.yaml and
+/// runs its own interactive recoveries (auth, license, resources).
+fn pick_install_method(
+    url: &str,
+    branch: Option<&str>,
+    tag: Option<&str>,
+    path: Option<&str>,
+    config: &Config,
+    daemon: Option<&client::Daemon>,
+) -> anyhow::Result<MethodPick> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(MethodPick::Use(None));
+    }
+    let installable = with_spinner(|| match daemon {
+        Some(daemon) => daemon.installable_methods(url, branch, tag, path),
+        None => {
+            let git_ref = match (branch, tag) {
+                (Some(b), None) => Some(pkg::GitRef::Branch(b)),
+                (None, Some(t)) => Some(pkg::GitRef::Tag(t)),
+                _ => None,
+            };
+            let compose = asc_daemon::daemon::compose::available(&config.docker);
+            pkg::inspect_git(
+                url,
+                git_ref,
+                path,
+                &UserContext::current(),
+                &config.daemon.apps_dir,
+            )
+            .map(|info| {
+                info.methods
+                    .into_iter()
+                    .filter(|m| m.kind.installable(compose))
+                    .collect()
+            })
+        }
+    });
+    let installable = match installable {
+        Ok(installable) => installable,
+        // The install itself reports (and recovers from) the same failure.
+        Err(_) => return Ok(MethodPick::Use(None)),
+    };
+    match plan_install_method(installable) {
+        MethodPlan::Keep => Ok(MethodPick::Use(None)),
+        MethodPlan::Auto(method) => {
+            println!("{}", tf(Msg::PkgMethodAuto, method_label(&method)));
+            Ok(MethodPick::Use(method_choice(&method)))
+        }
+        MethodPlan::Ask(methods) => {
+            let labels: Vec<String> = methods.iter().map(method_label).collect();
+            let prompt = tf(Msg::PkgPickMethod, pkg::repo_name(url)?);
+            Ok(match select::select(&prompt, &labels, 0)? {
+                Some(index) => MethodPick::Use(method_choice(&methods[index])),
+                None => MethodPick::Cancelled,
+            })
+        }
+    }
 }
 
 /// The default instance id shown in the name prompt: the next
@@ -5866,8 +6022,8 @@ fn config_cmd(action: ConfigAction, mut config: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppAction, Cli, Command, InstallMethodArg, Lang, docs_url, i18n, port_label,
-        resource_shortages,
+        AppAction, Cli, Command, InstallMethodArg, Lang, MethodPlan, docs_url, i18n, method_choice,
+        method_label, plan_install_method, port_label, resource_shortages,
     };
     use asc_daemon::daemon::docker::{PortProtocol, PublishedPort};
     use asc_daemon::daemon::monitor::system::{
@@ -5875,6 +6031,85 @@ mod tests {
     };
     use asc_daemon::daemon::pkg;
     use clap::Parser;
+
+    fn detected(kind: pkg::InstallMethod, file: &str) -> pkg::DetectedMethod {
+        pkg::DetectedMethod {
+            kind,
+            files: vec![file.to_string()],
+            items: Vec::new(),
+        }
+    }
+
+    fn kinds(plan: &MethodPlan) -> Vec<pkg::InstallMethod> {
+        match plan {
+            MethodPlan::Keep => Vec::new(),
+            MethodPlan::Auto(method) => vec![method.kind],
+            MethodPlan::Ask(methods) => methods.iter().map(|m| m.kind).collect(),
+        }
+    }
+
+    #[test]
+    fn install_method_plan_keeps_a_lone_manifest_and_nothing_found() {
+        use pkg::InstallMethod::*;
+        assert!(matches!(plan_install_method(Vec::new()), MethodPlan::Keep));
+        let plan = plan_install_method(vec![detected(AscManifest, "asc.yaml")]);
+        assert!(matches!(plan, MethodPlan::Keep));
+        let plan = plan_install_method(vec![detected(AscStack, "asc.stack.yaml")]);
+        assert!(matches!(plan, MethodPlan::Keep));
+    }
+
+    #[test]
+    fn install_method_plan_takes_a_single_foreign_method() {
+        use pkg::InstallMethod::*;
+        let plan = plan_install_method(vec![detected(DockerCompose, "compose.yml")]);
+        assert!(matches!(plan, MethodPlan::Auto(_)));
+        assert_eq!(kinds(&plan), [DockerCompose]);
+    }
+
+    #[test]
+    fn install_method_plan_asks_with_the_own_manifest_first() {
+        use pkg::InstallMethod::*;
+        // Detection order, as `pkg::detect` reports it: stack, manifest,
+        // compose, Dockerfile — the stack collapses into the asc.yaml the
+        // install would actually read.
+        let plan = plan_install_method(vec![
+            detected(AscStack, "asc.stack.yaml"),
+            detected(AscManifest, "asc.yaml"),
+            detected(DockerCompose, "compose.yml"),
+            detected(Dockerfile, "Dockerfile"),
+        ]);
+        assert!(matches!(plan, MethodPlan::Ask(_)));
+        assert_eq!(kinds(&plan), [AscManifest, DockerCompose, Dockerfile]);
+
+        let plan = plan_install_method(vec![
+            detected(DockerCompose, "compose.yml"),
+            detected(Dockerfile, "Dockerfile"),
+        ]);
+        assert_eq!(kinds(&plan), [DockerCompose, Dockerfile]);
+    }
+
+    #[test]
+    fn install_method_rows_and_choices() {
+        use pkg::InstallMethod::*;
+        i18n::set_lang(Lang::En);
+        let mut compose = detected(DockerCompose, "deploy/compose.yml");
+        compose.items = vec!["web".into(), "db".into()];
+        assert_eq!(
+            method_label(&compose),
+            "docker compose — deploy/compose.yml (web, db)"
+        );
+        assert_eq!(
+            method_label(&detected(Dockerfile, "docker/Dockerfile")),
+            "Dockerfile — docker/Dockerfile"
+        );
+        assert_eq!(
+            method_label(&detected(AscManifest, "asc.yaml")),
+            "its own asc.yaml"
+        );
+        assert_eq!(method_choice(&detected(AscManifest, "asc.yaml")), None);
+        assert_eq!(method_choice(&detected(AscStack, "asc.stack.yaml")), None);
+        assert_eq!(method_choice(&compose), Some(DockerCompose));
+    }
 
     #[test]
     fn install_method_accepts_docker_compose() {

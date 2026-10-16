@@ -44,6 +44,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/processes", get(list_processes))
         .route("/v1/processes/{pid}/signal", post(signal_process))
         .route("/v1/apps", get(list_apps).post(install_app))
+        // Read a repository without installing it — what `asc install`'s
+        // method picker offers (gRPC: AppService.InspectPackage).
+        .route("/v1/packages/inspect", post(inspect_package))
         // Apps-wide reports: the per-app routes below answer for
         // one app, these for every app the caller may see — the figures the
         // CLI cannot compute itself without reading the app tree.
@@ -1403,6 +1406,51 @@ async fn install_app(
         }),
     };
     Ok((StatusCode::CREATED, Json(json)).into_response())
+}
+
+#[derive(Deserialize)]
+struct InspectBody {
+    git_url: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    /// In-repository subdirectory of the package, for a monorepo.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// The REST subset of InspectPackageResponse: what the package is and every
+/// install method detected in it, `supported` already resolved against this
+/// host (docker compose needs the plugin). A private repository without
+/// credentials is the structured `auth_required` error, as for an install.
+async fn inspect_package(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Json(body): Json<InspectBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let info = state
+        .inspect_package(ctx, body.git_url, body.branch, body.tag, body.path)
+        .await?;
+    let compose_available = crate::daemon::compose::available(&state.config.docker);
+    Ok(Json(serde_json::json!({
+        "kind": match info.kind {
+            crate::daemon::pkg::PackageKind::App => "app",
+            crate::daemon::pkg::PackageKind::Stack => "stack",
+            crate::daemon::pkg::PackageKind::Unknown => "unknown",
+        },
+        "name": info.name,
+        "methods": info
+            .methods
+            .iter()
+            .map(|method| serde_json::json!({
+                "kind": method.kind,
+                "files": method.files,
+                "items": method.items,
+                "supported": method.kind.installable(compose_available),
+            }))
+            .collect::<Vec<_>>(),
+    })))
 }
 
 #[derive(Deserialize)]

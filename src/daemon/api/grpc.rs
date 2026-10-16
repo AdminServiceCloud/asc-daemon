@@ -897,10 +897,7 @@ fn detected_method_to_pb(
     };
     // DockerCompose is the one method whose support depends on the host, not
     // just the kind — everything else is a pure function of `supported()`.
-    let supported = match method.kind {
-        pkg::InstallMethod::DockerCompose => compose_available,
-        other => other.supported(),
-    };
+    let supported = method.kind.installable(compose_available);
     pb::DetectedInstallMethod {
         kind: kind as i32,
         files: method.files,

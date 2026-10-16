@@ -181,6 +181,11 @@ pub enum Msg {
     PkgImageOptionPrebuilt,
     PkgImageOptionBuild,
     PkgImageChoiceHint,
+    PkgPickMethod,
+    PkgMethodAuto,
+    PkgMethodManifest,
+    PkgMethodStack,
+    SelectHint,
     SourceAdded,
     SourceRemoved,
     SourcesEmpty,
@@ -770,6 +775,20 @@ pub fn t(msg: Msg) -> &'static str {
         Msg::PkgImageChoiceHint => (
             "'{}' offers both a prebuilt image ({}) and a local build ({}); pass --image or --build",
             "'{}' предлагает и готовый образ ({}), и локальную сборку ({}); передайте --image или --build",
+        ),
+        Msg::PkgPickMethod => (
+            "'{}' can be installed in several ways — choose one:",
+            "'{}' можно установить несколькими способами — выберите:",
+        ),
+        Msg::PkgMethodAuto => (
+            "No asc.yaml in the repository — installing as {}",
+            "В репозитории нет asc.yaml — устанавливаю как {}",
+        ),
+        Msg::PkgMethodManifest => ("its own asc.yaml", "собственный asc.yaml"),
+        Msg::PkgMethodStack => ("its own stack", "собственный стек"),
+        Msg::SelectHint => (
+            "↑/↓ move · Enter select · Esc cancel",
+            "↑/↓ выбор · Enter подтвердить · Esc отмена",
         ),
         Msg::PkgPolicyDockerOnly => (
             "package '{}' is not a Docker app: this server allows regular users to install Docker apps only (root setting: [policy] user_install)",

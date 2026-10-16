@@ -65,6 +65,7 @@ recognizes keeps working against a newer daemon.
 | `GET /v1/status` | `DaemonService.GetStatus` | Version, application counters, capability list |
 | `GET /v1/apps` | `AppService.ListApps` | Application list (scoped by the caller's context) |
 | `POST /v1/apps {"spec": ..., "source"?, "name"?, "branch"?, "tag"?, "license_ack"?}` | `AppService.InstallApp` | Install from a registry or directly from a git URL; without `license_ack` a repository shipping a LICENSE fails with `409` + `license_required` payload, an ambiguous package with `409` + `ambiguous` (candidate list) — the CLI renders its consent prompt / source pick from these |
+| `POST /v1/packages/inspect {"git_url", "branch"?, "tag"?, "path"?}` | `AppService.InspectPackage` | Read a repository without installing it (sparse snapshot, thrown away): `{"kind": "app"\|"stack"\|"unknown", "name", "methods": [{"kind", "files", "items", "supported"}]}` — `supported` already accounts for the host's `docker compose` plugin. A private repository without credentials → `409` + `auth_required`. Used by `asc install`'s method picker |
 | `GET /v1/apps/{id}` | `AppService.GetApp` | A single application |
 | `GET /v1/apps/{id}/disk` | `AppService.GetAppDisk` | Disk usage: image, repository, data, custom volumes |
 | `GET /v1/apps/{id}/image` | `AppService.GetAppImage` | Image reference, version, local vs registry digest (`?checkRemote=true`) and freshness state of a Docker app; `{}` for other runtimes |

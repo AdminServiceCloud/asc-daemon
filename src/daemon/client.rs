@@ -732,6 +732,25 @@ impl Daemon {
         })
     }
 
+    /// The install methods the daemon's host can install a repository with,
+    /// in detection order — a sparse inspect, nothing is installed.
+    pub fn installable_methods(
+        &self,
+        git_url: &str,
+        branch: Option<&str>,
+        tag: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<Vec<pkg::DetectedMethod>> {
+        let body = serde_json::json!({
+            "git_url": git_url,
+            "branch": branch,
+            "tag": tag,
+            "path": path,
+        });
+        let json = self.request(Method::POST, "/v1/packages/inspect", Some(body))?;
+        Ok(installable_from_json(&json))
+    }
+
     /// An app's settings schema and current values. The editor
     /// then runs entirely in the CLI, exactly as it does in-process — only
     /// the reading and the writing move to the daemon, which is the half a
@@ -945,6 +964,37 @@ impl Daemon {
     }
 }
 
+/// The `supported` methods of a `POST /v1/packages/inspect` answer. A kind
+/// this CLI does not know (a newer daemon) is skipped rather than failing
+/// the whole answer.
+fn installable_from_json(json: &Value) -> Vec<pkg::DetectedMethod> {
+    let strings = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    json["methods"]
+        .as_array()
+        .map(|methods| {
+            methods
+                .iter()
+                .filter(|m| m["supported"].as_bool().unwrap_or(false))
+                .filter_map(|m| {
+                    Some(pkg::DetectedMethod {
+                        kind: serde_json::from_value(m["kind"].clone()).ok()?,
+                        files: strings(&m["files"]),
+                        items: strings(&m["items"]),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Rebuild the typed install errors from the structured REST payload, so
 /// the CLI's downcast-based recoveries (license consent, source pick) see
 /// the same error types as the in-process path. Everything else surfaces
@@ -1032,6 +1082,34 @@ fn typed_error(json: &Value) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_answer_keeps_only_installable_known_methods() {
+        let methods = installable_from_json(&serde_json::json!({
+            "kind": "unknown",
+            "name": "repo",
+            "methods": [
+                { "kind": "docker_compose", "files": ["compose.yml"],
+                  "items": ["web", "db"], "supported": true },
+                { "kind": "swarm", "files": ["compose.yml"], "items": [],
+                  "supported": false },
+                { "kind": "nomad", "files": ["job.hcl"], "items": [],
+                  "supported": true },
+                { "kind": "dockerfile", "files": ["Dockerfile"], "items": [],
+                  "supported": true },
+            ],
+        }));
+        let kinds: Vec<_> = methods.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                pkg::InstallMethod::DockerCompose,
+                pkg::InstallMethod::Dockerfile
+            ]
+        );
+        assert_eq!(methods[0].items, ["web", "db"]);
+        assert!(installable_from_json(&serde_json::json!({})).is_empty());
+    }
 
     #[test]
     fn typed_errors_are_reconstructed() {

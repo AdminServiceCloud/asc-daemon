@@ -49,6 +49,16 @@ impl InstallMethod {
             InstallMethod::AscManifest | InstallMethod::AscStack | InstallMethod::Dockerfile
         )
     }
+
+    /// Whether this host can install the method: [`Self::supported`], except
+    /// DockerCompose, which depends on the `docker compose` plugin being
+    /// present (`daemon::compose::available`) rather than on the kind alone.
+    pub fn installable(self, compose_available: bool) -> bool {
+        match self {
+            InstallMethod::DockerCompose => compose_available,
+            other => other.supported(),
+        }
+    }
 }
 
 /// One detected method, with the file(s) that triggered it and whatever
@@ -345,6 +355,16 @@ mod tests {
         let methods = detect(dir.path());
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].kind, InstallMethod::AscStack);
+    }
+
+    #[test]
+    fn compose_is_installable_only_with_the_plugin() {
+        assert!(InstallMethod::DockerCompose.installable(true));
+        assert!(!InstallMethod::DockerCompose.installable(false));
+        assert!(InstallMethod::Dockerfile.installable(false));
+        assert!(InstallMethod::AscManifest.installable(false));
+        assert!(!InstallMethod::Helm.installable(true));
+        assert!(!InstallMethod::Swarm.installable(true));
     }
 
     #[test]

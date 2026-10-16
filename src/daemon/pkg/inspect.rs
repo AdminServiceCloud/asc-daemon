@@ -106,11 +106,15 @@ pub fn inspect_git(
     ctx: &UserContext,
     apps_dir: &Path,
 ) -> Result<PackageInfo> {
+    // Two inspects can run at once (two operators, two nodes' dialogs, the
+    // CLI's method picker next to the platform's dialog). The nanosecond
+    // alone does not keep them apart — a coarse clock hands two threads the
+    // same value — so a per-process sequence number does.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "asc-inspect-{}-{}",
+        "asc-inspect-{}-{}-{}",
         std::process::id(),
-        // Two inspects of the same repository can run at once (two operators,
-        // two nodes' dialogs): the nanosecond keeps them from sharing a path.
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())

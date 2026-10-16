@@ -94,7 +94,7 @@ x509-parser = "0.18"
 
 [build-dependencies]
 # protox РєРѕРјРїРёР»РёСЂСѓРµС‚ .proto Р±РµР· РІРЅРµС€РЅРµРіРѕ protoc вЂ” СЃР±РѕСЂРєР° РіРµСЂРјРµС‚РёС‡РЅР°
-protox = "0.9"
+protox = "0.10"
 tonic-build = "0.14"
 tonic-prost-build = "0.14.6"
 

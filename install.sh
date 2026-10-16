@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # 🦀 asc-daemon installer.
 # Downloads the asc-updater binary from the latest GitHub release; the updater
 # then installs and manages the daemon itself (channels, auto-updates, rollback).
@@ -18,7 +18,14 @@
 #   --url <URL>     platform base URL (default https://adminservice.cloud)
 #
 # Both --opt value and --opt=value are accepted.
-set -euo pipefail
+#
+# The script is kept POSIX sh compatible: it is often piped into `sh`, which is
+# dash on Debian/Ubuntu, and dash has no pipefail in the releases those
+# distributions ship. pipefail is enabled only where the shell supports it, and
+# no pipeline below depends on it.
+set -eu
+# shellcheck disable=SC3040
+if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 REPO="AdminServiceCloud/asc-daemon"
 INSTALL_DIR="/usr/local/bin"
@@ -102,11 +109,17 @@ wait_for_package_manager() {
 install_docker() {
     wait_for_package_manager
     echo "Installing Docker (get.docker.com)..."
-    if curl -fsSL --proto '=https' --tlsv1.2 https://get.docker.com | sh; then
+    # Downloaded to a file first: piped into sh, a failed download would look
+    # like an empty script that succeeded (no pipefail in dash).
+    docker_script="$(mktemp)" || return 1
+    if curl -fsSL --proto '=https' --tlsv1.2 -o "$docker_script" https://get.docker.com \
+        && sh "$docker_script"; then
+        rm -f "$docker_script"
         systemctl enable --now docker >/dev/null 2>&1 || true
         echo "Docker installed"
         return 0
     fi
+    rm -f "$docker_script"
     return 1
 }
 

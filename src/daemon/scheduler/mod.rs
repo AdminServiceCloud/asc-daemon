@@ -31,7 +31,6 @@ use crate::daemon::backup;
 use crate::daemon::backup::storage::{self, StorageList};
 use crate::daemon::config::Config;
 use crate::daemon::i18n::{Msg, tf};
-use crate::daemon::pkg::settings::SettingValues;
 
 /// One local-time instant, broken down to the fields cron matches against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,13 +469,14 @@ fn run_due_backups(config: &Config, at: Moment) {
     }
 }
 
-/// The app's backup policy, `None` when it has none configured.
+/// The app's backup policy, `None` when it has none configured. Read from
+/// the app index's copy of `settings.json` when there is one: this runs for
+/// every app once a minute.
 fn load_policy(
     store: &AppStore,
     app_id: &str,
 ) -> Result<Option<crate::daemon::pkg::settings::BackupPolicy>> {
-    let config_dir = crate::daemon::apps::layout::settings_dir(&store.app_dir(app_id)?);
-    SettingValues::load(&config_dir)?.backup_policy()
+    store.settings(app_id)?.backup_policy()
 }
 
 #[cfg(test)]

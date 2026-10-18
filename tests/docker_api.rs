@@ -553,6 +553,7 @@ fn settings_drift_recreates_the_container() {
     let apps = tempfile::tempdir().unwrap();
     let mut config = asc_daemon::daemon::config::Config::default();
     config.daemon.apps_dir = apps.path().to_path_buf();
+    config.daemon.data_dir = apps.path().join(".data");
     config.docker = docker_cfg;
 
     let store = AppStore::new(apps.path().to_path_buf());
@@ -874,6 +875,7 @@ async fn prune_images_dry_run_protects_installed_apps_image() {
     let (docker_cfg, dir, hits) = test_cfg();
     let mut config = asc_daemon::daemon::config::Config::default();
     config.daemon.apps_dir = dir.path().join("apps");
+    config.daemon.data_dir = dir.path().join("data");
     config.docker = docker_cfg;
     install_docker_app(&config, "web", "ghcr.io/acme/hello:1.0");
 
@@ -925,6 +927,7 @@ async fn prune_images_real_run_removes_one_at_a_time() {
     let (docker_cfg, dir, hits) = test_cfg();
     let mut config = asc_daemon::daemon::config::Config::default();
     config.daemon.apps_dir = dir.path().join("apps");
+    config.daemon.data_dir = dir.path().join("data");
     config.docker = docker_cfg;
     install_docker_app(&config, "web", "ghcr.io/acme/hello:1.0");
 
@@ -965,6 +968,7 @@ async fn prune_volumes_protects_a_declared_named_volume() {
     let (docker_cfg, dir, hits) = test_cfg();
     let mut config = asc_daemon::daemon::config::Config::default();
     config.daemon.apps_dir = dir.path().join("apps");
+    config.daemon.data_dir = dir.path().join("data");
     config.docker = docker_cfg;
 
     // A docker app whose settings declare the fixture's "shared-data" named

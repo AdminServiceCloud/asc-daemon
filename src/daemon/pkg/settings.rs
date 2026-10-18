@@ -897,8 +897,14 @@ impl SettingValues {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
+        Self::parse(raw.as_bytes(), &path)
+    }
+
+    /// Values from the raw bytes of a `settings.json` — the file itself or
+    /// its copy in the app index; `path` only names it in errors.
+    pub fn parse(raw: &[u8], path: &Path) -> Result<Self> {
         let map =
-            serde_json::from_str(&raw).with_context(|| format!("invalid {}", path.display()))?;
+            serde_json::from_slice(raw).with_context(|| format!("invalid {}", path.display()))?;
         Ok(Self { map })
     }
 
@@ -923,6 +929,9 @@ impl SettingValues {
                 .with_context(|| format!("cannot write {}", tmp.display()))?;
         }
         fs::rename(&tmp, &path).with_context(|| format!("cannot replace {}", path.display()))?;
+        // Write-through into the app index (DMN-160): a no-op outside an
+        // indexed apps directory.
+        crate::daemon::apps::index::changed(&path);
         Ok(())
     }
 

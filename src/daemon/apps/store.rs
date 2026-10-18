@@ -1,19 +1,27 @@
 //! App storage: `/asc/apps/<id>/` directories with `.asc/meta.json` inside.
 //!
-//! The store is the on-disk index: listing scans the apps root and reads each
-//! meta.json, first moving a legacy app into `.asc/` ([`layout::migrate`]).
-//! Broken entries are skipped with a warning instead of failing
-//! the whole listing — one corrupted app must not hide the others.
+//! The files are the source of truth; listings come from the app index
+//! (the daemon's local database, [`super::index`]) when one is open for this
+//! apps root, and from a scan of the root otherwise. Every write goes to the
+//! file first and is then written through into the index.
+//!
+//! The scan reads each meta.json, first moving a legacy app into `.asc/`
+//! ([`layout::migrate`]). Broken entries are skipped with a warning instead
+//! of failing the whole listing — one corrupted app must not hide the
+//! others.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use super::index::{self, AppIndex, IndexedApp, StateFile};
 use super::layout;
 use super::meta::{AppMeta, validate_id};
+use crate::daemon::pkg::settings::SettingValues;
 
 pub struct AppStore {
     root: PathBuf,
@@ -34,7 +42,22 @@ impl AppStore {
         Ok(self.root.join(id))
     }
 
-    /// Load one app's metadata; `None` when it is not installed.
+    /// The index open for this apps root in this process, if any.
+    pub fn index(&self) -> Option<Arc<AppIndex>> {
+        index::for_root(&self.root)
+    }
+
+    /// Write one app through into the index after its files changed.
+    fn sync(&self, id: &str) {
+        if let Some(index) = self.index()
+            && let Err(err) = index.sync_app(id)
+        {
+            warn!(app = %id, error = %format!("{err:#}"), "cannot update the app index; the next verify picks the change up");
+        }
+    }
+
+    /// Load one app's metadata; `None` when it is not installed. Always read
+    /// from the file: operating on an app must see exactly what is on disk.
     pub fn get(&self, id: &str) -> Result<Option<AppMeta>> {
         let dir = self.app_dir(id)?;
         if !AppMeta::exists(&dir) {
@@ -49,23 +72,72 @@ impl AppStore {
         let dir = self.app_dir(&meta.id)?;
         fs::create_dir_all(&dir)
             .with_context(|| format!("cannot create app directory {}", dir.display()))?;
-        meta.save(&dir)
+        meta.save(&dir)?;
+        self.sync(&meta.id);
+        Ok(())
     }
 
     /// Remove an app's directory with all its data.
     pub fn remove(&self, id: &str) -> Result<()> {
         let dir = self.app_dir(id)?;
         match fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
-                Err(e).with_context(|| format!("cannot remove app directory {}", dir.display()))
+                return Err(e)
+                    .with_context(|| format!("cannot remove app directory {}", dir.display()));
+            }
+        }
+        self.sync(id);
+        Ok(())
+    }
+
+    /// All installed apps, sorted by id: from the index when there is one,
+    /// else a scan of the apps root.
+    pub fn list(&self) -> Result<Vec<AppMeta>> {
+        match self.indexed()? {
+            Some(apps) => Ok(apps.into_iter().map(|app| app.meta).collect()),
+            None => self.scan(),
+        }
+    }
+
+    /// All installed apps with their indexed commit and last observed state;
+    /// `None` when no index serves this root (or it failed — then the caller
+    /// scans, the files are the source of truth anyway).
+    pub fn indexed(&self) -> Result<Option<Vec<IndexedApp>>> {
+        let Some(index) = self.index() else {
+            return Ok(None);
+        };
+        match index.apps() {
+            Ok(apps) => Ok(Some(apps)),
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "app index unavailable, listing the apps directory");
+                Ok(None)
             }
         }
     }
 
-    /// All installed apps, sorted by id. Invalid entries are skipped.
-    pub fn list(&self) -> Result<Vec<AppMeta>> {
+    /// The app's chosen setting values: from the index's copy of its
+    /// `settings.json` when it has one, else from the file.
+    pub fn settings(&self, id: &str) -> Result<SettingValues> {
+        let dir = self.app_dir(id)?;
+        if let Some(index) = self.index() {
+            let named = layout::state_dir(&dir).join(SettingValues::FILE);
+            match index.state_file(id, SettingValues::FILE) {
+                Ok(StateFile::Content(raw)) => return SettingValues::parse(&raw, &named),
+                Ok(StateFile::Absent) => return Ok(SettingValues::default()),
+                Ok(StateFile::NotIndexed | StateFile::TooLarge) => {}
+                Err(err) => {
+                    warn!(app = %id, error = %format!("{err:#}"), "cannot read settings from the app index")
+                }
+            }
+        }
+        SettingValues::load(&layout::settings_dir(&dir))
+    }
+
+    /// Scan the apps root directly, bypassing the index. Invalid entries
+    /// are skipped.
+    pub fn scan(&self) -> Result<Vec<AppMeta>> {
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
             // No apps root yet — nothing installed.
@@ -103,7 +175,7 @@ impl AppStore {
 
 /// Move a legacy app into `.asc/`. A failure is not fatal: the readers
 /// fall back to the legacy paths, so the app stays listed and usable.
-fn migrate(dir: &Path) {
+pub(crate) fn migrate(dir: &Path) {
     match layout::migrate(dir) {
         Ok(true) => info!(dir = %dir.display(), "moved app metadata and settings into .asc/"),
         Ok(false) => {}

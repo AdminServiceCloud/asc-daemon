@@ -97,6 +97,54 @@ pub fn unit_name(id: &str) -> String {
 
 pub struct SystemdAppDriver;
 
+/// Observed state from a unit's `ActiveState`, the same reading
+/// `systemctl is-active` gives.
+fn state_from_active(value: &str) -> RuntimeState {
+    match value.trim() {
+        "active" | "activating" => RuntimeState::Running,
+        _ => RuntimeState::Stopped,
+    }
+}
+
+/// The `ActiveState=` lines of `systemctl show -p ActiveState u1 u2 …`:
+/// one per unit, in argument order.
+fn parse_active_states(raw: &str) -> Vec<RuntimeState> {
+    raw.lines()
+        .filter_map(|line| line.strip_prefix("ActiveState="))
+        .map(state_from_active)
+        .collect()
+}
+
+/// States of several units with one `systemctl show` instead of an
+/// `is-active` per unit (DMN-162), in the order given. An answer
+/// that does not line up with the request (a unit name systemctl expanded or
+/// rejected) is an error, and the caller asks unit by unit.
+pub fn active_states(units: &[&str]) -> Result<Vec<RuntimeState>> {
+    if units.is_empty() {
+        return Ok(Vec::new());
+    }
+    let out = Command::new("systemctl")
+        .args(["show", "--property=ActiveState", "--"])
+        .args(units)
+        .output()
+        .context("cannot run systemctl")?;
+    if !out.status.success() {
+        bail!(
+            "systemctl show failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let states = parse_active_states(&String::from_utf8_lossy(&out.stdout));
+    if states.len() != units.len() {
+        bail!(
+            "systemctl show answered {} units out of {}",
+            states.len(),
+            units.len()
+        );
+    }
+    Ok(states)
+}
+
 fn unit(meta: &AppMeta) -> Result<&str> {
     match &meta.runtime {
         Runtime::Systemd { unit } => Ok(unit),
@@ -128,10 +176,7 @@ impl AppDriver for SystemdAppDriver {
             .args(["is-active", unit(meta)?])
             .output()
             .context("cannot run systemctl")?;
-        match String::from_utf8_lossy(&out.stdout).trim() {
-            "active" | "activating" => Ok(RuntimeState::Running),
-            _ => Ok(RuntimeState::Stopped),
-        }
+        Ok(state_from_active(&String::from_utf8_lossy(&out.stdout)))
     }
 
     fn usage(&self, meta: &AppMeta, dir: &Path) -> Result<Option<ResourceUsage>> {
@@ -177,6 +222,28 @@ impl AppDriver for SystemdAppDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_output_maps_to_states_in_order() {
+        let raw = "ActiveState=active
+
+ActiveState=inactive
+
+ActiveState=activating
+
+ActiveState=failed
+";
+        assert_eq!(
+            parse_active_states(raw),
+            [
+                RuntimeState::Running,
+                RuntimeState::Stopped,
+                RuntimeState::Running,
+                RuntimeState::Stopped
+            ]
+        );
+        assert!(parse_active_states("").is_empty());
+    }
 
     #[test]
     fn unit_name_convention() {

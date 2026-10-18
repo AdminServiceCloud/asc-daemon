@@ -270,6 +270,7 @@ mod tests {
     fn manager(dir: &Path) -> (Config, UserContext) {
         let mut config = Config::default();
         config.daemon.apps_dir = dir.to_path_buf();
+        config.daemon.data_dir = dir.join(".data");
         let ctx = UserContext {
             uid: 0,
             name: "root".into(),

@@ -125,6 +125,21 @@ fn peer_uid_scopes_app_visibility_without_a_token() {
             "foreign apps must be indistinguishable from missing ones, got: {err:#}"
         );
     }
+
+    // The local database covers every user's apps: root only.
+    match daemon.db_status() {
+        Ok(status) => {
+            assert_eq!(my_uid, 0, "a regular peer must not read the database");
+            assert_eq!(status.apps, 2);
+        }
+        Err(err) => {
+            assert_ne!(my_uid, 0, "root must read the database: {err:#}");
+            assert!(
+                format!("{err:#}").contains("root"),
+                "expected the root-only refusal, got: {err:#}"
+            );
+        }
+    }
 }
 
 /// the settings editor works for a caller who cannot touch the app

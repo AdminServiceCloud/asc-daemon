@@ -271,6 +271,69 @@ mod rest {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    /// `/v1/health` answers without the app list — what the CLI probes before
+    /// every command instead of `/v1/status`.
+    #[tokio::test]
+    async fn health_is_cheap_and_authenticated() {
+        let (state, _ws) = test_state();
+        install_fake_app(&state, "demo");
+        let (status, body) = call(&state, "GET", "/v1/health", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["version"], asc_daemon::VERSION);
+        assert_eq!(body["status"], "ok");
+        assert!(body.get("apps_total").is_none());
+
+        let (status, _) = call(&state, "GET", "/v1/health", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The app list comes from the local database, and the database follows
+    /// the files: a hand-written app shows up, `verify` reports it, a
+    /// rebuild starts from the files again.
+    #[tokio::test]
+    async fn db_status_verify_and_rebuild() {
+        let (state, _ws) = test_state();
+        install_fake_app(&state, "demo");
+
+        let (status, body) = call(&state, "GET", "/v1/db", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["db"]["apps"], 1);
+        assert!(
+            body["db"]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("data/index.db")
+        );
+
+        // Around the daemon: a second app written straight to disk.
+        let dir = state.config.daemon.apps_dir.join("manual");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut meta = AppStore::new(state.config.daemon.apps_dir.clone())
+            .get("demo")
+            .unwrap()
+            .unwrap();
+        meta.id = "manual".into();
+        meta.save(&dir).unwrap();
+
+        let (status, body) = call(&state, "POST", "/v1/db/verify", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["verify"]["added"], 1);
+        assert_eq!(body["verify"]["checked"], 2);
+
+        let (_, body) = call(&state, "GET", "/v1/apps", Some(TOKEN), None).await;
+        let ids: Vec<&str> = body["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|app| app["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["demo", "manual"]);
+
+        let (status, body) = call(&state, "POST", "/v1/db/rebuild", Some(TOKEN), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["rebuild"]["apps"], 2);
+    }
+
     #[tokio::test]
     async fn app_disk_reports_directory_sizes() {
         let (state, _ws) = test_state();

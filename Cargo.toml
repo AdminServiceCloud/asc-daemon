@@ -91,6 +91,11 @@ instant-acme = { version = "0.8", default-features = false, features = ["ring", 
 # Certificate expiry/issuer/SAN for issued and provided certificates;
 # already in the graph through rcgen.
 x509-parser = "0.18"
+# The daemon's local database (DMN-160): an index of installed apps that
+# mirrors every app's `.asc/`. `bundled` compiles SQLite itself — no system
+# libsqlite3, and the same C toolchain `cross` already provides for ring
+# builds it for every release target.
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [build-dependencies]
 # protox РєРѕРјРїРёР»РёСЂСѓРµС‚ .proto Р±РµР· РІРЅРµС€РЅРµРіРѕ protoc вЂ” СЃР±РѕСЂРєР° РіРµСЂРјРµС‚РёС‡РЅР°

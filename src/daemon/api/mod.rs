@@ -525,10 +525,10 @@ impl DockerProtection {
     fn scan(state: &ApiState, ctx: &UserContext) -> Result<Self> {
         let mut images = std::collections::HashMap::new();
         let mut volumes = std::collections::HashMap::new();
-        for app in state.manager.list(ctx)? {
-            let app_dir = state.manager.store().app_dir(&app.meta.id)?;
-            let footprint = pkg::docker_footprint(&state.config, &app.meta, &app_dir);
-            let label = app.meta.display_name().to_string();
+        for meta in state.manager.visible(ctx)? {
+            let app_dir = state.manager.store().app_dir(&meta.id)?;
+            let footprint = pkg::docker_footprint(&state.config, &meta, &app_dir);
+            let label = meta.display_name().to_string();
             if let Some(image) = footprint.image {
                 images
                     .entry(image)
@@ -953,13 +953,9 @@ impl ApiState {
         ctx: &UserContext,
     ) -> Result<std::collections::HashMap<String, (String, Option<String>)>> {
         let mut owners = std::collections::HashMap::new();
-        for app in self.manager.list(ctx)? {
-            if let crate::daemon::apps::meta::Runtime::Docker { container, .. } = &app.meta.runtime
-            {
-                owners.insert(
-                    container.clone(),
-                    (app.meta.id.clone(), app.meta.uuid.clone()),
-                );
+        for meta in self.manager.visible(ctx)? {
+            if let crate::daemon::apps::meta::Runtime::Docker { container, .. } = &meta.runtime {
+                owners.insert(container.clone(), (meta.id.clone(), meta.uuid.clone()));
             }
         }
         Ok(owners)
@@ -973,12 +969,9 @@ impl ApiState {
         ctx: &UserContext,
     ) -> Result<std::collections::HashMap<String, (String, Option<String>)>> {
         let mut owners = std::collections::HashMap::new();
-        for app in self.manager.list(ctx)? {
-            if let crate::daemon::apps::meta::Runtime::Compose { project, .. } = &app.meta.runtime {
-                owners.insert(
-                    project.clone(),
-                    (app.meta.id.clone(), app.meta.uuid.clone()),
-                );
+        for meta in self.manager.visible(ctx)? {
+            if let crate::daemon::apps::meta::Runtime::Compose { project, .. } = &meta.runtime {
+                owners.insert(project.clone(), (meta.id.clone(), meta.uuid.clone()));
             }
         }
         Ok(owners)
@@ -994,6 +987,42 @@ impl ApiState {
             Ok((running, apps.len()))
         })
         .await
+    }
+
+    // ── Local database (see docs/english/app-management.md) ──
+
+    /// The app index this daemon keeps, for root only: it covers every app
+    /// on the node, whoever owns them.
+    fn db_index(&self, ctx: &UserContext) -> Result<Arc<crate::daemon::apps::index::AppIndex>> {
+        use crate::daemon::apps::index::DbError;
+        if !ctx.is_root {
+            return Err(anyhow::Error::new(DbError::RootOnly));
+        }
+        self.manager
+            .store()
+            .index()
+            .ok_or_else(|| anyhow::Error::new(DbError::Disabled))
+    }
+
+    pub async fn db_status(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<crate::daemon::apps::index::IndexStatus> {
+        self.blocking(move |s| s.db_index(&ctx)?.status()).await
+    }
+
+    pub async fn db_verify(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<crate::daemon::apps::index::VerifyReport> {
+        self.blocking(move |s| s.db_index(&ctx)?.verify()).await
+    }
+
+    pub async fn db_rebuild(
+        self: &Arc<Self>,
+        ctx: UserContext,
+    ) -> Result<crate::daemon::apps::index::RebuildReport> {
+        self.blocking(move |s| s.db_index(&ctx)?.rebuild()).await
     }
 
     pub async fn list_apps(self: &Arc<Self>, ctx: UserContext) -> Result<Vec<AppStatus>> {
@@ -2718,9 +2747,9 @@ impl ApiState {
 
             // Declared-but-unbound ports of stopped docker apps: a reserved
             // port must still show up, or it silently looks free.
-            for app in s.manager.list(&ctx)? {
+            for meta in s.manager.visible(&ctx)? {
                 if !matches!(
-                    app.meta.runtime,
+                    meta.runtime,
                     crate::daemon::apps::meta::Runtime::Docker { .. }
                 ) {
                     continue;
@@ -2728,11 +2757,11 @@ impl ApiState {
                 let declared = match crate::daemon::apps::ports::published(
                     &s.config,
                     s.manager.store(),
-                    &app.meta,
+                    &meta,
                 ) {
                     Ok(ports) => ports,
                     Err(err) => {
-                        warn!(app = %app.meta.id, error = %format!("{err:#}"), "cannot resolve declared ports");
+                        warn!(app = %meta.id, error = %format!("{err:#}"), "cannot resolve declared ports");
                         continue;
                     }
                 };
@@ -2751,8 +2780,8 @@ impl ApiState {
                             command: None,
                             container_id: None,
                             container_name: None,
-                            app_id: Some(app.meta.id.clone()),
-                            app_uuid: app.meta.uuid.clone(),
+                            app_id: Some(meta.id.clone()),
+                            app_uuid: meta.uuid.clone(),
                             declared_only: true,
                             is_daemon: false,
                         });

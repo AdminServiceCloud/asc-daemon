@@ -20,6 +20,16 @@ pub enum RuntimeState {
     Stopped,
 }
 
+impl RuntimeState {
+    /// Lowercase name, as the API and the app index spell it.
+    pub fn label(self) -> &'static str {
+        match self {
+            RuntimeState::Running => "running",
+            RuntimeState::Stopped => "stopped",
+        }
+    }
+}
+
 /// Point-in-time resource counters of a running app.
 ///
 /// CPU time is cumulative, so a usage percentage is a delta between two

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod complete;
+mod db;
 mod fail2ban;
 mod firewall;
 mod select;
@@ -241,6 +242,12 @@ enum Command {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+    /// The daemon's local database: the index of installed apps, mirroring
+    /// every app's `.asc/` (status, verify against the files, rebuild)
+    Db {
+        #[command(subcommand)]
+        action: db::DbAction,
     },
     /// Manage auto-updates (proxies to `asc-updater auto ...`)
     Autoupdate {
@@ -1055,6 +1062,7 @@ fn run() -> anyhow::Result<()> {
         Command::Fail2ban { action } => fail2ban::run(action, &config),
         Command::Wireguard { action } => wireguard::run(action, &config),
         Command::Config { action } => config_cmd(action, config),
+        Command::Db { action } => db::run(action, &config),
         Command::Autoupdate { action } => autoupdate_cmd(&action),
         // Both were handled above, before the config was loaded.
         Command::Completion { .. } | Command::Complete { .. } => Ok(()),
@@ -3593,10 +3601,10 @@ fn docker_protection(
     let ctx = UserContext::current();
     let mut images = std::collections::HashMap::new();
     let mut volumes = std::collections::HashMap::new();
-    for app in manager.list(&ctx)? {
-        let app_dir = manager.store().app_dir(&app.meta.id)?;
-        let footprint = pkg::docker_footprint(config, &app.meta, &app_dir);
-        let label = app.meta.display_name().to_string();
+    for meta in manager.visible(&ctx)? {
+        let app_dir = manager.store().app_dir(&meta.id)?;
+        let footprint = pkg::docker_footprint(config, &meta, &app_dir);
+        let label = meta.display_name().to_string();
         if let Some(image) = footprint.image {
             images
                 .entry(image)
@@ -4075,12 +4083,12 @@ fn listening_ports_cmd(config: &Config) -> anyhow::Result<()> {
     // Container name -> owning app id, the same cross-reference
     // `docker_ps_cmd` builds: `docker::ContainerInfo` itself carries no app
     // identity, only names, so ownership is resolved from the app store.
-    let apps_for_owners = manager.list(&ctx)?;
+    let apps_for_owners = manager.visible(&ctx)?;
     let owners: std::collections::HashMap<String, String> = apps_for_owners
         .iter()
-        .filter_map(|app| match &app.meta.runtime {
+        .filter_map(|meta| match &meta.runtime {
             asc_daemon::daemon::apps::meta::Runtime::Docker { container, .. } => {
-                Some((container.clone(), app.meta.id.clone()))
+                Some((container.clone(), meta.id.clone()))
             }
             _ => None,
         })
@@ -4132,15 +4140,15 @@ fn listening_ports_cmd(config: &Config) -> anyhow::Result<()> {
         })
         .collect();
 
-    for app in &apps_for_owners {
+    for meta in &apps_for_owners {
         if !matches!(
-            app.meta.runtime,
+            meta.runtime,
             asc_daemon::daemon::apps::meta::Runtime::Docker { .. }
         ) {
             continue;
         }
         let Ok(declared) =
-            asc_daemon::daemon::apps::ports::published(config, manager.store(), &app.meta)
+            asc_daemon::daemon::apps::ports::published(config, manager.store(), meta)
         else {
             continue;
         };
@@ -4156,7 +4164,7 @@ fn listening_ports_cmd(config: &Config) -> anyhow::Result<()> {
                     pid: None,
                     process: None,
                     container_name: None,
-                    app_id: Some(app.meta.id.clone()),
+                    app_id: Some(meta.id.clone()),
                     declared_only: true,
                     is_daemon: false,
                 });

@@ -227,18 +227,22 @@ pub fn write_candidate(path: &Path, content: &str) -> Result<PathBuf> {
 
 /// Atomically put a validated candidate in place of `path`.
 pub fn commit(candidate: &Path, path: &Path) -> Result<()> {
-    fs::rename(candidate, path).with_context(|| format!("cannot replace {}", path.display()))
+    fs::rename(candidate, path).with_context(|| format!("cannot replace {}", path.display()))?;
+    // Write-through into the app index (DMN-160).
+    crate::daemon::apps::index::changed(path);
+    Ok(())
 }
 
 /// Write `file` to `path` (rendered against `base`) without a validation
 /// step — or remove `path` when nothing is left in it.
 pub fn store(file: &OverrideFile, base: &ResolvedProject, path: &Path) -> Result<()> {
     if file.services.values().all(ServiceOverride::is_empty) {
-        return match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("cannot remove {}", path.display())),
-        };
+        match fs::remove_file(path) {
+            Ok(()) => crate::daemon::apps::index::changed(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("cannot remove {}", path.display())),
+        }
+        return Ok(());
     }
     let candidate = write_candidate(path, &file.render(base))?;
     commit(&candidate, path)

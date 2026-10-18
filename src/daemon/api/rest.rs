@@ -25,7 +25,11 @@ use crate::daemon::users;
 
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
+        .route("/v1/health", get(health))
         .route("/v1/status", get(status))
+        .route("/v1/db", get(db_status))
+        .route("/v1/db/verify", post(db_verify))
+        .route("/v1/db/rebuild", post(db_rebuild))
         .route("/v1/system/reboot", post(reboot_system))
         .route("/v1/metrics", get(system_metrics))
         .route("/v1/metrics/history", get(metrics_history))
@@ -282,6 +286,15 @@ impl IntoResponse for ApiError {
             )
                 .into_response();
         }
+        // The local database: root-only, or not in use on this node.
+        if let Some(err) = self.0.downcast_ref::<crate::daemon::apps::index::DbError>() {
+            use crate::daemon::apps::index::DbError as D;
+            let status = match err {
+                D::RootOnly => StatusCode::FORBIDDEN,
+                D::Disabled => StatusCode::CONFLICT,
+            };
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
         // Typed errors of the system modules (firewall, fail2ban).
         if let Some(err) = self.0.downcast_ref::<crate::daemon::exec::ModuleError>() {
             use crate::daemon::exec::ModuleError as M;
@@ -490,6 +503,41 @@ async fn reboot_system(
     tokens::require_primary(resolved.map(|Extension(r)| r), &ctx)?;
     state.reboot_system().await?;
     Ok(Json(serde_json::json!({ "accepted": true })).into_response())
+}
+
+/// Liveness for clients that only need to know the daemon answers (the CLI
+/// before every command): no app list, no runtime queries — unlike
+/// `/v1/status`, whose counters cost a pass over every app.
+async fn health() -> Response {
+    Json(serde_json::json!({
+        "version": crate::VERSION,
+        "status": "ok",
+    }))
+    .into_response()
+}
+
+async fn db_status(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let status = state.db_status(ctx).await?;
+    Ok(Json(serde_json::json!({ "db": status })).into_response())
+}
+
+async fn db_verify(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let report = state.db_verify(ctx).await?;
+    Ok(Json(serde_json::json!({ "verify": report })).into_response())
+}
+
+async fn db_rebuild(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+) -> Result<Response, ApiError> {
+    let report = state.db_rebuild(ctx).await?;
+    Ok(Json(serde_json::json!({ "rebuild": report })).into_response())
 }
 
 async fn status(

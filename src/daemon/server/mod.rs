@@ -24,6 +24,20 @@ pub async fn run(mut config: Config) -> anyhow::Result<()> {
     })?;
     info!(data_dir = %config.daemon.data_dir.display(), "data directory ready");
 
+    // The local database (DMN-160): opened, integrity-checked and brought in
+    // line with the files before anything reads the app list, then kept
+    // current by the watcher and a periodic verify. Without it (a read-only
+    // data directory, ASC_NO_INDEX) the daemon scans the files as before.
+    let index_config = config.clone();
+    let index = tokio::task::spawn_blocking(move || {
+        crate::daemon::apps::index::attach_owner(&index_config)
+    })
+    .await
+    .context("app index task panicked")?;
+    if let Some(index) = index {
+        crate::daemon::apps::index::start_maintenance(index);
+    }
+
     // Recovery pass: bring apps back to their desired state after a reboot.
     let apps = crate::daemon::apps::AppManager::new(&config);
     tokio::task::spawn_blocking(move || {

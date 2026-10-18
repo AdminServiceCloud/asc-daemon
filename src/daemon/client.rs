@@ -342,10 +342,43 @@ impl Daemon {
         let client = Self { socket, rt };
         // One cheap round-trip up front: every later error is then a real
         // operation error, not a lazily-discovered connection problem.
-        client
-            .request(Method::GET, "/v1/status", None)
-            .map_err(|_| anyhow!(tf(Msg::DaemonUnreachable, client.socket.display())))?;
+        // `/v1/health` answers without touching any app; a daemon older
+        // than it (404) is probed with `/v1/status` as before.
+        let unreachable = || anyhow!(tf(Msg::DaemonUnreachable, client.socket.display()));
+        match client
+            .rt
+            .block_on(client.roundtrip(Method::GET, "/v1/health", None))
+        {
+            Ok((status, _)) if status.is_success() => {}
+            Ok((StatusCode::NOT_FOUND, _)) => {
+                client
+                    .request(Method::GET, "/v1/status", None)
+                    .map_err(|_| unreachable())?;
+            }
+            _ => return Err(unreachable()),
+        }
         Ok(Some(client))
+    }
+
+    /// `asc db status` through the daemon (root only).
+    pub fn db_status(&self) -> Result<crate::daemon::apps::index::IndexStatus> {
+        let json = self.request(Method::GET, "/v1/db", None)?;
+        serde_json::from_value(json["db"].clone())
+            .context("malformed database status from the daemon")
+    }
+
+    /// `asc db verify` through the daemon (root only).
+    pub fn db_verify(&self) -> Result<crate::daemon::apps::index::VerifyReport> {
+        let json = self.request(Method::POST, "/v1/db/verify", None)?;
+        serde_json::from_value(json["verify"].clone())
+            .context("malformed verify report from the daemon")
+    }
+
+    /// `asc db rebuild` through the daemon (root only).
+    pub fn db_rebuild(&self) -> Result<crate::daemon::apps::index::RebuildReport> {
+        let json = self.request(Method::POST, "/v1/db/rebuild", None)?;
+        serde_json::from_value(json["rebuild"].clone())
+            .context("malformed rebuild report from the daemon")
     }
 
     /// Web server API passthrough: the CLI renders the JSON the

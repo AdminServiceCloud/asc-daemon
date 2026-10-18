@@ -10,6 +10,7 @@ pub mod compose_services;
 pub mod disk;
 pub mod docker;
 pub mod driver;
+pub mod index;
 pub mod layout;
 pub mod meta;
 pub mod oplock;
@@ -19,7 +20,7 @@ pub mod store;
 pub mod systemd;
 
 use anyhow::{Result, bail};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::daemon::config::Config;
 use crate::daemon::i18n::{Msg, tf, tf2};
@@ -249,6 +250,10 @@ pub struct AppManager {
 
 impl AppManager {
     pub fn new(config: &Config) -> Self {
+        // Open (or join) the local database of this apps directory; every
+        // `AppStore` of the same root then reads and writes through it.
+        // Without one the store scans the files, as it always did.
+        index::attach(config);
         Self {
             store: AppStore::new(config.daemon.apps_dir.clone()),
             config: config.clone(),
@@ -261,61 +266,168 @@ impl AppManager {
 
     /// Apps visible to this user (root sees all), with runtime state.
     ///
-    /// Every compose app's state and service summary come from **one**
-    /// Engine container list for the whole call, grouped by the compose
-    /// project label — not a `docker compose ps` per app.
+    /// Metadata and commits come from the app index (no `meta.json` reads,
+    /// no `git rev-parse`); states are observed in one batch — see
+    /// [`Self::observe`].
     pub fn list(&self, ctx: &UserContext) -> Result<Vec<AppStatus>> {
-        let metas: Vec<AppMeta> = self
-            .store
-            .list()?
+        let (apps, indexed) = match self.store.indexed()? {
+            Some(apps) => (apps, true),
+            None => (
+                self.store
+                    .scan()?
+                    .into_iter()
+                    .map(|meta| index::IndexedApp {
+                        meta,
+                        commit: None,
+                        observed: None,
+                    })
+                    .collect(),
+                false,
+            ),
+        };
+        let apps: Vec<index::IndexedApp> = apps
             .into_iter()
-            .filter(|meta| ctx.is_root || meta.owner.uid == ctx.uid)
+            .filter(|app| ctx.is_root || app.meta.owner.uid == ctx.uid)
             .collect();
-        let mut by_project: Option<std::collections::HashMap<String, Vec<_>>> = None;
-        if metas
-            .iter()
-            .any(|m| matches!(m.runtime, meta::Runtime::Compose { .. }))
-        {
-            match crate::daemon::docker::list_containers(&self.config.docker, true, false) {
-                Ok(containers) => {
-                    let mut groups = std::collections::HashMap::new();
-                    for container in containers {
-                        if let Some(project) = container.compose_project.clone() {
-                            groups
-                                .entry(project)
-                                .or_insert_with(Vec::new)
-                                .push(container);
-                        }
-                    }
-                    by_project = Some(groups);
-                }
-                Err(err) => {
-                    warn!(error = %format!("{err:#}"), "cannot list containers for compose apps");
-                }
+        let metas: Vec<&AppMeta> = apps.iter().map(|app| &app.meta).collect();
+        let observed = self.observe(&metas);
+        let mut changes = Vec::new();
+        let mut result = Vec::with_capacity(apps.len());
+        for (app, (state, compose_services)) in apps.into_iter().zip(observed) {
+            let label = state.label();
+            if indexed && app.observed.as_deref() != Some(label) {
+                changes.push((app.meta.id.clone(), label));
             }
-        }
-        let mut result = Vec::new();
-        for meta in metas {
-            let (state, compose_services) = match (&meta.runtime, &by_project) {
-                (meta::Runtime::Compose { project, .. }, groups) => {
-                    let containers = groups
-                        .as_ref()
-                        .and_then(|g| g.get(project))
-                        .map(Vec::as_slice)
-                        .unwrap_or_default();
-                    self.compose_status(&meta, containers, groups.is_some())
-                }
-                _ => (self.state_of(&meta), Vec::new()),
+            let commit = if indexed {
+                app.commit
+            } else {
+                self.commit_of(&app.meta.id)
             };
-            let commit = self.commit_of(&meta.id);
             result.push(AppStatus {
-                meta,
+                meta: app.meta,
                 state,
                 commit,
                 compose_services,
             });
         }
+        if let Some(index) = self.store.index() {
+            index.record_observed(&changes);
+        }
         Ok(result)
+    }
+
+    /// Metadata of the apps visible to this user, without asking any runtime
+    /// for its state — for callers that only need to know what is
+    /// installed (ownership maps, prune protection, declared ports).
+    pub fn visible(&self, ctx: &UserContext) -> Result<Vec<AppMeta>> {
+        Ok(self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|meta| ctx.is_root || meta.owner.uid == ctx.uid)
+            .collect())
+    }
+
+    /// Observed state (and, for compose apps, service summaries) of every
+    /// app in `metas`, in the same order, with a fixed number of runtime
+    /// queries however many apps there are (DMN-162):
+    ///
+    /// - one Engine container list for every docker and compose app — a
+    ///   Docker app runs when its container is `running`, `paused` or
+    ///   `restarting` (what `State.Running` of an inspect says), a compose
+    ///   app is grouped by its project label;
+    /// - one `systemctl show` for every systemd unit, falling back to one
+    ///   `is-active` per unit if that answer does not line up;
+    /// - a pid check per process app (a read of `/proc`, no process spawn).
+    fn observe(
+        &self,
+        metas: &[&AppMeta],
+    ) -> Vec<(RuntimeState, Vec<compose_services::ServiceSummary>)> {
+        use std::collections::HashMap;
+
+        let wants_docker = metas.iter().any(|m| {
+            matches!(
+                m.runtime,
+                meta::Runtime::Docker { .. } | meta::Runtime::Compose { .. }
+            )
+        });
+        let containers = if wants_docker {
+            match crate::daemon::docker::list_containers(&self.config.docker, true, false) {
+                Ok(containers) => Some(containers),
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot list containers for app states");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let listed = containers.is_some();
+        let mut state_by_name: HashMap<String, String> = HashMap::new();
+        let mut by_project: HashMap<String, Vec<crate::daemon::docker::ContainerInfo>> =
+            HashMap::new();
+        for container in containers.into_iter().flatten() {
+            for name in &container.names {
+                state_by_name.insert(name.clone(), container.state.clone());
+            }
+            if let Some(project) = container.compose_project.clone() {
+                by_project.entry(project).or_default().push(container);
+            }
+        }
+
+        let units: Vec<&str> = metas
+            .iter()
+            .filter_map(|m| match &m.runtime {
+                meta::Runtime::Systemd { unit } => Some(unit.as_str()),
+                _ => None,
+            })
+            .collect();
+        let unit_states: Option<HashMap<&str, RuntimeState>> = if units.is_empty() {
+            None
+        } else {
+            match systemd::active_states(&units) {
+                Ok(states) => Some(units.iter().copied().zip(states).collect()),
+                Err(err) => {
+                    debug!(error = %format!("{err:#}"), "batched systemctl show failed, asking unit by unit");
+                    None
+                }
+            }
+        };
+
+        metas
+            .iter()
+            .map(|meta| match &meta.runtime {
+                meta::Runtime::Docker { container, .. } => {
+                    // Without a container list: the same degradation as a
+                    // failed inspect, stopped.
+                    let running = listed
+                        && state_by_name.get(container).is_some_and(|state| {
+                            matches!(state.as_str(), "running" | "paused" | "restarting")
+                        });
+                    let state = if running {
+                        RuntimeState::Running
+                    } else {
+                        RuntimeState::Stopped
+                    };
+                    (state, Vec::new())
+                }
+                meta::Runtime::Compose { project, .. } => {
+                    let found = by_project
+                        .get(project)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    self.compose_status(meta, found, listed)
+                }
+                meta::Runtime::Systemd { unit } => {
+                    let state = unit_states
+                        .as_ref()
+                        .and_then(|states| states.get(unit.as_str()).copied())
+                        .unwrap_or_else(|| self.state_of(meta));
+                    (state, Vec::new())
+                }
+                meta::Runtime::Process { .. } => (self.state_of(meta), Vec::new()),
+            })
+            .collect()
     }
 
     /// State and service summaries of a compose app from its containers;
@@ -365,10 +477,19 @@ impl AppManager {
         }
     }
 
-    /// The commit the app's `repository/` clone is checked out at — a
-    /// cheap, local `git rev-parse HEAD` (no network), same cost class as
-    /// `state_of`'s own per-app runtime inspection above.
+    /// The commit the app's `repository/` clone is checked out at: the one
+    /// the index recorded, or a local `git rev-parse HEAD` (no network)
+    /// when the app is not indexed.
     fn commit_of(&self, id: &str) -> Option<String> {
+        if let Some(index) = self.store.index() {
+            match index.commit(id) {
+                Ok(Some(commit)) => return commit,
+                Ok(None) => {}
+                Err(err) => {
+                    debug!(app = %id, error = %format!("{err:#}"), "cannot read the commit from the app index")
+                }
+            }
+        }
         let dir = self.store.app_dir(id).ok()?;
         crate::daemon::pkg::gitref::head_commit(&dir.join("repository"))
     }
@@ -396,13 +517,9 @@ impl AppManager {
         // Custom names are matched among visible apps only, so a name equal
         // to a foreign user's id still resolves to the caller's own app. An
         // exact spelling wins over a case-insensitive one, so two names that
-        // differ only in case stay addressable.
-        let visible: Vec<AppMeta> = self
-            .store
-            .list()?
-            .into_iter()
-            .filter(|m| ctx.is_root || m.owner.uid == ctx.uid)
-            .collect();
+        // differ only in case stay addressable. The candidates come from the
+        // index; the match is then loaded from its file, like an id is.
+        let visible = self.visible(ctx)?;
         for exact in [true, false] {
             let mut matches = visible.iter().filter(|m| match &m.custom_name {
                 Some(name) if exact => name == reference,
@@ -410,7 +527,14 @@ impl AppManager {
                 None => false,
             });
             match (matches.next(), matches.next()) {
-                (Some(meta), None) => return Ok(meta.clone()),
+                (Some(meta), None) => {
+                    if let Some(current) = self.store.get(&meta.id)?
+                        && (ctx.is_root || current.owner.uid == ctx.uid)
+                    {
+                        return Ok(current);
+                    }
+                    bail!(tf(Msg::AppNotFound, reference))
+                }
                 (Some(_), Some(_)) => bail!(tf(Msg::AppNameAmbiguous, reference)),
                 _ => {}
             }
@@ -819,6 +943,8 @@ mod tests {
     fn manager(root: &std::path::Path) -> AppManager {
         let mut config = Config::default();
         config.daemon.apps_dir = root.to_path_buf();
+        // Its own database, never the developer's ~/.asc/data.
+        config.daemon.data_dir = root.join(".data");
         AppManager::new(&config)
     }
 

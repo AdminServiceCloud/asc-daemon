@@ -155,6 +155,7 @@ pub enum Msg {
     AppLowResources,
     AppStartRiskPrompt,
     AppStartDeclined,
+    AppSetupForcePrompt,
     PkgResourcesInsufficient,
     PkgInstallRiskPrompt,
     PkgInstallDeclined,
@@ -560,8 +561,8 @@ pub fn t(msg: Msg) -> &'static str {
             "Пакет '{}' доступен из нескольких источников — выберите один:",
         ),
         Msg::PkgSetupIncomplete => (
-            "app '{}' needs its first-time setup before it can start — answer: {} (asc app settings)",
-            "приложению '{}' нужна первичная настройка перед запуском — ответьте на: {} (asc app settings)",
+            "app '{}' needs its first-time setup before it can start — answer: {} (asc app settings), or start it without the answers: --force",
+            "приложению '{}' нужна первичная настройка перед запуском — ответьте на: {} (asc app settings) или запустите без ответов: --force",
         ),
         Msg::PkgNotAStack => (
             "package '{}' is not a stack — install it as a whole: asc install {}",
@@ -709,6 +710,10 @@ pub fn t(msg: Msg) -> &'static str {
             "Всё равно запустить на свой страх и риск? [y/N] ",
         ),
         Msg::AppStartDeclined => ("start of '{}' cancelled", "запуск '{}' отменён"),
+        Msg::AppSetupForcePrompt => (
+            "Start it anyway, without the answers? [y/N] ",
+            "Всё равно запустить, без ответов? [y/N] ",
+        ),
         Msg::PkgResourcesInsufficient => (
             "installing '{}' needs more than the host has right now: {}",
             "для установки '{}' сейчас не хватает: {}",

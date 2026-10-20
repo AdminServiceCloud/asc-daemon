@@ -89,6 +89,7 @@ fn install_fake_app(state: &ApiState, id: &str) {
             package: None,
             install_method: None,
             desired_state: DesiredState::Stopped,
+            setup_skipped: false,
             quota: None,
             runtime: Runtime::Process {
                 command: "true".into(),

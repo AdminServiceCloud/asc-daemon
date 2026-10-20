@@ -844,6 +844,7 @@ fn install_one(
         },
         install_method,
         desired_state: DesiredState::Stopped,
+        setup_skipped: false,
         quota,
         runtime,
     };
@@ -954,6 +955,7 @@ fn install_compose_one(
         package: None,
         install_method: None,
         desired_state: DesiredState::Stopped,
+        setup_skipped: false,
         quota: None,
         runtime: Runtime::Compose {
             project,

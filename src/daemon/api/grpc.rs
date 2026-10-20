@@ -110,11 +110,8 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
     if err.downcast_ref::<super::ContainerOwnedByApp>().is_some() {
         return Status::failed_precondition(msg);
     }
-    if err
-        .downcast_ref::<crate::daemon::apps::SetupIncomplete>()
-        .is_some()
-    {
-        return Status::failed_precondition(msg);
+    if let Some(pending) = err.downcast_ref::<crate::daemon::apps::SetupIncomplete>() {
+        return setup_incomplete_status(msg, &pending.settings);
     }
     if err
         .downcast_ref::<crate::daemon::progress::Cancelled>()
@@ -179,6 +176,26 @@ pub(super) fn to_status(err: anyhow::Error) -> Status {
     } else {
         Status::internal(msg)
     }
+}
+
+/// `FAILED_PRECONDITION` for a start refused over unanswered setup
+/// questions (DMN-164), marked with metadata a client can tell apart
+/// from the other preconditions without parsing the translated message:
+/// `asc-error-reason: SETUP_INCOMPLETE` and `asc-setup-settings` — the
+/// setting keys, comma-separated. A client offers a forced start on it.
+fn setup_incomplete_status(msg: String, settings: &[String]) -> Status {
+    let mut status = Status::failed_precondition(msg);
+    let metadata = status.metadata_mut();
+    metadata.insert(
+        "asc-error-reason",
+        tonic::metadata::MetadataValue::from_static("SETUP_INCOMPLETE"),
+    );
+    // Setting keys are identifiers; a key that is not a valid header value
+    // only drops the list, never the reason.
+    if let Ok(value) = settings.join(",").parse() {
+        metadata.insert("asc-setup-settings", value);
+    }
+    status
 }
 
 fn disk_to_pb(usage: &crate::daemon::apps::disk::DiskUsage) -> pb::GetAppDiskResponse {
@@ -1494,9 +1511,10 @@ impl AppService for Grpc {
         request: Request<pb::StartAppRequest>,
     ) -> Result<Response<pb::StartAppResponse>, Status> {
         let ctx = ctx_of(&request);
+        let request = request.into_inner();
         let outcome = self
             .0
-            .start(ctx, request.into_inner().id)
+            .start(ctx, request.id, request.force)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::StartAppResponse {
@@ -1539,8 +1557,9 @@ impl AppService for Grpc {
         request: Request<pb::RestartAppRequest>,
     ) -> Result<Response<pb::RestartAppResponse>, Status> {
         let ctx = ctx_of(&request);
+        let request = request.into_inner();
         self.0
-            .restart(ctx, request.into_inner().id)
+            .restart(ctx, request.id, request.force)
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::RestartAppResponse {}))

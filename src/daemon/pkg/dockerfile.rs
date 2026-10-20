@@ -451,6 +451,7 @@ mod tests {
             package: None,
             install_method: None,
             desired_state: crate::daemon::apps::meta::DesiredState::Stopped,
+            setup_skipped: false,
             quota: None,
             runtime: crate::daemon::apps::meta::Runtime::Docker {
                 container: "asc-app".to_string(),

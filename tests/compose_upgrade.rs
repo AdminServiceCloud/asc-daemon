@@ -177,7 +177,7 @@ fn a_branch_upgrade_pulls_the_new_commit_and_recreates_in_place() {
     let env = env("cupg-branch");
     let id = install(&env, Some(GitRef::Branch("main")));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.manager.start(&env.ctx, &id).unwrap();
+        env.manager.start(&env.ctx, &id, false).unwrap();
         let app_dir = env.store.app_dir(&id).unwrap();
         let repo_dir = app_dir.join("repository");
         let before = containers(&env, &id);
@@ -318,7 +318,7 @@ fn a_rebuild_of_a_tag_pinned_app_keeps_its_commit_and_recreates() {
     git(&env.repo, &["tag", "v1.0.0"]);
     let id = install(&env, Some(GitRef::Tag("v1.0.0")));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.manager.start(&env.ctx, &id).unwrap();
+        env.manager.start(&env.ctx, &id, false).unwrap();
         let repo_dir = env.store.app_dir(&id).unwrap().join("repository");
         let pinned = head(&repo_dir);
         let before = containers(&env, &id);
@@ -354,7 +354,7 @@ fn rebuilding_one_service_leaves_the_others_alone() {
     let env = env("crb-service");
     let id = install(&env, Some(GitRef::Branch("main")));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.manager.start(&env.ctx, &id).unwrap();
+        env.manager.start(&env.ctx, &id, false).unwrap();
         let before = containers(&env, &id);
 
         // A service cannot pull the source on its own.
@@ -383,7 +383,7 @@ fn a_broken_build_keeps_the_old_containers_and_commit() {
     let env = env("cupg-broken");
     let id = install(&env, Some(GitRef::Branch("main")));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.manager.start(&env.ctx, &id).unwrap();
+        env.manager.start(&env.ctx, &id, false).unwrap();
         let repo_dir = env.store.app_dir(&id).unwrap().join("repository");
         let before = containers(&env, &id);
         let from = head(&repo_dir);

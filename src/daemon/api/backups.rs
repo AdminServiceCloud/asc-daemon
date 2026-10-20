@@ -372,7 +372,7 @@ impl ApiState {
                 &name,
             );
             if running {
-                s.manager.start(&ctx, &status.meta.id)?;
+                s.manager.start(&ctx, &status.meta.id, false)?;
             }
             restored?;
             Ok(running)

@@ -693,14 +693,18 @@ impl AppManager {
         Ok(self.status_of(meta))
     }
 
-    pub fn start(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
+    /// Start the app. `force` starts it even though required first-time
+    /// setup questions are unanswered (DMN-164) — see
+    /// [`Self::ensure_setup_complete`].
+    pub fn start(&self, ctx: &UserContext, id: &str, force: bool) -> Result<Outcome> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
         let mut refreshed = false;
+        let mut setup_changed = false;
         let outcome = if self.state_of(&meta) == RuntimeState::Running {
             Outcome::AlreadyInState
         } else {
-            self.ensure_setup_complete(&meta, &dir)?;
+            setup_changed = self.ensure_setup_complete(&mut meta, &dir, force)?;
             // Changed settings land here: a stopped container
             // whose configuration drifted from the settings is recreated.
             refreshed = crate::daemon::pkg::refresh::apply_settings(&self.config, &mut meta, &dir)?;
@@ -708,7 +712,7 @@ impl AppManager {
             Outcome::Done
         };
         // Persist intent even when already running: survive the next reboot.
-        if refreshed || meta.desired_state != DesiredState::Running {
+        if refreshed || setup_changed || meta.desired_state != DesiredState::Running {
             meta.desired_state = DesiredState::Running;
             self.store.save(&meta)?;
         }
@@ -717,27 +721,53 @@ impl AppManager {
 
     /// Refuse to start an app whose `required` setup questions have no
     /// answer yet — a game server with no admin password is worse
-    /// than one that does not start. Best effort about everything else: a
-    /// manifest or settings file that cannot be read is not this check's
-    /// business, the start itself reports those.
-    fn ensure_setup_complete(&self, meta: &AppMeta, dir: &std::path::Path) -> Result<()> {
-        use crate::daemon::pkg::{dockerfile, settings};
-        let Ok((manifest_dir, _)) = settings::locate_installed(&self.config, meta, dir) else {
-            return Ok(());
+    /// than one that does not start — unless the operator says otherwise.
+    /// A `force`d start with questions unanswered (DMN-164) records
+    /// that decision in `meta.setup_skipped`, so later starts and restarts —
+    /// the scheduler's, a backup's, an upgrade's — go through without asking
+    /// again; once every question has an answer the flag is cleared, and a
+    /// new required question (from an upgrade, say) stops the start again.
+    ///
+    /// Returns whether `meta` changed and needs saving. Best effort about
+    /// everything else: a manifest or settings file that cannot be read is
+    /// not this check's business, the start itself reports those.
+    fn ensure_setup_complete(
+        &self,
+        meta: &mut AppMeta,
+        dir: &std::path::Path,
+        force: bool,
+    ) -> Result<bool> {
+        let Some(missing) = self.unanswered_setup(meta, dir) else {
+            return Ok(false);
         };
-        let Ok((_, Some(file))) = dockerfile::resolve_installed(meta, &manifest_dir) else {
-            return Ok(());
+        let skip = !missing.is_empty();
+        if skip && !force && !meta.setup_skipped {
+            return Err(anyhow::Error::new(SetupIncomplete {
+                app: meta.display_name().to_string(),
+                settings: missing,
+            }));
+        }
+        if skip && !meta.setup_skipped {
+            info!(app = %meta.id, settings = %missing.join(","), "starting without first-time setup answers");
+        }
+        let changed = meta.setup_skipped != skip;
+        meta.setup_skipped = skip;
+        Ok(changed)
+    }
+
+    /// The `required` setup questions of the app still waiting for an
+    /// answer; `None` when its manifest or settings schema cannot be read.
+    fn unanswered_setup(&self, meta: &AppMeta, dir: &std::path::Path) -> Option<Vec<String>> {
+        use crate::daemon::pkg::{dockerfile, settings};
+        let (manifest_dir, _) = settings::locate_installed(&self.config, meta, dir).ok()?;
+        let (_, file) = dockerfile::resolve_installed(meta, &manifest_dir).ok()?;
+        let Some(file) = file else {
+            // No asc.settings.yaml: nothing to ask.
+            return Some(Vec::new());
         };
         let values = settings::SettingValues::load(&crate::daemon::apps::layout::settings_dir(dir))
             .unwrap_or_default();
-        let missing = file.unanswered_required(&values);
-        if missing.is_empty() {
-            return Ok(());
-        }
-        Err(anyhow::Error::new(SetupIncomplete {
-            app: meta.display_name().to_string(),
-            settings: missing,
-        }))
+        Some(file.unanswered_required(&values))
     }
 
     pub fn stop(&self, ctx: &UserContext, id: &str) -> Result<Outcome> {
@@ -775,13 +805,14 @@ impl AppManager {
         Ok(outcome)
     }
 
-    pub fn restart(&self, ctx: &UserContext, id: &str) -> Result<()> {
+    /// Restart the app; `force` as in [`Self::start`].
+    pub fn restart(&self, ctx: &UserContext, id: &str, force: bool) -> Result<()> {
         let mut meta = self.get_authorized(ctx, id)?;
         let dir = self.store.app_dir(&meta.id)?;
         // Docker restart runs as stop + start so changed settings
         // apply through the recreate in `apply_settings` — restart is
         // the documented way to pick up new setting values.
-        self.ensure_setup_complete(&meta, &dir)?;
+        let setup_changed = self.ensure_setup_complete(&mut meta, &dir, force)?;
         let mut refreshed = false;
         if matches!(meta.runtime, meta::Runtime::Docker { .. }) {
             driver::for_runtime(&meta.runtime, &self.config.docker).stop(&meta, &dir)?;
@@ -790,7 +821,7 @@ impl AppManager {
         } else {
             driver::for_runtime(&meta.runtime, &self.config.docker).restart(&meta, &dir)?;
         }
-        if refreshed || meta.desired_state != DesiredState::Running {
+        if refreshed || setup_changed || meta.desired_state != DesiredState::Running {
             meta.desired_state = DesiredState::Running;
             self.store.save(&meta)?;
         }
@@ -970,6 +1001,7 @@ mod tests {
                 package: None,
                 install_method: None,
                 desired_state: DesiredState::Stopped,
+                setup_skipped: false,
                 quota: None,
                 runtime: Runtime::Process {
                     command: "true".into(),
@@ -1093,6 +1125,7 @@ mod tests {
                 package: None,
                 install_method: None,
                 desired_state: DesiredState::Stopped,
+                setup_skipped: false,
                 quota: None,
                 runtime: Runtime::Process {
                     command: "sleep".into(),
@@ -1100,7 +1133,7 @@ mod tests {
                 },
             })
             .unwrap();
-        mgr.start(&user(1000), "sleeper").unwrap();
+        mgr.start(&user(1000), "sleeper", false).unwrap();
 
         let stats = mgr.stats(&user(1000)).unwrap();
         let sleeper = stats.iter().find(|s| s.meta.id == "sleeper").unwrap();
@@ -1111,6 +1144,101 @@ mod tests {
         assert!(stopped.cpu_percent.is_none());
 
         mgr.stop(&user(1000), "sleeper").unwrap();
+    }
+
+    /// A process app whose package asks one required setup question
+    /// (`admin_password`) with no answer yet.
+    fn install_with_setup(mgr: &AppManager, id: &str) -> std::path::PathBuf {
+        mgr.store()
+            .save(&AppMeta {
+                id: id.into(),
+                uuid: None,
+                name: id.into(),
+                custom_name: None,
+                owner: Owner {
+                    uid: 1000,
+                    name: "user1000".into(),
+                },
+                version: None,
+                source: None,
+                branch: None,
+                repo_path: None,
+                package: None,
+                install_method: None,
+                desired_state: DesiredState::Stopped,
+                setup_skipped: false,
+                quota: None,
+                runtime: Runtime::Process {
+                    command: "sleep".into(),
+                    args: vec!["30".into()],
+                },
+            })
+            .unwrap();
+        let dir = mgr.store().app_dir(id).unwrap();
+        let repo = dir.join("repository");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(crate::daemon::pkg::manifest::Manifest::FILE),
+            format!(
+                "name: {id}\nversion: '1.0.0'\ntype: docker\nsettings: {}\nruntime:\n  image: {id}:1\n",
+                crate::daemon::pkg::settings::SettingsFile::FILE
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join(crate::daemon::pkg::settings::SettingsFile::FILE),
+            "settings:\n  - { key: admin_password, type: secret, env: ADMIN_PASSWORD }\n\
+             setup:\n  questions:\n    - { setting: admin_password, required: true }\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn answer_setup(dir: &std::path::Path, value: serde_json::Value) {
+        let settings = layout::settings_dir(dir);
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join(crate::daemon::pkg::settings::SettingValues::FILE),
+            serde_json::json!({ "admin_password": value }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn forced_start_skips_setup_and_remembers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager(tmp.path());
+        let dir = install_with_setup(&mgr, "game");
+        let ctx = user(1000);
+
+        // Unanswered required question: a plain start is refused, typed.
+        let err = mgr.start(&ctx, "game", false).unwrap_err();
+        let pending = err.downcast_ref::<SetupIncomplete>().unwrap();
+        assert_eq!(pending.settings, ["admin_password"]);
+        assert!(!mgr.get_authorized(&ctx, "game").unwrap().setup_skipped);
+
+        // Forced: starts, and the decision lands in meta.json.
+        assert_eq!(mgr.start(&ctx, "game", true).unwrap(), Outcome::Done);
+        let meta = mgr.get_authorized(&ctx, "game").unwrap();
+        assert!(meta.setup_skipped);
+        assert_eq!(meta.desired_state, DesiredState::Running);
+
+        // Remembered: later restarts and starts need no force.
+        mgr.restart(&ctx, "game", false).unwrap();
+        mgr.stop(&ctx, "game").unwrap();
+        assert_eq!(mgr.start(&ctx, "game", false).unwrap(), Outcome::Done);
+        mgr.stop(&ctx, "game").unwrap();
+
+        // Answered: the flag is cleared on the next start...
+        answer_setup(&dir, serde_json::json!("hunter2"));
+        mgr.start(&ctx, "game", false).unwrap();
+        assert!(!mgr.get_authorized(&ctx, "game").unwrap().setup_skipped);
+        mgr.stop(&ctx, "game").unwrap();
+
+        // ...so a question that loses its answer gates the start again.
+        answer_setup(&dir, serde_json::json!("  "));
+        let err = mgr.start(&ctx, "game", false).unwrap_err();
+        assert!(err.downcast_ref::<SetupIncomplete>().is_some());
     }
 
     #[test]

@@ -1547,12 +1547,21 @@ async fn rename_app(
     Ok(Json(to_json(&status)).into_response())
 }
 
+/// `?force=true` on start/restart: go ahead even though required
+/// first-time setup questions are unanswered (DMN-164).
+#[derive(Deserialize)]
+struct ForceQuery {
+    #[serde(default)]
+    force: bool,
+}
+
 async fn start_app(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
+    Query(query): Query<ForceQuery>,
 ) -> Result<Response, ApiError> {
-    let outcome = state.start(ctx, id).await?;
+    let outcome = state.start(ctx, id, query.force).await?;
     Ok(Json(serde_json::json!({
         "already_running": outcome == Outcome::AlreadyInState
     }))
@@ -1645,8 +1654,9 @@ async fn restart_app(
     State(state): State<Arc<ApiState>>,
     Extension(ctx): Extension<UserContext>,
     Path(id): Path<String>,
+    Query(query): Query<ForceQuery>,
 ) -> Result<Response, ApiError> {
-    state.restart(ctx, id).await?;
+    state.restart(ctx, id, query.force).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

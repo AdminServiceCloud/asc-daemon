@@ -111,7 +111,7 @@ fn install_from_a_bare_compose_file_runs_the_project() {
         let _ = manager.remove(&ctx, "demo");
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        manager.start(&ctx, "demo").unwrap();
+        manager.start(&ctx, "demo", false).unwrap();
         assert_eq!(
             manager.status(&ctx, "demo").unwrap().state,
             RuntimeState::Running

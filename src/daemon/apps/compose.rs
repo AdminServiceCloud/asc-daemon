@@ -188,6 +188,7 @@ mod tests {
             package: None,
             install_method: None,
             desired_state: DesiredState::Stopped,
+            setup_skipped: false,
             quota: None,
             runtime: Runtime::Compose {
                 project: "asc-demo".into(),

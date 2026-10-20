@@ -621,9 +621,10 @@ impl Daemon {
         })
     }
 
-    /// `true` when the app was already running (idempotent call).
-    pub fn start(&self, id: &str) -> Result<bool> {
-        let json = self.request(Method::POST, &format!("/v1/apps/{id}/start"), None)?;
+    /// `true` when the app was already running (idempotent call). `force`
+    /// starts it even without answers to its required setup questions.
+    pub fn start(&self, id: &str, force: bool) -> Result<bool> {
+        let json = self.request(Method::POST, &lifecycle_path(id, "start", force), None)?;
         Ok(json["already_running"].as_bool().unwrap_or(false))
     }
 
@@ -639,8 +640,9 @@ impl Daemon {
         Ok(json["already_stopped"].as_bool().unwrap_or(false))
     }
 
-    pub fn restart(&self, id: &str) -> Result<()> {
-        self.request(Method::POST, &format!("/v1/apps/{id}/restart"), None)?;
+    /// `force` as in [`Self::start`].
+    pub fn restart(&self, id: &str, force: bool) -> Result<()> {
+        self.request(Method::POST, &lifecycle_path(id, "restart", force), None)?;
         Ok(())
     }
 
@@ -997,6 +999,13 @@ impl Daemon {
     }
 }
 
+/// `/v1/apps/{id}/<action>`, with `?force=true` for a forced start or
+/// restart (DMN-164).
+fn lifecycle_path(id: &str, action: &str, force: bool) -> String {
+    let query = if force { "?force=true" } else { "" };
+    format!("/v1/apps/{id}/{action}{query}")
+}
+
 /// The `supported` methods of a `POST /v1/packages/inspect` answer. A kind
 /// this CLI does not know (a newer daemon) is skipped rather than failing
 /// the whole answer.
@@ -1104,6 +1113,19 @@ fn typed_error(json: &Value) -> anyhow::Error {
             package: choice["package"].as_str().unwrap_or_default().to_string(),
             image: choice["image"].as_str().unwrap_or_default().to_string(),
             build: choice["build"].as_str().unwrap_or_default().to_string(),
+        });
+    }
+    if let Some(pending) = json.get("setup_incomplete") {
+        return anyhow::Error::new(crate::daemon::apps::SetupIncomplete {
+            app: pending["app"].as_str().unwrap_or_default().to_string(),
+            settings: pending["settings"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
     match json.get("error").and_then(|e| e.as_str()) {

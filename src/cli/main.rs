@@ -15,7 +15,8 @@ mod wireguard;
 use asc_daemon::daemon::apps::compose_services::ServiceAction as ComposeServiceAction;
 use asc_daemon::daemon::apps::meta::Runtime;
 use asc_daemon::daemon::apps::{
-    AppManager, AppStats, AppStatus, ImageSource, Outcome, RuntimeState, UserContext,
+    AppManager, AppStats, AppStatus, ImageSource, Outcome, RuntimeState, SetupIncomplete,
+    UserContext,
 };
 use asc_daemon::daemon::client::{self, RemoteApp};
 use asc_daemon::daemon::config::{Config, TlsMode};
@@ -706,6 +707,10 @@ enum AppAction {
         /// Start one service of a docker compose app only
         #[arg(long)]
         service: Option<String>,
+        /// Start even though required first-time setup questions are
+        /// unanswered (remembered until they all get an answer)
+        #[arg(long)]
+        force: bool,
     },
     Stop {
         id: String,
@@ -726,6 +731,10 @@ enum AppAction {
         /// Restart one service of a docker compose app only
         #[arg(long)]
         service: Option<String>,
+        /// Restart even though required first-time setup questions are
+        /// unanswered (remembered until they all get an answer)
+        #[arg(long)]
+        force: bool,
     },
     /// Show app logs
     Logs {
@@ -1116,6 +1125,31 @@ fn with_spinner<T>(op: impl FnOnce() -> T) -> T {
         spinner.finish();
     }
     result
+}
+
+/// Run a start/restart (`op(force)`); when it is refused over unanswered
+/// first-time setup questions and a human is at the terminal, show why and
+/// offer to go ahead anyway — the CLI's counterpart of the platform's
+/// "start anyway" dialog (DMN-164). Scripts get the error as is and
+/// pass `--force` themselves.
+fn with_setup_override<T>(
+    force: bool,
+    op: impl Fn(bool) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let err = match op(force) {
+        Err(err) if !force && err.downcast_ref::<SetupIncomplete>().is_some() => err,
+        other => return other,
+    };
+    // SAFETY: isatty() has no preconditions.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Err(err);
+    }
+    eprintln!("{err:#}");
+    let answer = read_line(t(Msg::AppSetupForcePrompt))?;
+    if !matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
+        return Err(err);
+    }
+    op(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2721,7 +2755,7 @@ fn service_target(action: &AppAction) -> Option<(&str, &str, ComposeServiceActio
     let (id, service, op) = match action {
         AppAction::Start { id, service, .. } => (id, service, ComposeServiceAction::Start),
         AppAction::Stop { id, service } => (id, service, ComposeServiceAction::Stop),
-        AppAction::Restart { id, service } => (id, service, ComposeServiceAction::Restart),
+        AppAction::Restart { id, service, .. } => (id, service, ComposeServiceAction::Restart),
         AppAction::Kill { id, service } => (id, service, ComposeServiceAction::Kill),
         _ => return None,
     };
@@ -2858,8 +2892,10 @@ fn app_cmd_daemon(
             }
             println!("  {}", tf(Msg::OwnerLabel, &app.owner));
         }
-        AppAction::Start { id, detach, .. } => {
-            match with_spinner(|| daemon.start(&id))? {
+        AppAction::Start {
+            id, detach, force, ..
+        } => {
+            match with_setup_override(force, |force| with_spinner(|| daemon.start(&id, force)))? {
                 false => println!("{}", tf(Msg::AppStarted, &id)),
                 true => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
             }
@@ -2886,8 +2922,8 @@ fn app_cmd_daemon(
             false => println!("{}", tf(Msg::AppKilled, &id)),
             true => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
-        AppAction::Restart { id, .. } => {
-            with_spinner(|| daemon.restart(&id))?;
+        AppAction::Restart { id, force, .. } => {
+            with_setup_override(force, |force| with_spinner(|| daemon.restart(&id, force)))?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
         AppAction::Logs {
@@ -2999,9 +3035,13 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             service,
             no_pull,
         } => rebuild_cmd(&app, service.as_deref(), no_pull, config)?,
-        AppAction::Start { id, detach, .. } => {
+        AppAction::Start {
+            id, detach, force, ..
+        } => {
             confirm_start_resources(&manager, &ctx, &id, config)?;
-            match with_spinner(|| manager.start(&ctx, &id))? {
+            match with_setup_override(force, |force| {
+                with_spinner(|| manager.start(&ctx, &id, force))
+            })? {
                 Outcome::Done => println!("{}", tf(Msg::AppStarted, &id)),
                 Outcome::AlreadyInState => println!("{}", tf(Msg::AppAlreadyRunning, &id)),
             }
@@ -3029,8 +3069,10 @@ fn app_cmd_local(action: AppAction, config: &Config) -> anyhow::Result<()> {
             Outcome::Done => println!("{}", tf(Msg::AppKilled, &id)),
             Outcome::AlreadyInState => println!("{}", tf(Msg::AppNotRunning, &id)),
         },
-        AppAction::Restart { id, .. } => {
-            with_spinner(|| manager.restart(&ctx, &id))?;
+        AppAction::Restart { id, force, .. } => {
+            with_setup_override(force, |force| {
+                with_spinner(|| manager.restart(&ctx, &id, force))
+            })?;
             println!("{}", tf(Msg::AppRestarted, &id));
         }
         AppAction::Logs {

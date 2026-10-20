@@ -228,6 +228,7 @@ pub fn clone_app_cancellable(
         package: Some(source.package.clone().unwrap_or_else(|| source.id.clone())),
         install_method: source.install_method.clone(),
         desired_state: DesiredState::Stopped,
+        setup_skipped: false,
         quota,
         runtime,
     };

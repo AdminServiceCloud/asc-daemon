@@ -895,6 +895,13 @@ message RenameAppResponse {
 
 message StartAppRequest {
   string id = 1;
+  // DMN-164: start even though required first-time setup questions
+  // (asc.settings.yaml `setup:`) are unanswered. Without it such a start
+  // fails with FAILED_PRECONDITION and trailers
+  // `asc-error-reason: SETUP_INCOMPLETE` + `asc-setup-settings: <k1,k2>`.
+  // A forced start that skips questions is remembered in meta.json, so
+  // later starts and restarts of the app do not need it again.
+  bool force = 2;
 }
 
 message StartAppResponse {
@@ -921,6 +928,8 @@ message KillAppResponse {
 
 message RestartAppRequest {
   string id = 1;
+  // DMN-164: same as StartAppRequest.force.
+  bool force = 2;
 }
 
 message RestartAppResponse {}

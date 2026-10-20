@@ -67,6 +67,7 @@ fn seed_app(store: &AppStore, id: &str) -> AppMeta {
         package: None,
         install_method: None,
         desired_state: DesiredState::Stopped,
+        setup_skipped: false,
         quota: None,
         runtime: Runtime::Process {
             command: "/bin/sh".into(),

@@ -669,7 +669,7 @@ pub fn execute(config: &Config, job: &Job) -> Outcome {
             Ok(ok_output("reboot requested"))
         }
         JobAction::AppStart { app } => {
-            let outcome = manager.start(&ctx, app)?;
+            let outcome = manager.start(&ctx, app, false)?;
             Ok(ok_output(format!("{outcome:?}")))
         }
         JobAction::AppStop { app } => {
@@ -677,7 +677,7 @@ pub fn execute(config: &Config, job: &Job) -> Outcome {
             Ok(ok_output(format!("{outcome:?}")))
         }
         JobAction::AppRestart { app } => {
-            manager.restart(&ctx, app)?;
+            manager.restart(&ctx, app, false)?;
             Ok(ok_output("restarted"))
         }
         JobAction::AppUpdate { app } => {
@@ -690,7 +690,7 @@ pub fn execute(config: &Config, job: &Job) -> Outcome {
             // Bring the app back whatever the upgrade did: a failed upgrade
             // leaves the previous version in place, which should keep serving.
             let restarted = if was_running {
-                manager.start(&ctx, &status.meta.id).map(|_| ())
+                manager.start(&ctx, &status.meta.id, false).map(|_| ())
             } else {
                 Ok(())
             };

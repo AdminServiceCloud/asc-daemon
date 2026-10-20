@@ -427,7 +427,7 @@ impl McpServer {
                 self.backend
                     .call(move |daemon| {
                         daemon
-                            .start(&app)
+                            .start(&app, false)
                             .map(|already| json!({ "already_running": already }))
                     })
                     .await
@@ -443,7 +443,11 @@ impl McpServer {
             }
             "restart" => {
                 self.backend
-                    .call(move |daemon| daemon.restart(&app).map(|()| json!({ "restarted": true })))
+                    .call(move |daemon| {
+                        daemon
+                            .restart(&app, false)
+                            .map(|()| json!({ "restarted": true }))
+                    })
                     .await
             }
             _ => return tool_error("action must be 'start', 'stop', or 'restart'"),

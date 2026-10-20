@@ -146,7 +146,7 @@ async fn services_list_control_logs_settings_and_console() {
         assert_eq!(names, ["web", "worker"]);
         assert!(app.compose_services.iter().all(|s| s.state == "created"));
 
-        state.start(root(), id.clone()).await.unwrap();
+        state.start(root(), id.clone(), false).await.unwrap();
         let services = state
             .list_app_services(root(), id.clone(), None, true)
             .await

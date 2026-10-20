@@ -573,6 +573,7 @@ fn settings_drift_recreates_the_container() {
         package: None,
         install_method: None,
         desired_state: DesiredState::Stopped,
+        setup_skipped: false,
         quota: None,
         runtime: Runtime::Docker {
             container: "asc-web".into(),
@@ -839,6 +840,7 @@ fn install_docker_app(config: &asc_daemon::daemon::config::Config, id: &str, ima
             package: None,
             install_method: None,
             desired_state: DesiredState::Stopped,
+            setup_skipped: false,
             quota: None,
             runtime: Runtime::Docker {
                 container: format!("asc-{id}"),
@@ -993,6 +995,7 @@ async fn prune_volumes_protects_a_declared_named_volume() {
             package: None,
             install_method: None,
             desired_state: DesiredState::Stopped,
+            setup_skipped: false,
             quota: None,
             runtime: Runtime::Docker {
                 container: "asc-web".into(),

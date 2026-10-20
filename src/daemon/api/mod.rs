@@ -1092,7 +1092,7 @@ impl ApiState {
             if let Some(report) = report {
                 report.line(&format!("restarting '{}' onto the new image", meta.id));
             }
-            self.manager.restart(ctx, &meta.id)?;
+            self.manager.restart(ctx, &meta.id, false)?;
         }
         info!(app = %meta.id, image = %outcome.image, changed = outcome.changed, restarted, "app image re-pulled");
         Ok((outcome, restarted))
@@ -1672,8 +1672,14 @@ impl ApiState {
             .await
     }
 
-    pub async fn start(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {
-        self.blocking(move |s| s.manager.start(&ctx, &id)).await
+    pub async fn start(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        force: bool,
+    ) -> Result<Outcome> {
+        self.blocking(move |s| s.manager.start(&ctx, &id, force))
+            .await
     }
 
     pub async fn stop(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<Outcome> {
@@ -1684,8 +1690,14 @@ impl ApiState {
         self.blocking(move |s| s.manager.kill(&ctx, &id)).await
     }
 
-    pub async fn restart(self: &Arc<Self>, ctx: UserContext, id: String) -> Result<()> {
-        self.blocking(move |s| s.manager.restart(&ctx, &id)).await
+    pub async fn restart(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        id: String,
+        force: bool,
+    ) -> Result<()> {
+        self.blocking(move |s| s.manager.restart(&ctx, &id, force))
+            .await
     }
 
     /// The app's log tail — or, with `service`, one service of a docker

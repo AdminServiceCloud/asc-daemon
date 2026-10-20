@@ -71,6 +71,13 @@ pub struct AppMeta {
     /// What the app should be doing; enforced after daemon restart/reboot.
     #[serde(default)]
     pub desired_state: DesiredState,
+    /// The operator started the app with required first-time setup
+    /// questions still unanswered (a forced start, DMN-164). Later
+    /// starts and restarts — the scheduler's, a backup's or an upgrade's
+    /// included — then skip the setup check instead of asking again; it is
+    /// cleared once every required question has an answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub setup_skipped: bool,
     /// Resource quota from asc.settings.yaml, normalized at
     /// install/upgrade time. `None` = unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -348,6 +355,7 @@ mod tests {
             package: None,
             install_method: None,
             desired_state: DesiredState::Running,
+            setup_skipped: false,
             quota: Some(Quota {
                 cpu_cores: Some(1.5),
                 ram_bytes: Some(512 << 20),

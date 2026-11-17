@@ -82,6 +82,25 @@ async fn handle(
     cols: u16,
     rows: u16,
 ) {
+    // Container-scoped session (DMN-166): no app behind it, so no meta to
+    // load — the container id was resolved when the token was issued.
+    if let Some(container) = grant.container.as_deref() {
+        let result = match grant.session {
+            SessionType::Logs => {
+                stream_docker_logs(socket, &state.config.docker, container, tail).await
+            }
+            SessionType::Exec => {
+                exec_docker(socket, &state, container, &grant.command, cols, rows).await
+            }
+            SessionType::Attach => {
+                close_with_error(socket, "attach is not supported for containers").await
+            }
+        };
+        if let Err(err) = result {
+            debug!(container = %container, error = %format!("{err:#}"), "console session ended with error");
+        }
+        return;
+    }
     let (meta, dir) = match load_app(&state, &grant.app_id) {
         Ok(pair) => pair,
         Err(err) => {

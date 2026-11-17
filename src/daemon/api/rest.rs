@@ -109,6 +109,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
         // Lifecycle control over non-ASC containers and compose stacks
         // — ASC apps' own containers are refused with 409.
         .route("/v1/docker/control", post(control_container))
+        // Logs and console of any container, ASC-owned or not (DMN-166).
+        .route("/v1/docker/containers/{id}/logs", get(container_logs))
+        .route(
+            "/v1/docker/containers/{id}/console-token",
+            post(container_console_token),
+        )
         // Registry sources & credentials, pushed by the
         // platform — see docs/custom-registry.md, docs/package-manager.md.
         .route("/v1/sources", get(list_sources).put(replace_sources))
@@ -1211,6 +1217,62 @@ async fn control_container(
     };
     let affected = state.control_container(ctx, target, action).await?;
     Ok(Json(serde_json::json!({ "affected": affected })).into_response())
+}
+
+#[derive(Deserialize)]
+struct ContainerLogsQuery {
+    #[serde(default)]
+    tail: Option<usize>,
+    #[serde(default)]
+    timestamps: bool,
+}
+
+/// Last lines of one container's logs, any container on the host.
+/// Root context only.
+async fn container_logs(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    Query(query): Query<ContainerLogsQuery>,
+) -> Result<Response, ApiError> {
+    let logs = state
+        .container_logs(ctx, id, query.tail.unwrap_or(100), query.timestamps)
+        .await?;
+    Ok(Json(serde_json::json!({ "logs": logs })).into_response())
+}
+
+#[derive(Deserialize)]
+struct ContainerConsoleTokenBody {
+    /// "logs" | "exec".
+    session: String,
+    /// EXEC only: the command to run. Empty asks the daemon to probe a
+    /// shell.
+    #[serde(default)]
+    command: Vec<String>,
+}
+
+/// One-time console token bound to one container. Root context only.
+async fn container_console_token(
+    State(state): State<Arc<ApiState>>,
+    Extension(ctx): Extension<UserContext>,
+    Path(id): Path<String>,
+    Json(body): Json<ContainerConsoleTokenBody>,
+) -> Result<Response, ApiError> {
+    let session = match body.session.as_str() {
+        "logs" => SessionType::Logs,
+        "exec" => SessionType::Exec,
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "session must be 'logs' or 'exec'" })),
+            )
+                .into_response());
+        }
+    };
+    let (token, expires_at) = state
+        .issue_container_console_token(ctx, id, session, body.command)
+        .await?;
+    Ok(Json(serde_json::json!({ "token": token, "expires_at": expires_at })).into_response())
 }
 
 /// Resource consumption per app, like `docker stats --no-stream`. Costs the

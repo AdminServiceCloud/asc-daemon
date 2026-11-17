@@ -2284,6 +2284,48 @@ service DockerService {
   // start-like actions walk the project oldest-first, stop-like ones
   // newest-first.
   rpc ControlContainer(ControlContainerRequest) returns (ControlContainerResponse);
+  // Last lines of one container's logs (stdout+stderr), any container on the
+  // host — including ones ASC does not own (a compose project started by
+  // hand). Root context only, like the rest of the Docker inventory.
+  // NOT_FOUND for an unknown container. Capability "docker.console".
+  rpc GetContainerLogs(GetContainerLogsRequest) returns (GetContainerLogsResponse);
+  // One-time token for a WebSocket console session on one container (the
+  // same `/v1/console` endpoint AppService.IssueConsoleToken feeds): LOGS
+  // follows the container's log, EXEC opens a shell (or `command`) inside it.
+  // ATTACH is INVALID_ARGUMENT — a foreign container's stdin is not ours to
+  // share. NOT_FOUND for an unknown container, FAILED_PRECONDITION for EXEC
+  // into a container that is not running. Root context only. Capability
+  // "docker.console".
+  rpc IssueContainerConsoleToken(IssueContainerConsoleTokenRequest) returns (IssueContainerConsoleTokenResponse);
+}
+
+message GetContainerLogsRequest {
+  // Full id, unambiguous id prefix, or name.
+  string container = 1;
+  // Number of trailing lines; 0 means the server default (100).
+  uint32 tail = 2;
+  // Prefix each line with an RFC3339Nano/UTC timestamp and a space.
+  bool timestamps = 3;
+}
+
+message GetContainerLogsResponse {
+  string logs = 1;
+}
+
+message IssueContainerConsoleTokenRequest {
+  // Full id, unambiguous id prefix, or name.
+  string container = 1;
+  // LOGS or EXEC.
+  ConsoleSessionType session = 2;
+  // EXEC only: the command to run. Empty asks the daemon to probe a shell
+  // (/bin/bash, falling back to /bin/sh).
+  repeated string command = 3;
+}
+
+message IssueContainerConsoleTokenResponse {
+  string token = 1;
+  // Unix seconds when the token expires (~30s TTL, single use).
+  int64 expires_at = 2;
 }
 
 enum ContainerAction {

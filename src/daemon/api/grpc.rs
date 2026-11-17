@@ -2888,6 +2888,47 @@ impl DockerService for Grpc {
             .map_err(to_status)?;
         Ok(Response::new(pb::ControlContainerResponse { affected }))
     }
+
+    async fn get_container_logs(
+        &self,
+        request: Request<pb::GetContainerLogsRequest>,
+    ) -> Result<Response<pb::GetContainerLogsResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let tail = if req.tail == 0 {
+            100
+        } else {
+            req.tail as usize
+        };
+        let logs = self
+            .0
+            .container_logs(ctx, req.container, tail, req.timestamps)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::GetContainerLogsResponse { logs }))
+    }
+
+    async fn issue_container_console_token(
+        &self,
+        request: Request<pb::IssueContainerConsoleTokenRequest>,
+    ) -> Result<Response<pb::IssueContainerConsoleTokenResponse>, Status> {
+        let ctx = ctx_of(&request);
+        let req = request.into_inner();
+        let session = match pb::ConsoleSessionType::try_from(req.session) {
+            Ok(pb::ConsoleSessionType::Logs) => SessionType::Logs,
+            Ok(pb::ConsoleSessionType::Exec) => SessionType::Exec,
+            _ => return Err(Status::invalid_argument("session must be LOGS or EXEC")),
+        };
+        let (token, expires_at) = self
+            .0
+            .issue_container_console_token(ctx, req.container, session, req.command)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::IssueContainerConsoleTokenResponse {
+            token,
+            expires_at,
+        }))
+    }
 }
 
 /// `pb::ContainerAction` -> `super::ContainerAction`, refusing the zero value.

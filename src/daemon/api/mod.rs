@@ -109,6 +109,9 @@ pub const CAPABILITIES: &[&str] = &[
     // App.compose_services, GetAppLogsRequest.service,
     // IssueConsoleTokenRequest.service.
     "app.services",
+    // DockerService.GetContainerLogs / IssueContainerConsoleToken: logs and
+    // console of any container, including ones ASC does not own.
+    "docker.console",
 ];
 
 /// The full capability list for this host, including "app.compose" when the
@@ -2520,6 +2523,85 @@ impl ApiState {
             Ok(affected)
         })
         .await
+    }
+
+    /// Resolve one container reference (full id, unambiguous id prefix or
+    /// name) against the Engine's full list, the same rules
+    /// [`Self::control_container`] uses. NOT_FOUND / INVALID_ARGUMENT as
+    /// typed module errors so gRPC maps them precisely.
+    fn resolve_container(&self, wanted: &str) -> Result<docker::ContainerInfo> {
+        let wanted = wanted.trim().trim_start_matches('/');
+        if wanted.is_empty() {
+            return Err(crate::daemon::exec::invalid("container must be set"));
+        }
+        let mut containers = docker::list_containers(&self.config.docker, true, false)?;
+        if let Some(at) = containers
+            .iter()
+            .position(|c| c.id == wanted || c.names.iter().any(|n| n == wanted))
+        {
+            return Ok(containers.swap_remove(at));
+        }
+        let mut by_prefix = containers.into_iter().filter(|c| c.id.starts_with(wanted));
+        match (by_prefix.next(), by_prefix.next()) {
+            (Some(only), None) => Ok(only),
+            (None, _) => Err(crate::daemon::exec::not_found(format!(
+                "container '{wanted}' not found"
+            ))),
+            (Some(_), Some(_)) => Err(crate::daemon::exec::invalid(format!(
+                "ambiguous container id prefix '{wanted}'"
+            ))),
+        }
+    }
+
+    /// Last `tail` lines of one container's logs (DMN-166): any container on
+    /// the host, ASC-owned or not. Root context only, like the rest of the
+    /// Docker inventory.
+    pub async fn container_logs(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        container: String,
+        tail: usize,
+        timestamps: bool,
+    ) -> Result<String> {
+        self.blocking(move |s| {
+            users::require_root(&ctx)?;
+            let info = s.resolve_container(&container)?;
+            docker::logs_tail(&s.config.docker, &info.id, tail, timestamps)
+        })
+        .await
+    }
+
+    /// One-time console token bound to one container (DMN-166): LOGS
+    /// follows its log, EXEC opens a shell in it. ATTACH is refused — a
+    /// foreign container's stdin is not shared through the attach hub, which
+    /// is keyed by app. Root context only.
+    pub async fn issue_container_console_token(
+        self: &Arc<Self>,
+        ctx: UserContext,
+        container: String,
+        session: console::SessionType,
+        command: Vec<String>,
+    ) -> Result<(String, i64)> {
+        if session == console::SessionType::Attach {
+            return Err(crate::daemon::exec::invalid(
+                "session must be LOGS or EXEC for a container",
+            ));
+        }
+        let info = self
+            .blocking(move |s| {
+                users::require_root(&ctx)?;
+                s.resolve_container(&container)
+            })
+            .await?;
+        if session == console::SessionType::Exec && info.state != "running" {
+            return Err(crate::daemon::exec::precondition(format!(
+                "container '{}' is not running",
+                display_name(&info)
+            )));
+        }
+        Ok(self
+            .console_tokens
+            .issue_container(&info.id, session, command))
     }
 
     /// Every image on the host, ASC-owned or not, with the

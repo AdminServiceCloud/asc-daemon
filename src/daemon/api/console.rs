@@ -30,6 +30,10 @@ pub struct ConsoleGrant {
     /// Docker compose apps only: the one service the session is scoped to
     /// (checked when the token was issued).
     pub service: Option<String>,
+    /// Container-scoped session (DockerService.IssueContainerConsoleToken):
+    /// the container id the session runs against, resolved when the token
+    /// was issued. `app_id` is empty for these grants.
+    pub container: Option<String>,
 }
 
 struct Entry {
@@ -54,6 +58,33 @@ impl ConsoleTokens {
         command: Vec<String>,
         service: Option<String>,
     ) -> (String, i64) {
+        self.insert(ConsoleGrant {
+            app_id: app_id.to_string(),
+            session,
+            command,
+            service,
+            container: None,
+        })
+    }
+
+    /// Issue a token for a session on one container rather than an app —
+    /// any container on the host, ASC-owned or not (DMN-166).
+    pub fn issue_container(
+        &self,
+        container: &str,
+        session: SessionType,
+        command: Vec<String>,
+    ) -> (String, i64) {
+        self.insert(ConsoleGrant {
+            app_id: String::new(),
+            session,
+            command,
+            service: None,
+            container: Some(container.to_string()),
+        })
+    }
+
+    fn insert(&self, grant: ConsoleGrant) -> (String, i64) {
         let token = random_hex(32);
         let expires_at = (SystemTime::now() + TOKEN_TTL)
             .duration_since(UNIX_EPOCH)
@@ -64,12 +95,7 @@ impl ConsoleTokens {
         entries.insert(
             token.clone(),
             Entry {
-                grant: ConsoleGrant {
-                    app_id: app_id.to_string(),
-                    session,
-                    command,
-                    service,
-                },
+                grant,
                 expires: Instant::now() + TOKEN_TTL,
             },
         );
@@ -136,6 +162,17 @@ mod tests {
         assert_eq!(grant.session, SessionType::Exec);
         assert_eq!(grant.command, vec!["/bin/sh", "-c", "ls"]);
         assert_eq!(grant.service.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn container_grant_has_no_app() {
+        let tokens = ConsoleTokens::default();
+        let (token, _) = tokens.issue_container("abc123", SessionType::Exec, Vec::new());
+        let grant = tokens.consume(&token).expect("first use works");
+        assert_eq!(grant.container.as_deref(), Some("abc123"));
+        assert!(grant.app_id.is_empty());
+        assert!(grant.service.is_none());
+        assert!(tokens.consume(&token).is_none(), "second use must fail");
     }
 
     #[test]
